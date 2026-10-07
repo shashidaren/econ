@@ -20,13 +20,13 @@ if [ "$(id -u)" -ne 0 ]; then
   exit 1
 fi
 
-echo "==> [1/4] Installing system packages (python3 only — the app is stdlib-pure)"
+echo "==> [1/4] Installing system packages (python3 + curl — the app is stdlib-pure)"
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -y
-apt-get install -y --no-install-recommends python3 ca-certificates
+apt-get install -y --no-install-recommends python3 ca-certificates curl
 
 echo "==> [2/4] Smoke test"
-python3 -c "import sys; sys.path.insert(0, '$APP_DIR/dashboard'); import config, render, charts; print('modules import OK')"
+python3 -c "import sys; sys.path.insert(0, '$APP_DIR/dashboard'); import config, render, charts, sources, app; print('modules import OK')"
 
 echo "==> [3/4] Installing systemd unit (port $PORT, dir $APP_DIR)"
 sed -e "s|__APP_DIR__|$APP_DIR|g" -e "s|__PORT__|$PORT|g" \

@@ -28,7 +28,12 @@ _WB = {
                           ("United Kingdom", "GB", "1.1"), ("India", "IN", "6.7"),
                           ("Germany", "DE", "-0.3")],
 }
-_FRED_LEVEL = {"DFF": 4.83, "ECBDFR": 3.50, "T10Y2Y": -0.05, "T10YIE": 2.28}
+_FRED_LEVEL = {
+    "DFF": 4.83, "ECBDFR": 3.50, "T10Y2Y": -0.05, "T10YIE": 2.28,
+    "SP500": 5735.0, "NASDAQ100": 20180.0, "NASDAQCOM": 18150.0,
+    "DJIA": 42140.0, "NIKKEI225": 38900.0, "DCOILWTI": 71.4,
+    "DCOILBRENTEU": 75.2, "PCOPPUSDM": 9450.0, "PWHEAMTUSDM": 248.0,
+}
 
 
 def _seed(text: str) -> int:

@@ -107,12 +107,14 @@ def market_card(q):
         return '<div class="card"><div class="name">…</div>' \
                '<div class="section-empty">awaiting data</div></div>'
     up = (q["chg"] or 0) > 0
+    src = esc(q.get("source") or "stooq")
+    stale = ' · <span class="warn-inline">stale</span>' if q.get("stale") else ""
     return f"""<div class="card">
   <div class="name">{esc(q["name"])}</div>
   <div class="row"><span class="price">{fmt_auto(q["close"])}</span>
   {chg_html(q["chg"], q["chg_pct"])}</div>
   {sparkline(q.get("spark"), up=up)}
-  <div class="meta">as of {esc(q.get("date") or "?")} · stooq</div>
+  <div class="meta">as of {esc(q.get("date") or "?")} · {src}{stale}</div>
 </div>"""
 
 
@@ -150,7 +152,7 @@ def rate_cards(pairs, series_map):
   <div class="row"><span class="price">{fmt_num(latest)}%</span>
   {chg_html(diff, abs(diff) / first * 100 if (diff and first) else 0.0) if diff is not None else ""}</div>
   {sparkline([v for _, v in hist[-90:]])}
-  <div class="meta">FRED {esc(sid)} · window ≈ 90 obs</div>
+  <div class="meta">series {esc(sid)} · window ≈ 90 obs</div>
 </div>""")
     return "".join(out)
 
@@ -159,7 +161,8 @@ def build_page(sections, *, demo=False, generated_at=None, refresh=300,
                errors=None):
     """sections: dict with keys indices, commodities, fx, cpi, gdp,
     policy_pairs, policy_series, curve, breakeven."""
-    errors = errors or []
+    if errors is None:
+        errors = sections.get("errors") or []
     now = generated_at or datetime.now(timezone.utc).astimezone()
     banner = ('<span class="badge demo">DEMO MODE — sample data '
               '(live on the server)</span>' if demo else "")
@@ -171,7 +174,7 @@ def build_page(sections, *, demo=False, generated_at=None, refresh=300,
 </header>"""]
 
     # --- Markets ------------------------------------------------------------
-    body.append('<h2>World indices <span class="src">· stooq, daily close</span></h2>')
+    body.append('<h2>World indices <span class="src">· daily close (Yahoo / FRED / Stooq)</span></h2>')
     if sections["indices"]:
         body.append('<div class="grid">' + "".join(market_card(q) for q in sections["indices"]) + "</div>")
     else:
@@ -201,14 +204,14 @@ def build_page(sections, *, demo=False, generated_at=None, refresh=300,
                 "</div>")
 
     # --- Policy rates --------------------------------------------------------
-    body.append('<h2>Central-bank policy rates <span class="src">· FRED public CSV</span></h2>')
+    body.append('<h2>Central-bank policy rates <span class="src">· FRED / NY Fed / ECB</span></h2>')
     body.append('<div class="grid">' +
                 rate_cards(sections["policy_pairs"], sections["policy_series"]) + "</div>")
 
     # --- Yield curve ---------------------------------------------------------
     sid, title, years = sections["curve_meta"]
     hist = sections["curve"]
-    body.append(f'<h2>Yield curve <span class="src">· FRED {esc(sid)} · last {years}y</span></h2>')
+    body.append(f'<h2>Yield curve <span class="src">· {esc(sid)} · last {years}y</span></h2>')
     if hist:
         vals = [v for _, v in hist]
         latest = next((v for v in reversed(vals) if v is not None), None)
@@ -225,7 +228,7 @@ def build_page(sections, *, demo=False, generated_at=None, refresh=300,
     # --- Breakeven inflation ---------------------------------------------------
     bsid, btitle = sections["breakeven_meta"]
     bhist = sections["breakeven"]
-    body.append(f'<h2>Breakeven inflation <span class="src">· FRED {esc(bsid)}</span></h2>')
+    body.append(f'<h2>Breakeven inflation <span class="src">· {esc(bsid)}</span></h2>')
     if bhist:
         bvals = [v for _, v in bhist]
         latest = next((v for v in reversed(bvals) if v is not None), None)
@@ -240,8 +243,8 @@ def build_page(sections, *, demo=False, generated_at=None, refresh=300,
     if errors:
         warn = "<br><span class='warn-inline'>⚠ source issues: " + esc("; ".join(errors)) + "</span>"
     body.append(f"""<footer>
-Sources: Stooq (quotes) · Frankfurter/ECB (FX) · World Bank (macro aggregates) ·
-FRED public CSV (rates &amp; curve). Data for information only — not investment advice.{warn}
+Sources: Yahoo Finance / FRED / Stooq (quotes) · Frankfurter/ECB (FX) · World Bank (macro aggregates) ·
+FRED / NY Fed / ECB / US Treasury (rates &amp; curve). Data for information only — not investment advice.{warn}
 </footer>""")
 
     return (PAGE.replace("__STYLE__", STYLE)
