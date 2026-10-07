@@ -1,0 +1,12 @@
+# python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# secrets / local env (never commit keys)
+.env
+
+# editor / OS
+*.swp
+.DS_Store
