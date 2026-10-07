@@ -1,0 +1,20 @@
+[Unit]
+Description=econ — self-hosted world-economy dashboard
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=__APP_DIR__
+ExecStart=/usr/bin/python3 __APP_DIR__/dashboard/app.py
+Environment=ECON_PORT=__PORT__
+Environment=PYTHONUNBUFFERED=1
+Restart=always
+RestartSec=5
+# light hardening — plenty for a stdlib-only app with no write needs
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+
+[Install]
+WantedBy=multi-user.target

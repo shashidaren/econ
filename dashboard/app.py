@@ -1,0 +1,234 @@
+#!/usr/bin/env python3
+"""econ dashboard — a self-hosted, glanceable world-economy board.
+
+Python stdlib only (no pip deps). Runs as a systemd service on the LXC.
+
+  ECON_PORT=8080     listen port (default 8080)
+  ECON_HOST=0.0.0.0  bind address
+  ECON_DEMO=1        serve bundled sample data (no network) for previews
+  ECON_REFRESH=300   background cache refresh cadence (seconds)
+
+Endpoints:  /            the dashboard
+            /api/summary data as JSON
+            /healthz     liveness probe
+"""
+
+import json
+import threading
+import time
+import traceback
+from datetime import datetime, timezone
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import urlparse
+
+import config
+import render
+import sources
+
+if config.DEMO:
+    import demo as backend
+else:
+    backend = sources
+
+# ---------------------------------------------------------------------------
+# Cache: key -> {"data": ..., "at": epoch, "ttl": seconds, "err": str | None}
+# ---------------------------------------------------------------------------
+
+CACHE: dict = {}
+LOCK = threading.Lock()
+
+
+def cache_get(key):
+    with LOCK:
+        return CACHE.get(key)
+
+
+def cache_put(key, data, err=None, ttl=600):
+    with LOCK:
+        CACHE[key] = {"data": data, "at": time.time(), "ttl": ttl, "err": err}
+
+
+def cache_valid(entry) -> bool:
+    return bool(entry) and entry.get("data") is not None and \
+        (time.time() - entry["at"]) < entry.get("ttl", 600)
+
+
+def fetch_into_cache(key, fn, ttl):
+    """Run fn() and store result; on failure keep last good data and record err."""
+    try:
+        data = fn()
+        cache_put(key, data, err=None, ttl=ttl)
+        print(f"[cache] {key}: ok ({len(data) if hasattr(data, '__len__') else data})",
+              flush=True)
+    except Exception as exc:  # noqa: BLE001 — one bad source must never kill the board
+        prev = cache_get(key) or {}
+        keep = prev.get("data")
+        cache_put(key, keep, err=f"{type(exc).__name__}: {exc}", ttl=ttl)
+        print(f"[cache] {key}: FAILED {exc} (kept={'stale' if keep else 'nothing'})",
+              flush=True)
+
+
+# ---------------------------------------------------------------------------
+# Fetch registry — everything the board needs, with cache lifetimes
+# ---------------------------------------------------------------------------
+
+def build_registry():
+    reg = []  # (key, fn, ttl)
+
+    for name, sym in config.INDICES + config.COMMODITIES:
+        def make(sym=sym):
+            return lambda: sources.quote_from_history(
+                sym, backend.stooq_history(sym, days=config.SPARK_DAYS))
+        reg.append((f"stooq:{sym}", make(), config.TTL["market"]))
+
+    fx_codes = [c for _, c in config.FX_CURRENCIES]
+
+    def fx_quotes():
+        latest = backend.fx_latest(fx_codes)
+        series = backend.fx_series(fx_codes, days=90)
+        quotes = []
+        for label, code in config.FX_CURRENCIES:
+            rate = latest["rates"].get(code)
+            hist = [v for _, v in series.get(code, [])]
+            if rate is None or len(hist) < 2:
+                continue
+            prev = hist[-2]
+            chg = rate - prev
+            quotes.append({
+                "name": f"{label} ({code})",
+                "close": rate, "chg": chg,
+                "chg_pct": (chg / prev * 100.0) if prev else 0.0,
+                "spark": hist[-60:], "date": latest["date"],
+            })
+        return quotes
+    reg.append(("fx", fx_quotes, config.TTL["fx"]))
+
+    reg.append(("wb_cpi", lambda: backend.worldbank_indicator(
+        config.WB_COUNTRIES, config.WB_CPI), config.TTL["wb"]))
+    reg.append(("wb_gdp", lambda: backend.worldbank_indicator(
+        config.WB_COUNTRIES, config.WB_GDP), config.TTL["wb"]))
+
+    for sid, title in config.FRED_POLICY:
+        reg.append((f"fred:{sid}", lambda s=sid: backend.fred_series(s), config.TTL["fred"]))
+
+    curve_sid, _, curve_years = config.FRED_CURVE
+    reg.append(("fred:curve", lambda s=curve_sid, y=curve_years: backend.fred_series(
+        s, years=y), config.TTL["fred"]))
+    be_sid, _ = config.FRED_BREAKEVEN
+    reg.append(("fred:breakeven", lambda s=be_sid: backend.fred_series(
+        s, years=1), config.TTL["fred"]))
+    return reg
+
+
+REGISTRY = build_registry()
+
+
+# ---------------------------------------------------------------------------
+# Background refresher — keeps the cache warm so page loads are instant
+# ---------------------------------------------------------------------------
+
+def warm_all(force=False):
+    errors = []
+    for key, fn, ttl in REGISTRY:
+        entry = cache_get(key)
+        if not force and cache_valid(entry):
+            continue
+        fetch_into_cache(key, fn, ttl)
+        time.sleep(0.3)  # be polite to the free endpoints
+    return errors
+
+
+def refresher_loop():
+    while True:
+        started = time.time()
+        try:
+            warm_all()
+        except Exception:  # pragma: no cover
+            traceback.print_exc()
+        elapsed = time.time() - started
+        time.sleep(max(30, config.REFRESH_SECONDS - elapsed))
+
+
+# ---------------------------------------------------------------------------
+# Page assembly
+# ---------------------------------------------------------------------------
+
+def get_data(key):
+    entry = cache_get(key)
+    return (entry or {}).get("data")
+
+
+def summary():
+    curve_sid, curve_title, curve_years = config.FRED_CURVE
+    be_sid, be_title = config.FRED_BREAKEVEN
+    policy_series = {sid: get_data(f"fred:{sid}") for sid, _ in config.FRED_POLICY}
+    errors = [f"{k}: {v['err']}" for k, v in CACHE.items() if v.get("err")]
+    return {
+        "indices": [get_data(f"stooq:{s}") for _, s in config.INDICES],
+        "commodities": [get_data(f"stooq:{s}") for _, s in config.COMMODITIES],
+        "fx": get_data("fx") or [],
+        "cpi": get_data("wb_cpi") or [],
+        "gdp": get_data("wb_gdp") or [],
+        "policy_pairs": config.FRED_POLICY,
+        "policy_series": policy_series,
+        "curve": get_data("fred:curve") or [],
+        "curve_meta": (curve_sid, curve_title, curve_years),
+        "breakeven": get_data("fred:breakeven") or [],
+        "breakeven_meta": (be_sid, be_title),
+        "errors": errors[:6],
+    }
+
+
+class Handler(BaseHTTPRequestHandler):
+    server_version = "econ/0.1"
+
+    def log_message(self, fmt, *args):  # quieter logs
+        print(f"[http] {self.address_string()} {fmt % args}", flush=True)
+
+    def _send(self, code, body: bytes, ctype: str):
+        self.send_response(code)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_GET(self):  # noqa: N802 (stdlib naming)
+        path = urlparse(self.path).path
+        try:
+            if path == "/":
+                page = render.build_page(summary(), demo=config.DEMO,
+                                         generated_at=datetime.now(timezone.utc).
+                                         astimezone(),
+                                         refresh=config.REFRESH_SECONDS)
+                self._send(200, page.encode(), "text/html; charset=utf-8")
+            elif path == "/api/summary":
+                s = summary()
+                body = json.dumps(s, default=str, indent=1).encode()
+                self._send(200, body, "application/json")
+            elif path == "/healthz":
+                self._send(200, b"ok\n", "text/plain")
+            else:
+                self._send(404, b"not found\n", "text/plain")
+        except BrokenPipeError:
+            pass
+        except Exception:  # pragma: no cover
+            traceback.print_exc()
+            try:
+                self._send(500, b"internal error\n", "text/plain")
+            except Exception:
+                pass
+
+
+def main():
+    t = threading.Thread(target=refresher_loop, name="refresher", daemon=True)
+    t.start()
+    httpd = ThreadingHTTPServer((config.HOST, config.PORT), Handler)
+    mode = "DEMO (sample data)" if config.DEMO else "LIVE (free public APIs)"
+    print(f"econ dashboard listening on http://{config.HOST}:{config.PORT}  [{mode}]",
+          flush=True)
+    httpd.serve_forever()
+
+
+if __name__ == "__main__":
+    main()
