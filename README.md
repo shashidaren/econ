@@ -13,27 +13,34 @@ and the session log. It is updated on every change session.
 ## Quick start (on the server)
 
 ```bash
-apt install -y git
+apt install -y git curl
 git clone https://github.com/shashidaren/econ /opt/econ
 cd /opt/econ && ./install.sh
 # → http://192.168.0.149:8080
 ```
 
-Deploy updates any time:
+Deploy updates any time (resets any local ad-hoc edits on the server):
 
 ```bash
-cd /opt/econ && git pull && ./install.sh
+cd /opt/econ && git fetch --all && git reset --hard origin/main && ./install.sh
 ```
 
 Preview without a server (sample data): `ECON_DEMO=1 python3 dashboard/app.py`
 
-## Data sources (all free, no keys)
+Test live upstream sources directly on the server:
 
-| Source | Used for |
-|---|---|
-| Stooq | daily closes for indices & commodities |
-| Frankfurter (ECB reference rates) | FX, USD base |
-| World Bank API | annual inflation & GDP growth |
-| FRED public CSV (`fredgraph.csv`) | policy rates, 10Y–2Y curve, breakeven inflation |
+```bash
+python3 /opt/econ/dashboard/sources.py
+```
+
+## Data sources & automatic fallbacks (all free, no keys)
+
+| Panel | Primary | Automatic Fallback(s) |
+|---|---|---|
+| World indices & commodities | Yahoo Finance v8 chart (`query2`/`query1`) | FRED public CSV (`SP500`, `NASDAQ100`, `DJIA`, `NIKKEI225`, `DCOILWTI`, `DCOILBRENTEU`, `PCOPPUSDM`, `PWHEAMTUSDM`) → Stooq (`.com`/`.pl`) → CoinGecko (`pax-gold` for Gold) |
+| Currencies (FX, USD base) | Frankfurter (`api.frankfurter.app`, ECB rates) | `api.frankfurter.dev/v1` |
+| Annual inflation & GDP growth | World Bank API (`api.worldbank.org`) | Cached last-good snapshot on disk |
+| Central-bank policy rates (`DFF`, `ECBDFR`) | FRED public CSV (`fredgraph.csv?cosd=...`) | NY Fed Markets API (`markets.newyorkfed.org`) for `DFF`; ECB Data Portal (`data-api.ecb.europa.eu`) for `ECBDFR` |
+| US 10Y–2Y yield curve & 10Y breakeven | FRED public CSV (`T10Y2Y`, `T10YIE`) | Official US Treasury Daily Par & Real Yield Curve CSV (`home.treasury.gov`) |
 
 Not investment advice — it's a glance-board, not a trading terminal.
