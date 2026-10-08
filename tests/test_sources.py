@@ -62,9 +62,12 @@ class TransportCase(unittest.TestCase):
         sources.reset_breakers()
         sources.reset_fred_dead_cache()
         sources.clear_spark_cache()
+        sources.clear_cnbc_cache()
         sources._YAHOO_LAST_AT = 0.0
         sources._YAHOO_COOKIE = None
         sources._YAHOO_COOKIE_AT = 0.0
+        sources._YAHOO_CRUMB = None
+        sources._YAHOO_CRUMB_AT = 0.0
         # The cookie handshake would otherwise make a real (slow, blocked) call.
         self._cookie_setting = sources.YAHOO_USE_COOKIE
         sources.YAHOO_USE_COOKIE = False
@@ -74,6 +77,10 @@ class TransportCase(unittest.TestCase):
         sources.reset_breakers()
         sources.reset_fred_dead_cache()
         sources.clear_spark_cache()
+        sources.clear_cnbc_cache()
+        sources._YAHOO_CRUMB = None
+        sources._YAHOO_CRUMB_AT = 0.0
+
 
 
 class TestCurlStatusMarker(TransportCase):
@@ -171,6 +178,18 @@ class TestYahooDoctor(TransportCase):
             with self.assertRaisesRegex(RuntimeError, "no cookie set"):
                 sources._doctor_yahoo_cookie()
 
+    def test_missing_crumb_is_reported_as_a_failure_without_exposing_tokens(self):
+        with mock.patch.object(sources, "_yahoo_session_cookie", return_value="A3=test"), \
+                mock.patch.object(sources, "_fetch_yahoo_crumb", return_value=(None, "query1: HTTP 429")):
+            with self.assertRaisesRegex(RuntimeError, "HTTP 429"):
+                sources._doctor_yahoo_crumb()
+
+    def test_valid_crumb_is_reported_with_length(self):
+        with mock.patch.object(sources, "_yahoo_session_cookie", return_value="A3=test"), \
+                mock.patch.object(sources, "_fetch_yahoo_crumb", return_value=("testcrumb12", None)):
+            res = sources._doctor_yahoo_crumb()
+            self.assertEqual(res, "crumb set (11 chars)")
+
     def test_chart_checks_run_before_spark_and_each_gets_a_fresh_breaker(self):
         events = []
         real_reset = sources.reset_breakers
@@ -200,6 +219,7 @@ class TestYahooDoctor(TransportCase):
 
         with mock.patch.object(sources, "reset_breakers", side_effect=reset), \
                 mock.patch.object(sources, "_yahoo_session_cookie", return_value="A3=test"), \
+                mock.patch.object(sources, "_fetch_yahoo_crumb", return_value=("crumb123", None)), \
                 mock.patch.object(sources, "_yahoo_history", side_effect=chart), \
                 mock.patch.object(sources, "_yahoo_spark_batch", side_effect=spark):
             sources._doctor_yahoo(runner)
@@ -299,6 +319,36 @@ class TestYahoo(TransportCase):
             sources._yahoo_history("^dax", days=30)
             elapsed = sources.time.time() - t0
         self.assertGreaterEqual(elapsed, 0.25)
+
+    def test_fetch_yahoo_crumb_parses_token(self):
+        fake = types.SimpleNamespace(
+            returncode=0,
+            stdout=b"X2Q5c9WZbWY\n__HTTP__:200",
+            stderr=b"")
+        with mock.patch.object(sources.subprocess, "run", return_value=fake):
+            crumb, err = sources._fetch_yahoo_crumb("A3=testcookie")
+            self.assertEqual(crumb, "X2Q5c9WZbWY")
+            self.assertIsNone(err)
+
+    def test_crumb_is_appended_to_chart_and_spark_urls(self):
+        sources.YAHOO_USE_COOKIE = True
+        calls = []
+
+        def fake_get(url, timeout=None, headers=None, **kwargs):
+            calls.append(url)
+            if "spark" in url:
+                return _spark_payload({"^GSPC": _recent(3)})
+            return _chart_payload(_recent(3))
+
+        with mock.patch.object(sources, "_yahoo_session_crumb", return_value="mycrumb456"), \
+                mock.patch.object(sources, "_get", side_effect=fake_get):
+            sources._yahoo_history("^spx", days=30)
+            self.assertIn("&crumb=mycrumb456", calls[0])
+
+            calls.clear()
+            sources._yahoo_spark_batch(["^spx"], days=30)
+            self.assertIn("&crumb=mycrumb456", calls[0])
+
 
 
 class TestFredQuotes(TransportCase):
@@ -495,6 +545,140 @@ class TestCascade(TransportCase):
             with self.assertRaises(RuntimeError) as ctx:
                 sources.stooq_history("^dax", days=30)
         self.assertIn("all sources failed", str(ctx.exception))
+
+
+class TestCNBC(TransportCase):
+    def test_parse_cnbc_quotes_quickquote_list(self):
+        payload = {
+            "QuickQuoteResult": {
+                "QuickQuote": [
+                    {"symbol": ".GDAXI", "last": "25,449.19", "previous_day_closing": "25,404.00",
+                     "change": "45.19", "last_time": "2026-10-07T16:30:00.000-0400"},
+                    {"symbol": ".FTSE", "last": "10,545.89", "previous_day_closing": "10,497.94",
+                     "change": "47.95", "last_time": "2026-10-07T16:30:00.000-0400"},
+                ]
+            }
+        }
+        quotes = sources._parse_cnbc_quotes(payload)
+        self.assertEqual(len(quotes), 2)
+        self.assertEqual(sources._match_cnbc_quote_symbol(quotes[0]), ".GDAXI")
+        hist = sources._cnbc_quote_to_history(quotes[0])
+        self.assertEqual(len(hist), 2)
+        self.assertEqual(hist[-1][1], 25449.19)
+        self.assertEqual(hist[-2][1], 25404.00)
+
+    def test_parse_cnbc_quotes_extendedquote(self):
+        payload = {
+            "ExtendedQuoteResult": {
+                "ExtendedQuote": [
+                    {"QuickQuote": {"symbol": ".HSI", "last": "23972.29", "change": "607.49"}}
+                ]
+            }
+        }
+        quotes = sources._parse_cnbc_quotes(payload)
+        self.assertEqual(len(quotes), 1)
+        self.assertEqual(sources._match_cnbc_quote_symbol(quotes[0]), ".HSI")
+        hist = sources._cnbc_quote_to_history(quotes[0])
+        self.assertEqual(len(hist), 2)
+        self.assertEqual(hist[-1][1], 23972.29)
+        self.assertAlmostEqual(hist[-2][1], 23364.80, places=2)
+
+    def test_cnbc_fallback_used_when_yahoo_fails_and_fred_unmapped(self):
+        payload = {
+            "QuickQuoteResult": {
+                "QuickQuote": [
+                    {"symbol": ".GDAXI", "last": "25,449.19", "previous_day_closing": "25,404.00",
+                     "last_time": "2026-10-07T16:30:00"}
+                ]
+            }
+        }
+
+        def fake_get(url, timeout=None, headers=None, **kwargs):
+            if "finance.yahoo.com" in url:
+                raise RuntimeError("curl: (22) The requested URL returned error: 429 HTTP 429")
+            if "quote.cnbc.com" in url:
+                return json.dumps(payload)
+            raise AssertionError(f"unexpected url {url}")
+
+        with mock.patch.object(sources, "_get", side_effect=fake_get):
+            hist = sources.stooq_history("^dax", days=30)
+        self.assertEqual(len(hist), 2)
+        self.assertEqual(hist[-1][1], 25449.19)
+        src_tag, max_age = sources._LAST_SOURCE["^dax"]
+        self.assertEqual(src_tag, "cnbc:.GDAXI")
+        self.assertEqual(max_age, 5)
+
+    def test_cnbc_batch_caching(self):
+        payload = {
+            "QuickQuoteResult": {
+                "QuickQuote": [
+                    {"symbol": ".GDAXI", "last": "25449.19", "previous_day_closing": "25404.00"},
+                    {"symbol": ".FTSE", "last": "10545.89", "previous_day_closing": "10497.94"},
+                ]
+            }
+        }
+        calls = []
+
+        def fake_get(url, timeout=None, headers=None, **kwargs):
+            calls.append(url)
+            return json.dumps(payload)
+
+        with mock.patch.object(sources, "_get", side_effect=fake_get):
+            h1 = sources._cnbc_history("^dax", days=30)
+            self.assertEqual(len(calls), 1)
+            h2 = sources._cnbc_history("^ukx", days=30)
+            self.assertEqual(len(calls), 1)  # Served from batch cache!
+        self.assertEqual(h1[-1][1], 25449.19)
+        self.assertEqual(h2[-1][1], 10545.89)
+
+    def test_cnbc_failure_trips_breaker_and_cools_down(self):
+        calls = []
+
+        def fake_get(url, timeout=None, headers=None, **kwargs):
+            calls.append(url)
+            raise RuntimeError("curl: (7) Failed to connect to quote.cnbc.com port 443")
+
+        with mock.patch.object(sources, "_get", side_effect=fake_get):
+            with self.assertRaises(RuntimeError):
+                sources._cnbc_history("^dax", days=30)
+            self.assertFalse(sources.provider_available("cnbc"))
+
+            calls.clear()
+            with self.assertRaises(RuntimeError) as ctx:
+                sources._cnbc_history("^ukx", days=30)
+            self.assertIn("cooling down", str(ctx.exception))
+            self.assertEqual(calls, [])
+
+    def test_doctor_cnbc_runs_independent_probes(self):
+        events = []
+        real_reset = sources.reset_breakers
+
+        def reset(provider=None):
+            events.append(("reset", provider))
+            real_reset(provider)
+
+        def cnbc(symbol, days=30):
+            events.append(("cnbc", symbol))
+            return [("2026-10-07", 100.0)]
+
+        def batch(symbols):
+            events.append(("batch", len(symbols)))
+            return {s: [("2026-10-07", 100.0)] for s in symbols}
+
+        def runner(checks, width=18):
+            for _label, fn in checks:
+                fn()
+
+        with mock.patch.object(sources, "reset_breakers", side_effect=reset), \
+                mock.patch.object(sources, "_cnbc_history", side_effect=cnbc), \
+                mock.patch.object(sources, "_cnbc_batch", side_effect=batch):
+            sources._doctor_cnbc(runner)
+
+        cnbc_events = [e for e in events if e[0] == "cnbc"]
+        self.assertEqual(len(cnbc_events), 5)
+        batch_events = [e for e in events if e[0] == "batch"]
+        self.assertEqual(len(batch_events), 1)
+
 
 
 class TestUSTreasuryErrors(TransportCase):

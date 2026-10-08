@@ -198,7 +198,7 @@ def build_page(sections, *, demo=False, generated_at=None, refresh=300,
 </header>"""]
 
     # --- Markets ------------------------------------------------------------
-    body.append('<h2>World indices <span class="src">· daily close (Yahoo / FRED / Stooq)</span></h2>')
+    body.append('<h2>World indices <span class="src">· daily close (Yahoo / FRED / CNBC / Stooq)</span></h2>')
     if sections["indices"]:
         body.append('<div class="grid">' + "".join(market_card(q) for q in sections["indices"]) + "</div>")
     else:

@@ -137,6 +137,22 @@ COINGECKO_MAP = {
     "xagusd": "kinesis-silver",
 }
 
+# CNBC quote symbol mapping for equity indices (key-less public JSON webservice).
+# Provides fallback quotes for indices that lack FRED coverage (Euro Stoxx, DAX,
+# FTSE, Shanghai Composite, Hang Seng).
+CNBC_MAP = {
+    "^spx": ".SPX",
+    "^ndx": ".NDX",
+    "^dji": ".DJI",
+    "^stx": ".STOXX50E",
+    "^dax": ".GDAXI",
+    "^ukx": ".FTSE",
+    "^nkx": ".N225",
+    "^shc": ".SSEC",
+    "^hsi": ".HSI",
+}
+
+
 # Additional FRED series to probe before wiring them into the board. All
 # confirmed series are now in FRED_QUOTE_MAP; the 404s PSILVUSDM and
 # GOLDAMGBD228NLBM have been removed.
@@ -148,8 +164,13 @@ _YAHOO_LOCK = threading.Lock()
 _YAHOO_LAST_AT = 0.0
 _YAHOO_COOKIE: str | None = None
 _YAHOO_COOKIE_AT = 0.0
+_YAHOO_CRUMB: str | None = None
+_YAHOO_CRUMB_AT = 0.0
 _SPARK_CACHE: dict[str, tuple[float, list]] = {}
 _SPARK_LOCK = threading.Lock()
+_CNBC_CACHE: dict[str, tuple[float, list[tuple[str, float]]]] = {}
+_CNBC_LOCK = threading.Lock()
+
 
 # 404s for series IDs are stable across refreshes. Cache confirmed dead IDs for
 # one day so every market refresh does not pay for the same missing series.
@@ -446,6 +467,73 @@ def _yahoo_headers() -> dict | None:
     return {"Cookie": cookie} if cookie else None
 
 
+def _fetch_yahoo_crumb(cookie: str) -> tuple[str | None, str | None]:
+    """Try query1 and query2 to fetch a Yahoo crumb using the session cookie.
+
+    Returns (crumb, error_message).
+    """
+    if not CURL_BIN or not cookie:
+        return None, "curl not available or no cookie"
+    last_err = None
+    for host in ("query1.finance.yahoo.com", "query2.finance.yahoo.com"):
+        cmd = [
+            CURL_BIN, "-4", "-g", "-fsSL",
+            "--connect-timeout", "5", "--max-time", "8",
+            "-A", BROWSER_UA,
+            "-H", f"Cookie: {cookie}",
+            "-w", f"\n{_STATUS_MARK}%{{http_code}}",
+            f"https://{host}/v1/test/getcrumb",
+        ]
+        try:
+            proc = subprocess.run(cmd, capture_output=True, timeout=12, check=False)
+            out = proc.stdout.decode("utf-8", "replace")
+            status = None
+            idx = out.rfind("\n" + _STATUS_MARK)
+            if idx != -1:
+                tail = out[idx:].split(_STATUS_MARK, 1)[-1].strip()
+                out = out[:idx]
+                if tail.isdigit():
+                    status = int(tail)
+            if proc.returncode == 0:
+                crumb = out.strip()
+                if crumb and len(crumb) < 60 and not crumb.startswith("<") and "{" not in crumb:
+                    return crumb, None
+                last_err = f"{host}: invalid crumb body ({crumb[:25]})"
+            else:
+                err = proc.stderr.decode("utf-8", "replace").strip() or f"exit {proc.returncode}"
+                if status:
+                    err = f"{err} HTTP {status}"
+                last_err = f"{host}: {err}"
+        except Exception as exc:
+            last_err = f"{host}: {exc}"
+    return None, last_err
+
+
+def _yahoo_session_crumb(force: bool = False) -> str | None:
+    """Fetch a Yahoo session crumb using the session cookie.
+
+    Yahoo query APIs require a crumb matching the session cookie to prevent
+    HTTP 429/401 errors. Cached for 1 hour alongside the cookie.
+    """
+    global _YAHOO_CRUMB, _YAHOO_CRUMB_AT
+    if not YAHOO_USE_COOKIE or not CURL_BIN:
+        return None
+    if _YAHOO_CRUMB and not force and (time.time() - _YAHOO_CRUMB_AT) < 3600:
+        return _YAHOO_CRUMB
+    cookie = _yahoo_session_cookie(force=force)
+    if not cookie:
+        _YAHOO_CRUMB = None
+        return None
+    crumb, _ = _fetch_yahoo_crumb(cookie)
+    if crumb:
+        _YAHOO_CRUMB = crumb
+        _YAHOO_CRUMB_AT = time.time()
+    else:
+        _YAHOO_CRUMB = None
+    return _YAHOO_CRUMB
+
+
+
 def _parse_chart_result(result) -> list[tuple[str, float]]:
     """[(date, close)] from a Yahoo v8 chart `result` object."""
     if not result:
@@ -483,6 +571,8 @@ def _yahoo_history(symbol: str, days: int = 150):
     rng = "6mo" if days <= 130 else "1y"
     headers = _yahoo_headers()
     _yahoo_pace()
+    crumb = _yahoo_session_crumb()
+    crumb_param = f"&crumb={urllib.parse.quote(crumb, safe='')}" if crumb else ""
 
     last_err = None
     tried = 0
@@ -493,7 +583,7 @@ def _yahoo_history(symbol: str, days: int = 150):
         tried += 1
         url = (
             f"https://{host}/v8/finance/chart/{enc}"
-            f"?range={rng}&interval=1d&includePrePost=false"
+            f"?range={rng}&interval=1d&includePrePost=false{crumb_param}"
         )
         try:
             j = _get_json(url, timeout=10, headers=headers)
@@ -531,9 +621,11 @@ def _yahoo_spark_batch(symbols, days: int = 150) -> dict[str, list]:
     pairs = [(s, YAHOO_MAP.get(s, s)) for s in syms]
     ylist = ",".join(dict.fromkeys(y for _, y in pairs))
     rng = "6mo" if days <= 130 else "1y"
+    crumb = _yahoo_session_crumb()
+    crumb_param = f"&crumb={urllib.parse.quote(crumb, safe='')}" if crumb else ""
     url = (
         "https://query1.finance.yahoo.com/v7/finance/spark?symbols="
-        f"{urllib.parse.quote(ylist, safe='')}&range={rng}&interval=1d"
+        f"{urllib.parse.quote(ylist, safe='')}&range={rng}&interval=1d{crumb_param}"
     )
     _yahoo_pace()
     try:
@@ -758,8 +850,142 @@ def _coingecko_gold_history(days: int = 90):
     return _coingecko_history("xauusd", days=days)
 
 
+def _parse_cnbc_quotes(data) -> list[dict]:
+    """Extract list of QuickQuote dicts from CNBC JSON response."""
+    if not isinstance(data, dict):
+        if isinstance(data, list):
+            return [x for x in data if isinstance(x, dict)]
+        return []
+    qq_res = data.get("QuickQuoteResult") or {}
+    quotes = qq_res.get("QuickQuote")
+    if quotes is None:
+        eq_res = data.get("ExtendedQuoteResult") or {}
+        eq_items = eq_res.get("ExtendedQuote") or []
+        if isinstance(eq_items, dict):
+            eq_items = [eq_items]
+        quotes = [item.get("QuickQuote") for item in eq_items
+                  if isinstance(item, dict) and isinstance(item.get("QuickQuote"), dict)]
+    if isinstance(quotes, dict):
+        quotes = [quotes]
+    return [q for q in (quotes or []) if isinstance(q, dict)]
+
+
+def _match_cnbc_quote_symbol(q: dict) -> str:
+    sym = str(q.get("symbol") or q.get("altSymbol") or q.get("providerSymbol") or "").strip()
+    return sym.split(":", 1)[0]
+
+
+def _cnbc_quote_to_history(q: dict) -> list[tuple[str, float]]:
+    last_str = q.get("last")
+    if not last_str:
+        return []
+    try:
+        last_val = float(str(last_str).replace(",", ""))
+    except (TypeError, ValueError):
+        return []
+    if last_val <= 0:
+        return []
+
+    prev_val = None
+    prev_str = q.get("previous_day_closing")
+    if prev_str:
+        try:
+            prev_val = float(str(prev_str).replace(",", ""))
+        except (TypeError, ValueError):
+            pass
+    if prev_val is None:
+        chg_str = q.get("change")
+        if chg_str:
+            try:
+                chg_val = float(str(chg_str).replace(",", ""))
+                prev_val = last_val - chg_val
+            except (TypeError, ValueError):
+                pass
+    if prev_val is None or prev_val <= 0:
+        prev_val = last_val
+
+    last_time = str(q.get("last_time") or q.get("reg_last_time") or "")
+    dt = date.today()
+    if len(last_time) >= 10 and last_time[:4].isdigit():
+        try:
+            dt = date.fromisoformat(last_time[:10])
+        except ValueError:
+            pass
+
+    d_today = dt.isoformat()
+    d_prev = (dt - timedelta(days=3 if dt.weekday() == 0 else 1)).isoformat()
+    return [(d_prev, round(prev_val, 4)), (d_today, round(last_val, 4))]
+
+
+def clear_cnbc_cache() -> None:
+    with _CNBC_LOCK:
+        _CNBC_CACHE.clear()
+
+
+def _cnbc_batch(symbols: list[str]) -> dict[str, list[tuple[str, float]]]:
+    """Fetch quotes for multiple symbols from CNBC in ONE request."""
+    if not provider_available("cnbc"):
+        raise RuntimeError("cnbc: cooling down after recent failures")
+
+    pairs = [(s, CNBC_MAP[s]) for s in symbols if s in CNBC_MAP]
+    if not pairs:
+        return {}
+
+    csyms = "|".join(dict.fromkeys(c for _, c in pairs))
+    url = (
+        "https://quote.cnbc.com/quote-html-webservice/quote.htm"
+        f"?noform=1&partnerId=2&fund=1&exthrs=0&output=json&symbolType=issue"
+        f"&symbols={urllib.parse.quote(csyms, safe='')}&requestMethod=quick"
+    )
+    try:
+        j = _get_json(url, timeout=10)
+        quotes = _parse_cnbc_quotes(j)
+        by_csym = {}
+        for q in quotes:
+            cs = _match_cnbc_quote_symbol(q)
+            hist = _cnbc_quote_to_history(q)
+            if cs and hist:
+                by_csym[cs] = hist
+
+        out = {s: by_csym[c] for s, c in pairs if c in by_csym}
+        if out:
+            note_provider_ok("cnbc")
+            now = time.time()
+            with _CNBC_LOCK:
+                for s, h in out.items():
+                    _CNBC_CACHE[s] = (now, h)
+            return out
+        raise RuntimeError(f"cnbc: no quote returned for {csyms}")
+    except Exception as exc:
+        unreachable, limited = _classify(exc)
+        note_provider_failure("cnbc", exc, unreachable=unreachable, rate_limited=limited)
+        raise RuntimeError(f"cnbc-batch: {exc}")
+
+
+def _cnbc_history(symbol: str, days: int = 150):
+    """Fetch recent quote history for a symbol via CNBC (cached batch -> single)."""
+    if symbol not in CNBC_MAP:
+        raise RuntimeError(f"no cnbc mapping for {symbol}")
+
+    now = time.time()
+    with _CNBC_LOCK:
+        item = _CNBC_CACHE.get(symbol)
+        if item and (now - item[0]) < 600:
+            return item[1]
+
+    if not provider_available("cnbc"):
+        raise RuntimeError("cnbc: cooling down after recent failures")
+
+    # Request all missing CNBC-mapped symbols together so 5 cards cost 1 HTTP request
+    missing = [s for s in CNBC_MAP if s not in _CNBC_CACHE or (now - _CNBC_CACHE[s][0]) >= 600]
+    got = _cnbc_batch(missing or [symbol])
+    if symbol in got:
+        return got[symbol]
+    raise RuntimeError(f"cnbc({CNBC_MAP[symbol]}): no quote in response")
+
+
 def stooq_history(symbol: str, days: int = 150):
-    """Multi-source market history: Yahoo -> FRED -> Stooq -> CoinGecko.
+    """Multi-source market history: Yahoo -> FRED -> CNBC -> Stooq -> CoinGecko.
 
     Kept under the name `stooq_history` so app.py and demo.py share a single
     interface. Each provider is circuit-broken, so a dead upstream costs
@@ -772,6 +998,9 @@ def stooq_history(symbol: str, days: int = 150):
 
     if symbol in FRED_QUOTE_MAP:
         providers.append(("fred", lambda: _fred_quote_history(symbol, days=days)))
+
+    if symbol in CNBC_MAP:
+        providers.append(("cnbc", lambda: _cnbc_history(symbol, days=days)))
 
     if symbol not in FRED_ONLY_SYMBOLS:
         providers.append(("stooq", lambda: _stooq_raw_history(symbol, days=days)))
@@ -790,6 +1019,9 @@ def stooq_history(symbol: str, days: int = 150):
                                  FRED_QUOTE_MAP[symbol][1]))
                 elif src_name.startswith("coingecko:"):
                     max_age = 3
+                elif src_name == "cnbc":
+                    src_name = f"cnbc:{CNBC_MAP[symbol]}"
+                    max_age = 5
                 else:
                     max_age = 14
                 _LAST_SOURCE[symbol] = (src_name, max_age)
@@ -799,6 +1031,7 @@ def stooq_history(symbol: str, days: int = 150):
             errs.append(f"{src_name}: {exc}")
 
     raise RuntimeError(f"all sources failed -> {' | '.join(errs)}")
+
 
 
 def quote_from_history(name: str, hist, source: str | None = None,
@@ -1199,8 +1432,19 @@ def _doctor_yahoo_cookie():
     return "cookie set"
 
 
+def _doctor_yahoo_crumb():
+    """Probe the crumb endpoint using the session cookie."""
+    cookie = _yahoo_session_cookie()
+    if not cookie:
+        raise RuntimeError("cannot probe crumb without cookie")
+    crumb, err = _fetch_yahoo_crumb(cookie)
+    if not crumb:
+        raise RuntimeError(err or "failed to obtain crumb")
+    return f"crumb set ({len(crumb)} chars)"
+
+
 def _doctor_yahoo(run_checks):
-    """Probe v8 charts independently before the optional v7 spark batch.
+    """Probe cookie, crumb, and v8 charts independently before the spark batch.
 
     A spark 429 must not trip the shared breaker first and turn every chart
     check into a misleading zero-second "cooling down" result. Each chart probe
@@ -1208,6 +1452,7 @@ def _doctor_yahoo(run_checks):
     """
     run_checks([
         ("cookie handshake", _doctor_yahoo_cookie),
+        ("crumb handshake", _doctor_yahoo_crumb),
     ], width=24)
 
     for label, symbol in (("chart ^GSPC", "^spx"),
@@ -1221,6 +1466,28 @@ def _doctor_yahoo(run_checks):
         ("spark batch (all)", lambda: sorted(
             _yahoo_spark_batch(list(YAHOO_MAP), days=30).keys())),
     ], width=24)
+
+
+def _doctor_cnbc(run_checks):
+    """Probe CNBC quote endpoints independently for international indices."""
+    for label, sym in (("cnbc .GDAXI (DAX)", "^dax"),
+                       ("cnbc .FTSE (UK)", "^ukx"),
+                       ("cnbc .HSI (Hang Seng)", "^hsi"),
+                       ("cnbc .SSEC (Shanghai)", "^shc"),
+                       ("cnbc .STOXX50E (Euro Stoxx)", "^stx")):
+        reset_breakers("cnbc")
+        clear_cnbc_cache()
+        def _probe(s=sym):
+            h = _cnbc_history(s, days=30)
+            return f"last {h[-1][0]} = {h[-1][1]}"
+        run_checks([(label, _probe)], width=28)
+
+    reset_breakers("cnbc")
+    clear_cnbc_cache()
+    run_checks([
+        ("cnbc batch (all 5)", lambda: f"{len(_cnbc_batch(['^dax', '^ukx', '^hsi', '^shc', '^stx']))}/5 indices"),
+    ], width=28)
+
 
 
 if __name__ == "__main__":
@@ -1294,7 +1561,7 @@ if __name__ == "__main__":
         print(f"curl: {CURL_BIN or 'NOT FOUND (urllib only)'} | yahoo pace "
               f"{YAHOO_MIN_INTERVAL}s | yahoo cookie {'on' if YAHOO_USE_COOKIE else 'off'}")
 
-        print("\n[1/6] FX & macro")
+        print("\n[1/7] FX & macro")
         _run_checks([
             ("frankfurter.app", lambda: _get_json(
                 "https://api.frankfurter.app/latest?from=USD&to=EUR,JPY")["date"]),
@@ -1304,7 +1571,7 @@ if __name__ == "__main__":
             ("worldbank GDP", lambda: worldbank_indicator(["US"], "NY.GDP.MKTP.KD.ZG")[0]["value"]),
         ], width=24)
 
-        print("\n[2/6] Rates, curve & their official fallbacks")
+        print("\n[2/7] Rates, curve & their official fallbacks")
         _run_checks([
             ("fred DFF", lambda: fred_series("DFF", years=1)[-1]),
             ("fred ECBDFR", lambda: fred_series("ECBDFR", years=1)[-1]),
@@ -1316,7 +1583,7 @@ if __name__ == "__main__":
             ("ustreasury breakeven", lambda: _ustreasury_breakeven_series(years=1)[-1]),
         ], width=24)
 
-        print("\n[3/6] FRED quote series (mapped to board cards, including fallbacks)")
+        print("\n[3/7] FRED quote series (mapped to board cards, including fallbacks)")
         mapped_fred = {sid for sid, _age in FRED_QUOTE_MAP.values()}
         mapped_fred.update(
             sid for fallbacks in FRED_QUOTE_FALLBACKS.values()
@@ -1327,7 +1594,7 @@ if __name__ == "__main__":
             for sid in sorted(mapped_fred)
         ], width=24)
 
-        print("\n[4/6] FRED candidate series (not wired in yet)")
+        print("\n[4/7] FRED candidate series (not wired in yet)")
         if FRED_PROBE_CANDIDATES:
             _run_checks([
                 (f"fred {sid}", lambda s=sid: _fred_probe(s, monthly=s.endswith("USDM")))
@@ -1336,10 +1603,13 @@ if __name__ == "__main__":
         else:
             print("  (no unverified candidates)")
 
-        print("\n[5/6] Yahoo Finance (charts tested before the optional spark batch)")
+        print("\n[5/7] Yahoo Finance (cookie + crumb handshake, charts, spark batch)")
         _doctor_yahoo(_run_checks)
 
-        print("\n[6/6] Stooq & CoinGecko")
+        print("\n[6/7] CNBC quote candidates (international indices)")
+        _doctor_cnbc(_run_checks)
+
+        print("\n[7/7] Stooq & CoinGecko")
         checks = []
         for scheme, domain, tag in (("https", "stooq.com", ""),
                                     ("https", "stooq.pl", ""),

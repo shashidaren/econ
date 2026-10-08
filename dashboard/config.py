@@ -23,7 +23,7 @@ CACHE_FILE = os.environ.get("ECON_CACHE_FILE", "/var/tmp/econ-dashboard-cache.js
 # --- Panels -----------------------------------------------------------------
 
 # Global equity indices (primary key = Stooq symbol; sources.py cascades
-# automatically across Yahoo Finance -> FRED -> Stooq).
+# automatically across Yahoo Finance -> FRED -> CNBC -> Stooq).
 INDICES = [
     ("S&P 500",            "^spx"),
     ("Nasdaq 100",         "^ndx"),
