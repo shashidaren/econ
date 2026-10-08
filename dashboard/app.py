@@ -269,7 +269,7 @@ def summary():
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "econ/0.6"
+    server_version = "econ/0.7"
 
     def log_message(self, fmt, *args):  # quieter logs
         print(f"[http] {self.address_string()} {fmt % args}", flush=True)

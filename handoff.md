@@ -21,7 +21,7 @@ central-bank policy rates, and the US yield curve (recession indicator).
 | Server IP | `192.168.0.149` (LAN only) |
 | Access | root via SSH; web UI on LAN |
 | Repo | `shashidaren/econ` (this repo) |
-| Working branch | `arena/invest-briefing` (this session; PR pending — investment briefing on the board; previous session `arena/cda0bd47-econ` was docs-only after PR #5 merged at `e22471c`) |
+| Working branch | `main` at `c2dc6b9` plus this session's Tencent/Sina index fallback (pushed to `main`; leftover `arena/*` branches deleted) |
 | Deploy model | server does `git fetch --all && git reset --hard origin/main && ./install.sh` |
 | App dir on server | `/opt/econ` |
 | Port | **8080** (override: `ECON_PORT=xxxx ./install.sh`) |
@@ -47,11 +47,12 @@ central-bank policy rates, and the US yield curve (recession indicator).
 | D12 | CNBC fallback for international indices | **Cascade across `Yahoo -> FRED -> CNBC -> Stooq -> CoinGecko` with 1-request batch caching for unmapped indices** | Euro Stoxx 50, DAX, FTSE 100, Shanghai Composite, and Hang Seng lack FRED coverage. When Yahoo fails, CNBC's key-less quote API provides live prices/changes in a single HTTP call; `--doctor` probes each independently |
 | D13 | Post-merge live verdict (2026-10-08 01:13 UTC) | **Yahoo = IP-level HTTP 429 (crumb endpoint itself 429); CNBC = HTTP 500 on all 6 probes; board stays at 4/9 indices** | Both v0.5 hypotheses falsified live on `root@econ`. FRED + Treasury + CoinGecko + Frankfurter + World Bank carry 100% of populated cards. Owner to decide: trim `INDICES` to 4 verified cards vs keep 9 with "awaiting data" vs investigate CNBC 500 root cause / alternative key-less feeds |
 | D14 | Investment briefing | **Derived on the server from data already on the board** (`dashboard/briefing.py`), rendered as a strip under the header and included in `/api/summary` as `briefing` | No new upstreams. Posture is Defensive / Cautious / Constructive / Awaiting data from curve, real-rate proxy (Fed funds − 10y breakeven), US CPI, GDP breadth, and populated index breadth. Explicitly not advice. Empty inputs become muted cards |
+| D15 | Five missing indices | **Tencent then Sina, after CNBC, only for `^shc` `^hsi` `^ukx` `^dax` `^stx`** | 2026-10-08 probe: Tencent `sh000001` / `hkHSI` / `ukUKX` are live or previous close; Sina `b_DAX` / `b_SX5E` cover the two Tencent misses. Do not use Sina `int_dax`, `int_ftse` (stale 9284 vs 10458), or `int_fsx5e` (empty). Eastmoney was HTTP 502. GBK pages; parser keeps ASCII prices. Card source reads `tencent:…` or `sina:…` |
 
 Data-source rules: free, no signups; every source fails independently (panel shows
 "awaiting data"/stale badge, board never breaks); polite fetch cadence via cache TTLs.
 
-## 4. Architecture (v0.6 briefing on branch `arena/invest-briefing`; v0.5 deployed at `e22471c`)
+## 4. Architecture (v0.7 Tencent/Sina index fallback on `main`; v0.6 briefing deployed at `c2dc6b9`)
 
 ```
 dashboard/
@@ -72,6 +73,7 @@ dashboard/
 tests/test_sources.py    47 stdlib unittests — cascade, breakers, FRED gate/cache, transport,
                          Yahoo cookie+crumb, CNBC parsing & caching, Treasury headers, rendering
 tests/test_briefing.py   4 stdlib unittests — defensive/constructive/empty posture + page strip
+tests/test_asia_quotes.py 2 stdlib unittests — Tencent/Sina parsers and cascade preference
 tools/sim_lxc_network.py replays the LXC's measured latencies against the real cascade
 tools/warm_ab.py         times warm_all() for any checkout (A/B comparisons)
 systemd/econ-dashboard.service
@@ -113,13 +115,15 @@ Preview (no network needed): `ECON_DEMO=1 python3 dashboard/app.py` → sample d
 
 ## 6. Current status
 
-- [x] **Investment briefing (v0.6, this session, not yet deployed):** `dashboard/briefing.py`
-  builds a posture strip (Defensive / Cautious / Constructive / Awaiting data) from the
-  cache the panels already use — 10y–2y curve, Fed funds − 10y breakeven, US CPI, GDP
-  breadth, populated index breadth, plus oil/gold and USD-cross notes. Rendered under the
-  header; also on `/api/summary` as `briefing`. No new data sources. 4 new unittests pass
-  offline. Owner still deploys with `git fetch && git reset --hard origin/main && ./install.sh`
-  after merge.
+- [x] **Tencent/Sina index fallback (v0.7, this session, on `main`, not yet pulled on the LXC):**
+  cascade is Yahoo → FRED → CNBC → Tencent/Sina → Stooq → CoinGecko. Only the five empty
+  cards are mapped. Tencent preferred for Shanghai (`sh000001`), Hang Seng (`hkHSI`), and
+  FTSE (`ukUKX`); Sina `b_DAX` / `b_SX5E` fill DAX and Euro Stoxx 50. `--doctor` gains
+  §[8/8]. Two offline tests. Owner pulls with `git fetch --all && git reset --hard origin/main && ./install.sh`
+  (no trailing dot on `install.sh`).
+- [x] **Investment briefing (v0.6) merged as PR #7 (`c2dc6b9`) and seen live** at
+  `http://192.168.0.149:8080` on 2026-10-08 01:31 UTC — posture Cautious, curve 0.51%,
+  Fed funds 3.88%, real-rate proxy 1.52%, markets 1/4 up with 5 index cards awaiting data.
 - [x] **PR #5 (v0.5) merged to `main` (`e22471c`) and deployed on `192.168.0.149`** —
   confirmed by owner's `--doctor` output at `2026-10-08T01:13:43+00:00`
   (this run has the 7-section doctor with `crumb handshake` + §[6/7] CNBC probes, i.e. v0.5 code).
@@ -185,11 +189,13 @@ Preview (no network needed): `ECON_DEMO=1 python3 dashboard/app.py` → sample d
 
 ## 8. Next steps (owner decision + diagnostics)
 
-0. **Merge + deploy the briefing** (`arena/invest-briefing` → `main`, then the usual
-   `git fetch --all && git reset --hard origin/main && ./install.sh`). Confirm
-   `curl -s localhost:8080/api/summary | python3 -c "import json,sys; b=json.load(sys.stdin)['briefing']; print(b['posture'], b['headline'])"`
-   and that the strip sits under the header. Demo check: `ECON_DEMO=1 python3 dashboard/app.py`.
-1. **Decide the board shape** (pick one; all are one-line `config.py` changes if trimming):
+0. **Pull v0.7 on the LXC** (briefing is already there; this adds the five index cards):
+   `cd /opt/econ && git fetch --all && git reset --hard origin/main && ./install.sh`
+   Then `python3 /opt/econ/dashboard/sources.py --doctor` and check §[8/8]. Expect Shanghai
+   and Hang Seng live, FTSE/DAX/Stoxx previous close outside Europe hours. Card footer
+   should say `tencent:…` or `sina:…`, not "awaiting data".
+1. **Decide the board shape** only if §[8/8] fails on the LXC (sandbox reached both hosts;
+   the LXC is the one that blocked Yahoo/Stooq):
    - **(A) Trim to 4 verified indices** (`^spx`, `^ndx`, `^dji`, `^nkx`) — clean board, zero empty
      cards, everything live off FRED. Recommended if the 5 internationals are nice-to-have.
    - **(B) Keep 9 cards** with "awaiting data" + footer health line — preserves layout while
@@ -217,7 +223,29 @@ Preview (no network needed): `ECON_DEMO=1 python3 dashboard/app.py` → sample d
 
 ## 9. Session log
 
+### 2026-10-08 — Session 8: Tencent/Sina fallback for the five empty index cards
+
+- **Ask:** the five "awaiting data" index cards are expected (no FRED series; Yahoo 429,
+  CNBC 500, Stooq timeout). Probe alternatives, then wire a working one and update this file.
+- **Probe (this environment, 2026-10-08 02:01 UTC, not the LXC):**
+  - Tencent `qt.gtimg.cn` HTTP 200. `sh000001` 3851.62 at 10:01 +08, `hkHSI` 24090.14 at
+    09:46, `ukUKX` 10458.50 at 2026-10-07 16:35. No symbol found for DAX or Euro Stoxx 50
+    (`b_DAX`, `deDAX`, `euSX5E`, and others returned `v_pv_none_match`).
+  - Sina `hq.sinajs.cn` HTTP 200. `s_sh000001` live; `int_hangseng` 24130.50 with a zero
+    change; `b_UKX` 10458.50; `b_DAX` 25104.36 at 2026-10-07 23:30; `b_SX5E` 6180.30 at
+    2026-10-08 00:00. `int_dax` / `int_fsx5e` / `int_eurstx50` empty. `int_ftse` 9284.83
+    disagrees with the 10458.50 print — not used.
+  - Eastmoney `push2delay` HTTP 502.
+- **Wiring:** `ASIA_QUOTE_MAP` in `sources.py`. One Tencent batch and one Sina batch,
+  10 min cache, own circuit breakers. Tencent wins when both answer. Two-point history so
+  the existing spark/change card works. Cascade order unchanged for FRED-backed cards.
+  `--doctor` §[8/8]. `tests/test_asia_quotes.py`. Server version `econ/0.7`.
+- **Also this session:** confirmed PR #7 already on `main` (`c2dc6b9`); deleted the seven
+  merged `arena/*` branches. Only `main` remains.
+- **Not done:** not run on `root@econ`. Owner pulls, then `--doctor` §[8/8] is the verdict.
+
 ### 2026-10-08 — Session 7: Investment briefing strip (v0.6)
+ Investment briefing strip (v0.6)
 
 - **Ask:** additional improvements or a summary on the dashboard to help with investments,
   then update this handoff.

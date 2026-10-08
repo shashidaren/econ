@@ -984,8 +984,164 @@ def _cnbc_history(symbol: str, days: int = 150):
     raise RuntimeError(f"cnbc({CNBC_MAP[symbol]}): no quote in response")
 
 
+# Tencent / Sina key-less quotes for the five indices FRED does not publish.
+# 2026-10-08 probe: Tencent covers Shanghai, Hang Seng, and FTSE; Sina covers all
+# five. Sina int_dax / int_ftse / int_fsx5e are not used (empty or a stale FTSE).
+ASIA_QUOTE_MAP = {
+    "^shc": {"tencent": "sh000001", "sina": "s_sh000001"},
+    "^hsi": {"tencent": "hkHSI", "sina": "int_hangseng"},
+    "^ukx": {"tencent": "ukUKX", "sina": "b_UKX"},
+    "^dax": {"tencent": None, "sina": "b_DAX"},
+    "^stx": {"tencent": None, "sina": "b_SX5E"},
+}
+_ASIA_CACHE: dict[str, tuple[float, list[tuple[str, float]], str]] = {}
+_ASIA_LOCK = threading.Lock()
+_ASIA_TTL = 600
+
+
+def clear_asia_cache() -> None:
+    with _ASIA_LOCK:
+        _ASIA_CACHE.clear()
+
+
+def _iso_date(raw: str) -> str | None:
+    raw = (raw or "").strip()
+    if len(raw) >= 8 and raw[:8].isdigit() and raw[4:6] in {f"{m:02d}" for m in range(1, 13)}:
+        return f"{raw[:4]}-{raw[4:6]}-{raw[6:8]}"
+    raw = raw.replace("/", "-")
+    if len(raw) >= 10 and raw[4] == "-" and raw[7] == "-":
+        return raw[:10]
+    return None
+
+
+def _num(raw) -> float | None:
+    try:
+        return float(str(raw).replace(",", ""))
+    except (TypeError, ValueError):
+        return None
+
+
+def _parse_tencent_body(text: str) -> dict[str, list[tuple[str, float]]]:
+    """code -> [(prev_date, prev), (date, last)] from a qt.gtimg.cn body."""
+    out = {}
+    for chunk in (text or "").split(";"):
+        if '="' not in chunk:
+            continue
+        left, _, right = chunk.partition('="')
+        code = left.strip().split("v_", 1)[-1]
+        fields = right.rstrip('"').split("~")
+        if code == "pv_none_match" or len(fields) < 5:
+            continue
+        last, prev = _num(fields[3]), _num(fields[4])
+        if last is None:
+            continue
+        dates = [d for d in (_iso_date(f) for f in fields) if d]
+        day = max(dates) if dates else date.today().isoformat()
+        prev_day = day
+        if prev is None:
+            prev = last
+        out[code] = [(prev_day, prev), (day, last)]
+    return out
+
+
+def _parse_sina_body(text: str) -> dict[str, list[tuple[str, float]]]:
+    """Sina symbol -> two-point history. Ignores empty var bodies."""
+    out = {}
+    for chunk in (text or "").split(";"):
+        if '="' not in chunk:
+            continue
+        left, _, right = chunk.partition('="')
+        code = left.strip().split("hq_str_", 1)[-1]
+        fields = right.rstrip('"').split(",")
+        if len(fields) < 3 or not fields[1]:
+            continue
+        last = _num(fields[1])
+        if last is None:
+            continue
+        chg = _num(fields[2])
+        prev = last - chg if chg is not None else last
+        dates = [d for d in (_iso_date(f) for f in fields) if d]
+        day = max(dates) if dates else date.today().isoformat()
+        out[code] = [(day, prev), (day, last)]
+    return out
+
+
+def _asia_batch(symbols) -> dict[str, list[tuple[str, float]]]:
+    """One Tencent call plus one Sina call. Tencent wins when both answer."""
+    wanted = [s for s in symbols if s in ASIA_QUOTE_MAP]
+    if not wanted:
+        return {}
+    tencent_codes = [ASIA_QUOTE_MAP[s]["tencent"] for s in wanted if ASIA_QUOTE_MAP[s]["tencent"]]
+    sina_codes = [ASIA_QUOTE_MAP[s]["sina"] for s in wanted]
+    headers = {"Referer": "https://finance.sina.com.cn/"}
+    tencent_hits, sina_hits = {}, {}
+    errors = []
+    if tencent_codes and provider_available("tencent"):
+        url = "https://qt.gtimg.cn/q=" + ",".join(tencent_codes)
+        try:
+            tencent_hits = _parse_tencent_body(_get(url, timeout=8, headers={"Referer": "https://gu.qq.com/"}))
+            if tencent_hits:
+                note_provider_ok("tencent")
+            else:
+                raise RuntimeError("tencent: empty")
+        except Exception as exc:
+            errors.append(str(exc))
+            note_provider_failure("tencent", exc)
+    if sina_codes and provider_available("sina"):
+        url = "https://hq.sinajs.cn/list=" + ",".join(sina_codes)
+        try:
+            sina_hits = _parse_sina_body(_get(url, timeout=8, headers=headers))
+            if sina_hits:
+                note_provider_ok("sina")
+            else:
+                raise RuntimeError("sina: empty")
+        except Exception as exc:
+            errors.append(str(exc))
+            note_provider_failure("sina", exc)
+    now = time.time()
+    got = {}
+    with _ASIA_LOCK:
+        for sym in wanted:
+            spec = ASIA_QUOTE_MAP[sym]
+            hist = None
+            label = None
+            if spec["tencent"] and spec["tencent"] in tencent_hits:
+                hist = tencent_hits[spec["tencent"]]
+                label = f"tencent:{spec['tencent']}"
+            elif spec["sina"] in sina_hits:
+                hist = sina_hits[spec["sina"]]
+                label = f"sina:{spec['sina']}"
+            if hist:
+                _ASIA_CACHE[sym] = (now, hist, label)
+                got[sym] = hist
+    if not got and errors:
+        raise RuntimeError(" | ".join(errors))
+    return got
+
+
+def _asia_history(symbol: str, days: int = 150):
+    """Cached Tencent-then-Sina quote for an index FRED does not publish."""
+    if symbol not in ASIA_QUOTE_MAP:
+        raise RuntimeError(f"no asia mapping for {symbol}")
+    now = time.time()
+    with _ASIA_LOCK:
+        item = _ASIA_CACHE.get(symbol)
+        if item and (now - item[0]) < _ASIA_TTL:
+            _LAST_SOURCE[symbol] = (item[2], 5)
+            return item[1]
+    missing = [s for s in ASIA_QUOTE_MAP
+               if s not in _ASIA_CACHE or (now - _ASIA_CACHE[s][0]) >= _ASIA_TTL]
+    _asia_batch(missing or [symbol])
+    with _ASIA_LOCK:
+        item = _ASIA_CACHE.get(symbol)
+    if not item:
+        raise RuntimeError(f"asia({symbol}): no quote")
+    _LAST_SOURCE[symbol] = (item[2], 5)
+    return item[1]
+
+
 def stooq_history(symbol: str, days: int = 150):
-    """Multi-source market history: Yahoo -> FRED -> CNBC -> Stooq -> CoinGecko.
+    """Multi-source market history: Yahoo -> FRED -> CNBC -> Tencent/Sina -> Stooq -> CoinGecko.
 
     Kept under the name `stooq_history` so app.py and demo.py share a single
     interface. Each provider is circuit-broken, so a dead upstream costs
@@ -1001,6 +1157,9 @@ def stooq_history(symbol: str, days: int = 150):
 
     if symbol in CNBC_MAP:
         providers.append(("cnbc", lambda: _cnbc_history(symbol, days=days)))
+
+    if symbol in ASIA_QUOTE_MAP:
+        providers.append(("asia", lambda: _asia_history(symbol, days=days)))
 
     if symbol not in FRED_ONLY_SYMBOLS:
         providers.append(("stooq", lambda: _stooq_raw_history(symbol, days=days)))
@@ -1022,6 +1181,8 @@ def stooq_history(symbol: str, days: int = 150):
                 elif src_name == "cnbc":
                     src_name = f"cnbc:{CNBC_MAP[symbol]}"
                     max_age = 5
+                elif src_name == "asia":
+                    src_name, max_age = _LAST_SOURCE.get(symbol, ("asia", 5))
                 else:
                     max_age = 14
                 _LAST_SOURCE[symbol] = (src_name, max_age)
@@ -1609,7 +1770,7 @@ if __name__ == "__main__":
         print("\n[6/7] CNBC quote candidates (international indices)")
         _doctor_cnbc(_run_checks)
 
-        print("\n[7/7] Stooq & CoinGecko")
+        print("\n[7/8] Stooq & CoinGecko")
         checks = []
         for scheme, domain, tag in (("https", "stooq.com", ""),
                                     ("https", "stooq.pl", ""),
@@ -1620,6 +1781,22 @@ if __name__ == "__main__":
             checks.append((f"coingecko {coin}",
                            lambda c=coin, s=sym: _coingecko_history(s, days=30)[-1]))
         _run_checks(checks, width=24)
+
+        print("\n[8/8] Tencent / Sina (indices FRED does not publish)")
+        reset_breakers("tencent")
+        reset_breakers("sina")
+        clear_asia_cache()
+        def _asia_probe(sym):
+            h = _asia_history(sym, days=30)
+            src = _LAST_SOURCE.get(sym, ("?", None))[0]
+            return f"{src} last {h[-1][0]} = {h[-1][1]}"
+        _run_checks([
+            ("shanghai ^shc", lambda: _asia_probe("^shc")),
+            ("hang seng ^hsi", lambda: _asia_probe("^hsi")),
+            ("ftse ^ukx", lambda: _asia_probe("^ukx")),
+            ("dax ^dax", lambda: _asia_probe("^dax")),
+            ("euro stoxx ^stx", lambda: _asia_probe("^stx")),
+        ], width=24)
 
         print("\nProvider breakers after the probe:")
         _print_breakers()
