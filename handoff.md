@@ -229,6 +229,8 @@ Preview (no network needed): `ECON_DEMO=1 python3 dashboard/app.py` → sample d
 
 ### 2026-10-08 — Session 10: Summary tab
 
+- **Fix:** summary Commodities said "Nothing loaded" even when the board had cards. Formatter now keeps a quote with a missing close as "awaiting data" and no longer drops the row. Same cache as the board.
+
 - **Ask:** another tab that summarizes the data already gathered.
 - **Wiring:** `GET /summary` renders `build_summary_page` from the same `summary()` cache as `/`. Header tabs on both pages. Sections: posture, briefing lines, rates and inflation, indices, commodities, FX, CPI, GDP, coverage. No new upstreams. Server version `econ/0.9`.
 - **Pull:** `cd /opt/econ && git fetch --all && git reset --hard origin/main && ./install.sh`, then open `http://192.168.0.149:8080/summary`.

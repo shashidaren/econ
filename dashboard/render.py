@@ -235,13 +235,27 @@ def tabs(active):
 
 
 def _fmt_quote(q):
-    if not q or q.get("close") is None:
+    if not q:
         return None
+    name = q.get("name") or "quote"
+    close = q.get("close")
+    if close is None:
+        return f"{name}: awaiting data"
+    try:
+        close_s = f"{float(close):,.2f}"
+    except (TypeError, ValueError):
+        close_s = str(close)
     chg = q.get("chg_pct")
-    move = f" {chg:+.1f}%" if chg is not None else ""
+    move = ""
+    if chg is not None:
+        try:
+            move = f" {float(chg):+.1f}%"
+        except (TypeError, ValueError):
+            move = ""
     src = q.get("source") or ""
     when = q.get("date") or "?"
-    return f"{q.get('name')}: {q['close']:,.2f}{move} ({when}, {src})"
+    stale = " stale" if q.get("stale") else ""
+    return f"{name}: {close_s}{move} ({when}, {src}{stale})"
 
 
 def build_summary_page(sections, *, demo=False, generated_at=None, refresh=300):
@@ -250,16 +264,23 @@ def build_summary_page(sections, *, demo=False, generated_at=None, refresh=300):
     banner = ('<span class="badge demo">DEMO MODE — sample data '
               '(live on the server)</span>' if demo else "")
     brief = sections.get("briefing") or {}
-    indices = [q for q in (sections.get("indices") or []) if q]
-    commodities = [q for q in (sections.get("commodities") or []) if q]
-    fx = [q for q in (sections.get("fx") or []) if q]
+    indices = list(sections.get("indices") or [])
+    commodities = list(sections.get("commodities") or [])
+    fx = list(sections.get("fx") or [])
     cpi = sections.get("cpi") or []
     gdp = sections.get("gdp") or []
 
     def bullets(items, limit=12):
-        lines = [_fmt_quote(q) for q in items[:limit]]
-        lines = [f"<li>{esc(x)}</li>" for x in lines if x]
-        return "<ul>" + "".join(lines) + "</ul>" if lines else "<p>Nothing loaded.</p>"
+        lines = []
+        for q in items[:limit]:
+            text = _fmt_quote(q)
+            if text:
+                lines.append(f"<li>{esc(text)}</li>")
+            elif q:
+                lines.append(f"<li>{esc(q.get('name') or 'quote')}: awaiting data</li>")
+        if not lines:
+            return "<p>Nothing loaded yet — the refresher has not filled this panel.</p>"
+        return "<ul>" + "".join(lines) + "</ul>"
 
     def macro_lines(rows, suffix="%"):
         if not rows:
