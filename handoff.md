@@ -21,7 +21,7 @@ central-bank policy rates, and the US yield curve (recession indicator).
 | Server IP | `192.168.0.149` (LAN only) |
 | Access | root via SSH; web UI on LAN |
 | Repo | `shashidaren/econ` (this repo) |
-| Working branch | `arena/cda0bd47-econ` (this session; PR #5 merged to `main` at `e22471c` on 2026-10-08; docs-only handoff update, no code changes) |
+| Working branch | `arena/invest-briefing` (this session; PR pending — investment briefing on the board; previous session `arena/cda0bd47-econ` was docs-only after PR #5 merged at `e22471c`) |
 | Deploy model | server does `git fetch --all && git reset --hard origin/main && ./install.sh` |
 | App dir on server | `/opt/econ` |
 | Port | **8080** (override: `ECON_PORT=xxxx ./install.sh`) |
@@ -46,11 +46,12 @@ central-bank policy rates, and the US yield curve (recession indicator).
 | D11 | Yahoo crumb authentication | **Fetch session crumb via `v1/test/getcrumb` using the session cookie and pass `&crumb={crumb}` to chart & spark endpoints** | Live LXC testing proved cookie alone still returns HTTP 429 across all endpoints; modern Yahoo query APIs require a crumb matching the session cookie to authorize requests |
 | D12 | CNBC fallback for international indices | **Cascade across `Yahoo -> FRED -> CNBC -> Stooq -> CoinGecko` with 1-request batch caching for unmapped indices** | Euro Stoxx 50, DAX, FTSE 100, Shanghai Composite, and Hang Seng lack FRED coverage. When Yahoo fails, CNBC's key-less quote API provides live prices/changes in a single HTTP call; `--doctor` probes each independently |
 | D13 | Post-merge live verdict (2026-10-08 01:13 UTC) | **Yahoo = IP-level HTTP 429 (crumb endpoint itself 429); CNBC = HTTP 500 on all 6 probes; board stays at 4/9 indices** | Both v0.5 hypotheses falsified live on `root@econ`. FRED + Treasury + CoinGecko + Frankfurter + World Bank carry 100% of populated cards. Owner to decide: trim `INDICES` to 4 verified cards vs keep 9 with "awaiting data" vs investigate CNBC 500 root cause / alternative key-less feeds |
+| D14 | Investment briefing | **Derived on the server from data already on the board** (`dashboard/briefing.py`), rendered as a strip under the header and included in `/api/summary` as `briefing` | No new upstreams. Posture is Defensive / Cautious / Constructive / Awaiting data from curve, real-rate proxy (Fed funds − 10y breakeven), US CPI, GDP breadth, and populated index breadth. Explicitly not advice. Empty inputs become muted cards |
 
 Data-source rules: free, no signups; every source fails independently (panel shows
 "awaiting data"/stale badge, board never breaks); polite fetch cadence via cache TTLs.
 
-## 4. Architecture (v0.5 deployed; PR #5 merged at `e22471c`)
+## 4. Architecture (v0.6 briefing on branch `arena/invest-briefing`; v0.5 deployed at `e22471c`)
 
 ```
 dashboard/
@@ -64,9 +65,13 @@ dashboard/
   demo.py       same signatures as sources.py → synthetic data (ECON_DEMO=1)
   charts.py     server-side SVG: sparkline(), line_chart()
   render.py     single-page HTML/CSS builder (dark theme, source & stale badges,
+                investment-briefing strip under the header,
                 footer "source issues" + "upstream health" lines, auto-refresh)
+  briefing.py   posture + signal cards from the summary dict already in memory
+                (curve, policy real-rate proxy, CPI, GDP, index breadth). No I/O
 tests/test_sources.py    47 stdlib unittests — cascade, breakers, FRED gate/cache, transport,
                          Yahoo cookie+crumb, CNBC parsing & caching, Treasury headers, rendering
+tests/test_briefing.py   4 stdlib unittests — defensive/constructive/empty posture + page strip
 tools/sim_lxc_network.py replays the LXC's measured latencies against the real cascade
 tools/warm_ab.py         times warm_all() for any checkout (A/B comparisons)
 systemd/econ-dashboard.service
@@ -75,7 +80,7 @@ uninstall.sh
 .env.example    optional overrides + reserved FRED key slot
 ```
 
-- `/` board · `/api/summary` JSON (now includes `providers` breaker state) · `/healthz` probe
+- `/` board · `/api/summary` JSON (`providers` breaker state + `briefing` posture) · `/healthz` probe
 - Each refresh cycle: **pre-flight** (probe stooq hosts 3 s, one batched Yahoo spark request for
   stale Yahoo-mapped symbols) → 4-worker fan-out over fast macro sources first, then market quotes
 - Disk cache (`/var/tmp/econ-dashboard-cache.json`) keeps last good data across `systemctl restart`
@@ -108,6 +113,13 @@ Preview (no network needed): `ECON_DEMO=1 python3 dashboard/app.py` → sample d
 
 ## 6. Current status
 
+- [x] **Investment briefing (v0.6, this session, not yet deployed):** `dashboard/briefing.py`
+  builds a posture strip (Defensive / Cautious / Constructive / Awaiting data) from the
+  cache the panels already use — 10y–2y curve, Fed funds − 10y breakeven, US CPI, GDP
+  breadth, populated index breadth, plus oil/gold and USD-cross notes. Rendered under the
+  header; also on `/api/summary` as `briefing`. No new data sources. 4 new unittests pass
+  offline. Owner still deploys with `git fetch && git reset --hard origin/main && ./install.sh`
+  after merge.
 - [x] **PR #5 (v0.5) merged to `main` (`e22471c`) and deployed on `192.168.0.149`** —
   confirmed by owner's `--doctor` output at `2026-10-08T01:13:43+00:00`
   (this run has the 7-section doctor with `crumb handshake` + §[6/7] CNBC probes, i.e. v0.5 code).
@@ -135,8 +147,10 @@ Preview (no network needed): `ECON_DEMO=1 python3 dashboard/app.py` → sample d
   * Board coverage on LXC (unchanged from PR #4): Commodities 8/8, FX 8/8, CPI 7/7, GDP 7/7,
     Rates & Curve 100% (via FRED + Treasury). **Indices still 4/9** — `^stx`, `^dax`, `^ukx`,
     `^shc`, `^hsi` remain unpopulated.
-- [x] This session (`arena/cda0bd47-econ`): **docs-only** — no code changes. Handoff updated with
+- [x] Session 6 (`arena/cda0bd47-econ`): **docs-only** — no code changes. Handoff updated with
   the post-merge verdict; D13 recorded; §7/§8 rewritten around the trim-vs-investigate decision.
+- [x] This session (`arena/invest-briefing`): briefing strip + `/api/summary.briefing` + tests.
+  Does not change the index-coverage decision in §8.
 - [ ] Owner decision required (§8): trim `INDICES` to the 4 verified FRED cards, keep 9 cards with
   "awaiting data", and/or authorize a CNBC-500 root-cause investigation + Yahoo-cooldown re-probe.
 
@@ -171,6 +185,10 @@ Preview (no network needed): `ECON_DEMO=1 python3 dashboard/app.py` → sample d
 
 ## 8. Next steps (owner decision + diagnostics)
 
+0. **Merge + deploy the briefing** (`arena/invest-briefing` → `main`, then the usual
+   `git fetch --all && git reset --hard origin/main && ./install.sh`). Confirm
+   `curl -s localhost:8080/api/summary | python3 -c "import json,sys; b=json.load(sys.stdin)['briefing']; print(b['posture'], b['headline'])"`
+   and that the strip sits under the header. Demo check: `ECON_DEMO=1 python3 dashboard/app.py`.
 1. **Decide the board shape** (pick one; all are one-line `config.py` changes if trimming):
    - **(A) Trim to 4 verified indices** (`^spx`, `^ndx`, `^dji`, `^nkx`) — clean board, zero empty
      cards, everything live off FRED. Recommended if the 5 internationals are nice-to-have.
@@ -199,7 +217,32 @@ Preview (no network needed): `ECON_DEMO=1 python3 dashboard/app.py` → sample d
 
 ## 9. Session log
 
+### 2026-10-08 — Session 7: Investment briefing strip (v0.6)
+
+- **Ask:** additional improvements or a summary on the dashboard to help with investments,
+  then update this handoff.
+- **Choice:** do not add upstreams (Yahoo still IP-429, CNBC still HTTP 500, Stooq dead).
+  The useful gap was interpretation, not another quote. New `dashboard/briefing.py` reads
+  the summary dict already assembled in `app.summary()`:
+  - curve: inverted / flat (<0.50) / positive
+  - policy: Fed funds, ECB deposit, real-rate proxy = funds − 10y breakeven
+    (≥1.5 restrictive, <0 easy)
+  - inflation: US CPI row if present, plus breakeven
+  - growth: contracting economies and sub-1% real GDP
+  - markets: populated index breadth, Brent/WTI and gold day-change, USD-cross direction,
+    and a note when index cards are still awaiting data
+- **Posture rule:** Defensive if the curve is inverted (or two risk flags); Cautious if any
+  risk flag or two caution flags; Constructive otherwise; Awaiting data if every card is muted.
+  Copy states it is a read of this board, not a forecast and not advice.
+- **Wiring:** strip under the header in `render.py` (dark cards, tone colors already used by
+  the board). `/api/summary` gains `briefing`. `Handler.server_version` bumped to `econ/0.6`.
+- **Tests:** `tests/test_briefing.py` — inverted → Defensive, healthy → Constructive, empty
+  board does not crash, page contains the strip. Offline, stdlib unittest.
+- **Not done:** no deploy (branch only until merged). Index trim vs CNBC-500 investigation
+  unchanged — still the owner's call in step 1 below.
+
 ### 2026-10-08 — Session 6: Post-merge (PR #5) live verdict — Yahoo IP-banned, CNBC 500, docs-only handoff update
+ Post-merge (PR #5) live verdict — Yahoo IP-banned, CNBC 500, docs-only handoff update
 
 - **Input:** owner merged PR #5 to `main` (`e22471c`), deployed on `root@econ:/opt/econ`
   (`git fetch && git reset --hard origin/main && ./install.sh`), and ran

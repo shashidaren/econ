@@ -9,6 +9,8 @@ from datetime import datetime, timezone
 
 from charts import line_chart, sparkline
 
+import briefing
+
 STYLE = """
 :root{
   --bg:#0b0e14; --panel:#12161f; --panel2:#171c27; --line:#232a38;
@@ -59,6 +61,13 @@ h2:after{content:"";flex:1;height:1px;background:var(--line)}
 .chart{width:100%;height:auto}
 .chart-empty{color:var(--muted);font-size:13px;padding:20px 0}
 .note{color:var(--muted);font-size:12px;margin-top:8px}
+.brief{display:grid;grid-template-columns:minmax(240px,1.15fr) repeat(auto-fit,minmax(200px,1fr));gap:10px;margin:4px 0 8px}
+.brief .card{gap:4px}
+.brief .card.posture{border-color:#2c4f78;background:#101820}
+.brief .kicker{font-size:11px;letter-spacing:1.2px;text-transform:uppercase;color:var(--muted);font-weight:600}
+.brief .posture-name{font-size:22px;font-weight:700;letter-spacing:.2px}
+.brief p{font-size:12.5px;color:var(--text)}
+.tone-risk{color:var(--down)} .tone-caution{color:var(--warn)} .tone-ok{color:var(--up)} .tone-muted{color:var(--muted)}
 footer{margin-top:36px;color:var(--muted);font-size:12px;border-top:1px solid var(--line);
   padding-top:14px}
 .warn-inline{color:var(--warn);font-size:11px}
@@ -179,6 +188,32 @@ def provider_html(providers, limit=5):
             + " · ".join(bits) + esc(more) + "</span>")
 
 
+
+def briefing_html(brief):
+    """Top-of-board investment read. Missing inputs render as muted cards."""
+    if not brief:
+        return ""
+    tone = esc(brief.get("tone") or "muted")
+    cards = [
+        f"""<div class="card posture">
+  <div class="kicker">Investment briefing</div>
+  <div class="posture-name tone-{tone}">{esc(brief.get("posture") or "—")}</div>
+  <p>{esc(brief.get("headline") or "")}</p>
+  <div class="meta">{esc(brief.get("disclaimer") or "")}</div>
+</div>"""
+    ]
+    for c in brief.get("cards") or []:
+        ct = esc(c.get("tone") or "muted")
+        cards.append(
+            f"""<div class="card">
+  <div class="kicker">{esc(c.get("label") or "")}</div>
+  <div class="price tone-{ct}">{esc(c.get("value") or "—")}</div>
+  <p>{esc(c.get("text") or "")}</p>
+</div>"""
+        )
+    return '<div class="brief">' + "".join(cards) + "</div>"
+
+
 def build_page(sections, *, demo=False, generated_at=None, refresh=300,
                errors=None, providers=None):
     """sections: dict with keys indices, commodities, fx, cpi, gdp,
@@ -196,6 +231,15 @@ def build_page(sections, *, demo=False, generated_at=None, refresh=300,
   <span class="updated">updated {esc(now.strftime("%Y-%m-%d %H:%M %Z"))}</span>
   {banner}
 </header>"""]
+
+    brief = sections.get("briefing")
+    if brief is None:
+        try:
+            brief = briefing.build_briefing(sections)
+        except Exception:
+            brief = None
+    if brief:
+        body.append(briefing_html(brief))
 
     # --- Markets ------------------------------------------------------------
     body.append('<h2>World indices <span class="src">· daily close (Yahoo / FRED / CNBC / Stooq)</span></h2>')
