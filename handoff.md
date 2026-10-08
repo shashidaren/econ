@@ -21,7 +21,7 @@ central-bank policy rates, and the US yield curve (recession indicator).
 | Server IP | `192.168.0.149` (LAN only) |
 | Access | root via SSH; web UI on LAN |
 | Repo | `shashidaren/econ` (this repo) |
-| Working branch | `main` at `c2dc6b9` plus this session's Tencent/Sina index fallback (pushed to `main`; leftover `arena/*` branches deleted) |
+| Working branch | `main` (v0.8 real-yield / gold read on top of v0.7 index fallback at `5fd45e6`) |
 | Deploy model | server does `git fetch --all && git reset --hard origin/main && ./install.sh` |
 | App dir on server | `/opt/econ` |
 | Port | **8080** (override: `ECON_PORT=xxxx ./install.sh`) |
@@ -48,6 +48,7 @@ central-bank policy rates, and the US yield curve (recession indicator).
 | D13 | Post-merge live verdict (2026-10-08 01:13 UTC) | **Yahoo = IP-level HTTP 429 (crumb endpoint itself 429); CNBC = HTTP 500 on all 6 probes; board stays at 4/9 indices** | Both v0.5 hypotheses falsified live on `root@econ`. FRED + Treasury + CoinGecko + Frankfurter + World Bank carry 100% of populated cards. Owner to decide: trim `INDICES` to 4 verified cards vs keep 9 with "awaiting data" vs investigate CNBC 500 root cause / alternative key-less feeds |
 | D14 | Investment briefing | **Derived on the server from data already on the board** (`dashboard/briefing.py`), rendered as a strip under the header and included in `/api/summary` as `briefing` | No new upstreams. Posture is Defensive / Cautious / Constructive / Awaiting data from curve, real-rate proxy (Fed funds − 10y breakeven), US CPI, GDP breadth, and populated index breadth. Explicitly not advice. Empty inputs become muted cards |
 | D15 | Five missing indices | **Tencent then Sina, after CNBC, only for `^shc` `^hsi` `^ukx` `^dax` `^stx`** | 2026-10-08 probe: Tencent `sh000001` / `hkHSI` / `ukUKX` are live or previous close; Sina `b_DAX` / `b_SX5E` cover the two Tencent misses. Do not use Sina `int_dax`, `int_ftse` (stale 9284 vs 10458), or `int_fsx5e` (empty). Eastmoney was HTTP 502. GBK pages; parser keeps ASCII prices. Card source reads `tencent:…` or `sina:…` |
+| D16 | Gold inflation read | **FRED `DFII10` 10y real yield chart plus a briefing card** | Owner invests mostly in gold. Breakeven is expected inflation; the real yield is the opportunity cost. Card uses DFII10, else funds − breakeven. ≥1.5 headwind, 0.5–1.5 caution, negative is the classic tailwind. Not a price forecast |
 
 Data-source rules: free, no signups; every source fails independently (panel shows
 "awaiting data"/stale badge, board never breaks); polite fetch cadence via cache TTLs.
@@ -115,6 +116,7 @@ Preview (no network needed): `ECON_DEMO=1 python3 dashboard/app.py` → sample d
 
 ## 6. Current status
 
+- [ ] **Gold read (v0.8, this session, on `main`, not yet pulled):** `DFII10` chart under breakeven, and a Gold read card on the briefing. Pull with the usual reset and `./install.sh`. Doctor should show `fred DFII10` if probed via the rates path; the board fetches it as `fred:real`.
 - [x] **Tencent/Sina index fallback (v0.7) deployed on `192.168.0.149` at `5fd45e6`.**
   Doctor `2026-10-08T02:09:21+00:00` §[8/8] **5/5 passed**: Shanghai `tencent:sh000001`
   3852.02 @ 2026-10-08, Hang Seng `tencent:hkHSI` 24069.56 @ 2026-10-08, FTSE
@@ -223,7 +225,19 @@ Preview (no network needed): `ECON_DEMO=1 python3 dashboard/app.py` → sample d
 
 ## 9. Session log
 
+### 2026-10-08 — Session 9: Real yield as the gold inflation indicator
+
+- **Ask:** an inflation indicator to help a gold-heavy book. Not a price forecast.
+- **Choice:** FRED `DFII10` (10-year TIPS real yield), the opportunity cost of holding gold.
+  Breakeven (`T10YIE`, already on the board) is expected inflation only. A Gold read card
+  uses DFII10 when loaded, otherwise Fed funds − breakeven: ≥1.5 headwind, 0.5–1.5 caution,
+  negative = classic tailwind. Chart sits under breakeven. Copy says it is not a forecast.
+- **Wiring:** `config.FRED_REAL`, cache key `fred:real`, `/api/summary` fields `real_yield`
+  and `real_yield_meta`, briefing card `gold`. Server version `econ/0.8`.
+- **Not done:** not probed on the LXC. Same FRED path as `T10YIE`, which was green at 02:09 UTC.
+
 ### 2026-10-08 — Session 8: Tencent/Sina fallback for the five empty index cards
+ Tencent/Sina fallback for the five empty index cards
 
 - **Ask:** the five "awaiting data" index cards are expected (no FRED series; Yahoo 429,
   CNBC 500, Stooq timeout). Probe alternatives, then wire a working one and update this file.

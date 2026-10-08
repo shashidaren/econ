@@ -165,6 +165,9 @@ def build_registry():
     be_sid, _ = config.FRED_BREAKEVEN
     reg.append(("fred:breakeven", lambda s=be_sid: backend.fred_series(
         s, years=1), config.TTL["fred"]))
+    real_sid, _ = config.FRED_REAL
+    reg.append(("fred:real", lambda s=real_sid: backend.fred_series(
+        s, years=1), config.TTL["fred"]))
 
     # 4. Global indices & commodities (multi-source: Yahoo -> FRED -> Stooq)
     for name, sym in config.INDICES + config.COMMODITIES:
@@ -245,6 +248,7 @@ def get_data(key):
 def summary():
     curve_sid, curve_title, curve_years = config.FRED_CURVE
     be_sid, be_title = config.FRED_BREAKEVEN
+    real_sid, real_title = config.FRED_REAL
     policy_series = {sid: get_data(f"fred:{sid}") for sid, _ in config.FRED_POLICY}
     with LOCK:
         errors = [f"{k}: {v['err']}" for k, v in CACHE.items() if v.get("err")]
@@ -261,6 +265,8 @@ def summary():
         "curve_meta": (curve_sid, curve_title, curve_years),
         "breakeven": get_data("fred:breakeven") or [],
         "breakeven_meta": (be_sid, be_title),
+        "real_yield": get_data("fred:real") or [],
+        "real_yield_meta": (real_sid, real_title),
         "errors": errors[:6],
         "providers": providers,
     }
@@ -269,7 +275,7 @@ def summary():
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "econ/0.7"
+    server_version = "econ/0.8"
 
     def log_message(self, fmt, *args):  # quieter logs
         print(f"[http] {self.address_string()} {fmt % args}", flush=True)

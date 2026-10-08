@@ -92,6 +92,7 @@ FRED_POLICY = [
 ]
 FRED_CURVE = ("T10Y2Y", "US 10Y − 2Y Treasury Spread", 4)   # (id, title, years shown)
 FRED_BREAKEVEN = ("T10YIE", "US 10Y Breakeven Inflation")
+FRED_REAL = ("DFII10", "US 10Y Real Yield")  # TIPS yield; the usual gold headwind/tailwind
 
 # --- Cache lifetimes (seconds) ------------------------------------------------
 TTL = {

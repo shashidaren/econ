@@ -145,6 +145,48 @@ def build_briefing(sections):
                 ". Still hot versus a 2% anchor." if hot
                 else ". Near a 2% anchor on the series we have.")))
 
+    real = _latest(sections.get("real_yield"))
+    gold = _by_name(commodities, "gold")
+    if real is None and be is None:
+        cards.append(_card(
+            "gold", "Gold read", "muted", "—",
+            "Need the 10y real yield (DFII10) or breakeven before a gold read."))
+    else:
+        tone = "ok"
+        bits = []
+        if real is not None:
+            bits.append(f"10y real yield {real:.2f}%")
+            if real >= 1.5:
+                tone = "risk"
+                risk += 1
+                tail = "High real yield is a headwind for gold. A hold is a rates bet, not an inflation bet."
+            elif real >= 0.5:
+                tone = "caution"
+                caution += 1
+                tail = "Real yield still positive. Gold usually wants this falling, not just inflation sticky."
+            elif real >= 0:
+                tail = "Real yield is low. Less of a headwind; still not a negative-yield regime."
+            else:
+                tone = "ok"
+                tail = "Negative real yield. That is the classic gold tailwind on this board."
+        else:
+            proxy = (fed - be) if (fed is not None and be is not None) else None
+            if proxy is not None:
+                bits.append(f"real-rate proxy {proxy:.2f}%")
+                real = proxy
+            tail = "DFII10 not loaded; using funds minus breakeven."
+        if be is not None:
+            bits.append(f"breakeven {be:.2f}%")
+        if gold and gold.get("close") is not None:
+            move = ""
+            if gold.get("chg_pct") is not None:
+                move = f" ({gold['chg_pct']:+.1f}% last print)"
+            bits.append(f"gold {gold['close']:,.0f}{move}")
+        cards.append(_card(
+            "gold", "Gold read", tone,
+            f"{real:.2f}%" if real is not None else "—",
+            " · ".join(bits) + ". " + tail))
+
     if not gdp:
         cards.append(_card(
             "growth", "Growth", "muted", "—",

@@ -29,7 +29,7 @@ _WB = {
                           ("Germany", "DE", "-0.3")],
 }
 _FRED_LEVEL = {
-    "DFF": 4.83, "ECBDFR": 3.50, "T10Y2Y": -0.05, "T10YIE": 2.28,
+    "DFF": 4.83, "ECBDFR": 3.50, "T10Y2Y": -0.05, "T10YIE": 2.28, "DFII10": 1.70,
     "SP500": 7801.8, "NASDAQ100": 31224.7, "NASDAQCOM": 31224.7,
     "DJIA": 51179.9, "NIKKEI225": 70035.7, "POILWTIUSDM": 79.7,
     "DCOILBRENTEU": 125.4, "POILBREUSDM": 83.7,

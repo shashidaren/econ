@@ -306,6 +306,30 @@ def build_page(sections, *, demo=False, generated_at=None, refresh=300,
     else:
         body.append('<div class="section-empty">Awaiting breakeven data…</div>')
 
+    # --- Real yield (gold) -----------------------------------------------------
+    rmeta = sections.get("real_yield_meta") or ("DFII10", "US 10Y Real Yield")
+    rsid, rtitle = rmeta
+    rhist = sections.get("real_yield") or []
+    body.append(f'<h2>Real yield <span class="src">· {esc(rsid)} · gold macro driver</span></h2>')
+    if rhist:
+        rvals = [v for _, v in rhist]
+        latest = next((v for v in reversed(rvals) if v is not None), None)
+        if latest is None:
+            note = "no print"
+        elif latest >= 1.5:
+            note = "High real yield — historical headwind for gold"
+        elif latest >= 0.5:
+            note = "Positive real yield — gold needs a weaker dollar or falling yields to trend"
+        elif latest >= 0:
+            note = "Low positive real yield — less of a headwind"
+        else:
+            note = "Negative real yield — the classic gold tailwind"
+        body.append(f'<div class="big-chart">{line_chart(rvals, color="#e5a50a")}'
+                    f'<div class="note">{esc(rtitle)} · latest <b>{fmt_num(latest)}%</b> — '
+                    f'{esc(note)}. Not a forecast.</div></div>')
+    else:
+        body.append('<div class="section-empty">Awaiting real-yield data…</div>')
+
     # --- Footer ----------------------------------------------------------------
     warn = ""
     if errors:
