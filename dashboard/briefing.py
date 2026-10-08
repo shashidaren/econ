@@ -250,11 +250,16 @@ def build_briefing(sections):
             "markets", "Markets", tone, f"{up}/{populated} up",
             f"Populated indices {up} up / {down} down. " + " · ".join(extra) + "."))
 
-    if risk >= 2 or (curve is not None and curve < 0 and caution):
+    if curve is not None and curve < 0:
         posture, tone = "Defensive", "risk"
         headline = (
-            "Late-cycle caution. The curve or the growth/inflation mix is "
-            "unfriendly — treat equity strength as a trade, not a regime.")
+            "Curve inverted. That is the recession warning — treat equity "
+            "strength as a trade, not a regime.")
+    elif risk >= 2:
+        posture, tone = "Defensive", "risk"
+        headline = (
+            "Two or more risk flags (real yield, breadth, or growth), "
+            "not an inverted curve. Tight conditions — equity strength is a trade.")
     elif risk or caution >= 2:
         posture, tone = "Cautious", "caution"
         headline = (
