@@ -47,7 +47,7 @@ central-bank policy rates, and the US yield curve (recession indicator).
 Data-source rules: free, no signups; every source fails independently (panel shows
 "awaiting data"/stale badge, board never breaks); polite fetch cadence via cache TTLs.
 
-## 4. Architecture (v0.3 deployed; v0.4 follow-up pending owner merge)
+## 4. Architecture (v0.3 deployed; v0.4 PR #4 open, pending owner merge)
 
 ```
 dashboard/
@@ -109,14 +109,14 @@ Preview (no network needed): `ECON_DEMO=1 python3 dashboard/app.py` → sample d
   The measured `--doctor` output is captured in §9 Session 4.
 - [x] v0.3 is running as `econ-dashboard.service` at `/opt/econ` (owner-reported); deployment
   model remains `git reset --hard origin/main && ./install.sh` after an owner merge.
-- [x] **v0.4 follow-up implemented on `arena/8d320fd8-econ`; not yet merged or deployed.**
+- [x] **v0.4 follow-up implemented on `arena/8d320fd8-econ`; PR #4 is open, not yet merged or deployed.**
   It wires confirmed FRED series and monthly freshness limits, adds the WTI/Brent replacements
   plus FRED-only aluminum/nickel cards, bounds FRED 404 handling, prevents urllib retries after
   TCP/HTTP-status errors, normalizes Treasury headers, and isolates the Yahoo chart checks.
 - [x] Offline verification for this follow-up: **37 stdlib tests pass**; demo `/`, `/api/summary`,
   and `/healthz` all return 200 (9/9 indices, 8/8 commodities, 8/8 FX, CPI/GDP 7/7, 1460 curve
   points, 365 breakeven points, no providers); details and A/B timings are in §9 Session 4.
-- [ ] Owner to review/merge the follow-up PR, deploy it from `origin/main`, then run the live
+- [ ] Owner to review/merge PR #4, deploy it from `origin/main`, then run the live
   `--doctor` and API-summary checks in §8. No live provider behavior after this follow-up has been
   verified from the sandbox.
 
@@ -214,6 +214,8 @@ Preview (no network needed): `ECON_DEMO=1 python3 dashboard/app.py` → sample d
 - **Still needs LXC evidence:** rerun `--doctor` after deployment to confirm the new FRED mappings,
   Treasury breakeven, Stooq cost, and especially whether v8 chart works with the cookie. Follow
   §8; do not infer an answer from the sandbox.
+- **PR #4** (`arena/8d320fd8-econ` → `main`) is open for owner review/merge; it has not been merged
+  or deployed. The agent stops before merging.
 
 ### 2026-10-08 — Session 3: v0.2 live-deploy diagnosis → v0.3 (breakers, batched Yahoo, FRED gate) v0.2 live-deploy diagnosis → v0.3 (breakers, batched Yahoo, FRED gate)
 - **Input:** the v0.2 deploy output pasted from `root@econ:/opt/econ`. Working: `fx` 8/8 (1.06 s),
