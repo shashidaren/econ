@@ -9,7 +9,8 @@ Why multi-source + curl -4 transport?
   Akamai (fred.stlouisfed.org), blocked by Cloudflare (stooq.com), or 429'd
   by Yahoo Finance when using a custom bot User-Agent. Using curl -4 (HTTP/2,
   IPv4-forced, browser UA) plus independent fallback providers per panel keeps
-  every section resilient.
+  every section resilient. urllib is only a bounded fallback for TLS/HTTP-
+  protocol errors; TCP failures and completed HTTP error statuses are not retried.
 
 Sources & Fallbacks:
   * Market quotes   Yahoo Finance (v7 spark batch / v8 chart) -> FRED CSV ->
@@ -60,6 +61,13 @@ DEFAULT_HEADERS = {
 TIMEOUT = 12
 CURL_BIN = shutil.which("curl")
 
+# FRED is healthy and quick from the deployed LXC. Keep a bounded per-request
+# budget, and make the one wider retry cheaper than the normal fetch.
+FRED_TIMEOUT = 8
+FRED_WIDEN_TIMEOUT = 5
+FRED_WIDEN_YEARS = 5
+FRED_DEAD_TTL = 24 * 60 * 60
+
 # Yahoo pacing: how long to wait between requests to Yahoo (seconds). Yahoo
 # 429s data-centre IPs that burst, so this is deliberately slow-ish.
 YAHOO_MIN_INTERVAL = float(os.environ.get("ECON_YAHOO_PACE", "1.5"))
@@ -86,16 +94,29 @@ YAHOO_MAP = {
 }
 
 # (FRED series_id, max_age_days before card shows a "stale" warning)
+# Monthly IMF series publish with a lag, so 120 days is the operational limit.
 FRED_QUOTE_MAP = {
     "^spx": ("SP500", 10),
     "^ndx": ("NASDAQ100", 10),
     "^dji": ("DJIA", 10),
     "^nkx": ("NIKKEI225", 10),
-    "cl.f": ("DCOILWTI", 10),
+    "cl.f": ("POILWTIUSDM", 120),
     "cb.f": ("DCOILBRENTEU", 10),
-    "hg.f": ("PCOPPUSDM", 55),
-    "zw.f": ("PWHEAMTUSDM", 55),
+    "hg.f": ("PCOPPUSDM", 120),
+    "zw.f": ("PWHEAMTUSDM", 120),
+    "al.f": ("PALUMUSDM", 120),
+    "ni.f": ("PNICKUSDM", 120),
 }
+
+# Brent has a fresh daily FRED series today; this IMF monthly series is a
+# fallback if the daily endpoint disappears, 404s, or goes stale.
+FRED_QUOTE_FALLBACKS = {
+    "cb.f": (("POILBREUSDM", 120),),
+}
+
+# These two optional panels are deliberately FRED-only: no unverified Yahoo or
+# Stooq symbols are sent for aluminum/nickel.
+FRED_ONLY_SYMBOLS = {"al.f", "ni.f"}
 
 STOOQ_ALIASES = {
     "^stx": ["^sx5e", "^stx"],
@@ -109,24 +130,17 @@ STOOQ_ENDPOINTS = (
     ("http", "stooq.com", ":80"),
 )
 
-# CoinGecko tokenised-metal fallbacks (1 token ~= 1 troy oz).
-# pax-gold is well established; kinesis-silver is best-effort — confirm with
-# `python3 dashboard/sources.py --doctor` and delete the line if it misbehaves.
+# CoinGecko tokenised-metal fallbacks (1 token ~= 1 troy oz). Both mappings
+# were confirmed by the live LXC doctor run on 2026-10-08.
 COINGECKO_MAP = {
     "xauusd": "pax-gold",
     "xagusd": "kinesis-silver",
 }
 
-# FRED series worth probing but NOT wired into the board until confirmed live
-# (shown by `--doctor`; add to FRED_QUOTE_MAP once verified on the server).
-FRED_PROBE_CANDIDATES = [
-    "POILWTIUSDM",       # Global price of WTI, Monthly (IMF) — replaces dead DCOILWTI?
-    "POILBREUSDM",       # Global price of Brent, Monthly (IMF) — replaces DCOILBRENTEU?
-    "PSILVUSDM",         # Global price of Silver, Monthly
-    "PALUMUSDM",         # Global price of Aluminum, Monthly
-    "PNICKUSDM",         # Global price of Nickel, Monthly
-    "GOLDAMGBD228NLBM",  # LBMA Gold Price (AM fix)
-]
+# Additional FRED series to probe before wiring them into the board. All
+# confirmed series are now in FRED_QUOTE_MAP; the 404s PSILVUSDM and
+# GOLDAMGBD228NLBM have been removed.
+FRED_PROBE_CANDIDATES = []
 
 # Tracks which provider last served a given symbol -> shown on the card footer
 _LAST_SOURCE: dict[str, tuple[str, int | None]] = {}
@@ -136,6 +150,11 @@ _YAHOO_COOKIE: str | None = None
 _YAHOO_COOKIE_AT = 0.0
 _SPARK_CACHE: dict[str, tuple[float, list]] = {}
 _SPARK_LOCK = threading.Lock()
+
+# 404s for series IDs are stable across refreshes. Cache confirmed dead IDs for
+# one day so every market refresh does not pay for the same missing series.
+_FRED_DEAD: dict[str, float] = {}
+_FRED_DEAD_LOCK = threading.Lock()
 
 
 # --------------------------------------------------------------------------
@@ -211,9 +230,39 @@ def provider_status() -> list[dict]:
     return out
 
 
-def reset_breakers() -> None:
+def reset_breakers(provider: str | None = None) -> None:
+    """Reset all breakers, or only one provider and its host-specific keys."""
     with _BREAKER_LOCK:
-        _BREAKERS.clear()
+        if provider is None:
+            _BREAKERS.clear()
+            return
+        prefix = f"{provider}:"
+        for name in list(_BREAKERS):
+            if name == provider or name.startswith(prefix):
+                _BREAKERS.pop(name, None)
+
+
+def _fred_is_dead(series_id: str) -> bool:
+    now = time.monotonic()
+    with _FRED_DEAD_LOCK:
+        expires = _FRED_DEAD.get(series_id)
+        if expires is None:
+            return False
+        if expires <= now:
+            _FRED_DEAD.pop(series_id, None)
+            return False
+        return True
+
+
+def _fred_mark_dead(series_id: str) -> None:
+    with _FRED_DEAD_LOCK:
+        _FRED_DEAD[series_id] = time.monotonic() + FRED_DEAD_TTL
+
+
+def reset_fred_dead_cache() -> None:
+    """Clear the process-local negative cache (mainly useful to tests/doctor)."""
+    with _FRED_DEAD_LOCK:
+        _FRED_DEAD.clear()
 
 
 # --------------------------------------------------------------------------
@@ -247,7 +296,9 @@ def _curl_get(url: str, timeout: int = TIMEOUT, headers: dict | None = None,
     proc = subprocess.run(
         cmd,
         capture_output=True,
-        timeout=timeout + 3,
+        # curl itself has --max-time above; one extra second lets it exit cleanly
+        # without giving the urllib fallback another full independent timeout.
+        timeout=timeout + 1,
         check=False,
     )
     out = proc.stdout.decode("utf-8", "replace")
@@ -276,18 +327,56 @@ def _urllib_get(url: str, timeout: int = TIMEOUT, headers: dict | None = None) -
         return raw.decode("utf-8", "replace")
 
 
+def _curl_error_allows_urllib(exc) -> bool:
+    """Only retry curl failures that look TLS/HTTP-protocol specific.
+
+    A connect timeout or refusal is not improved by opening another client:
+    urllib would repeat the same TCP failure, often across every DNS address.
+    HTTP status responses (including 404/429) are completed HTTP exchanges, not
+    protocol failures, and must be passed through without a second request.
+    """
+    message = str(exc).lower()
+    if any(token in message for token in (
+        "failed to connect", "couldn't connect", "connection refused",
+        "connection timeout", "connection timed out", "timeout was reached",
+        "operation timed out", "no route to host", "could not resolve host",
+        "curl: (6)", "curl: (7)", "curl: (28)",
+    )):
+        return False
+    # Do not retry a completed HTTP response such as HTTP 404 or HTTP 429.
+    if any(
+        f"http {status}" in message or f"http error {status}" in message
+        for status in range(100, 600)
+    ):
+        return False
+    return any(token in message for token in (
+        "ssl", "tls", "http/2", "http2", "http protocol", "protocol error",
+        "stream error", "curl: (16)", "curl: (35)", "curl: (92)",
+    ))
+
+
 def _get(url: str, timeout: int = TIMEOUT, headers: dict | None = None,
          connect_timeout: int = 5) -> str:
-    if CURL_BIN:
+    if not CURL_BIN:
+        return _urllib_get(url, timeout=timeout, headers=headers)
+
+    started = time.monotonic()
+    deadline = started + max(1.0, float(timeout) + 1.0)
+    try:
+        return _curl_get(url, timeout=timeout, headers=headers,
+                         connect_timeout=connect_timeout)
+    except Exception as curl_exc:
+        if not _curl_error_allows_urllib(curl_exc):
+            raise
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise curl_exc
         try:
-            return _curl_get(url, timeout=timeout, headers=headers,
-                             connect_timeout=connect_timeout)
-        except Exception as curl_exc:
-            try:
-                return _urllib_get(url, timeout=timeout, headers=headers)
-            except Exception:
-                raise curl_exc
-    return _urllib_get(url, timeout=timeout, headers=headers)
+            # Share a single wall-clock budget: the fallback never gets a fresh
+            # full `timeout` after curl has already spent time on the request.
+            return _urllib_get(url, timeout=remaining, headers=headers)
+        except Exception:
+            raise curl_exc
 
 
 def _get_json(url: str, timeout: int = TIMEOUT, headers: dict | None = None):
@@ -478,7 +567,9 @@ def prefetch_yahoo(symbols, days: int = 150) -> int:
     Called by app.py before a refresh cycle: 15 symbols then cost one HTTP call
     instead of fifteen. Returns how many symbols were cached.
     """
-    syms = [s for s in dict.fromkeys(symbols) if s]
+    # FRED-only cards do not have verified Yahoo tickers; keep them out of the
+    # batch rather than asking Yahoo for internal dashboard aliases.
+    syms = [s for s in dict.fromkeys(symbols) if s and s in YAHOO_MAP]
     if not syms:
         return 0
     try:
@@ -600,30 +691,36 @@ def _stooq_raw_history(symbol: str, days: int = 150):
 
 
 def _fred_quote_history(symbol: str, days: int = 150):
-    """Fetch quote history from FRED's public CSV, gated on freshness.
-
-    FRED keeps discontinued series (e.g. DCOILWTI stopped in 2020) alive but
-    frozen, so a quote source must refuse data older than its `max_age_days`
-    instead of showing a six-year-old price as if it were today's.
-    """
+    """Fetch a freshness-gated FRED quote, trying declared fallbacks in order."""
     if symbol not in FRED_QUOTE_MAP:
         raise RuntimeError(f"fred: unmapped symbol {symbol}")
-    sid, max_age = FRED_QUOTE_MAP[symbol]
-    # Monthly IMF series need a long window for a usable sparkline.
-    window = 20 if sid.endswith("USDM") else 2
-    rows = _fred_csv_series(sid, window_years=window)
-    valid = [(d, v) for d, v in rows if v is not None and v > 0]
-    if not valid:
-        raise RuntimeError(f"fred({sid}): no valid observations")
-    last_date = valid[-1][0]
-    try:
-        age = (date.today() - date.fromisoformat(last_date)).days
-    except ValueError:
-        age = 0
-    if age > max_age:
-        raise RuntimeError(
-            f"fred({sid}): last observation {last_date} is {age}d old (> {max_age}d)")
-    return valid[-days:]
+
+    candidates = (FRED_QUOTE_MAP[symbol],) + FRED_QUOTE_FALLBACKS.get(symbol, ())
+    errs = []
+    for sid, max_age in candidates:
+        # Five years gives monthly IMF series enough history for a useful chart,
+        # while the primary daily series only needs a short freshness window.
+        window = FRED_WIDEN_YEARS if sid.endswith("USDM") else 2
+        try:
+            rows = _fred_csv_series(sid, window_years=window)
+            valid = [(d, v) for d, v in rows if v is not None and v > 0]
+            if not valid:
+                raise RuntimeError("no valid observations")
+            last_date = valid[-1][0]
+            try:
+                age = (date.today() - date.fromisoformat(last_date)).days
+            except ValueError:
+                age = 0
+            if age > max_age:
+                raise RuntimeError(
+                    f"last observation {last_date} is {age}d old (> {max_age}d)")
+            # stooq_history() uses this to report the actual primary/fallback
+            # series and the correct daily-vs-monthly staleness threshold.
+            _LAST_SOURCE[symbol] = (f"fred:{sid}", max_age)
+            return valid[-days:]
+        except Exception as exc:
+            errs.append(f"{sid}: {exc}")
+    raise RuntimeError(f"fred({symbol}): all mapped series failed -> {' | '.join(errs)}")
 
 
 def _coingecko_history(symbol: str, days: int = 90):
@@ -669,13 +766,15 @@ def stooq_history(symbol: str, days: int = 150):
     milliseconds instead of being retried for every symbol on the board.
     """
     errs = []
-    providers = [("yahoo", lambda: _yahoo_history(symbol, days=days))]
+    providers = []
+    if symbol not in FRED_ONLY_SYMBOLS:
+        providers.append(("yahoo", lambda: _yahoo_history(symbol, days=days)))
 
     if symbol in FRED_QUOTE_MAP:
-        sid, _max_age = FRED_QUOTE_MAP[symbol]
-        providers.append((f"fred:{sid}", lambda: _fred_quote_history(symbol, days=days)))
+        providers.append(("fred", lambda: _fred_quote_history(symbol, days=days)))
 
-    providers.append(("stooq", lambda: _stooq_raw_history(symbol, days=days)))
+    if symbol not in FRED_ONLY_SYMBOLS:
+        providers.append(("stooq", lambda: _stooq_raw_history(symbol, days=days)))
 
     if symbol in COINGECKO_MAP:
         providers.append((f"coingecko:{COINGECKO_MAP[symbol]}",
@@ -685,8 +784,10 @@ def stooq_history(symbol: str, days: int = 150):
         try:
             hist = fn()
             if hist:
-                if src_name.startswith("fred:") and symbol in FRED_QUOTE_MAP:
-                    max_age = FRED_QUOTE_MAP[symbol][1]
+                if src_name == "fred":
+                    src_name, max_age = _LAST_SOURCE.get(
+                        symbol, (f"fred:{FRED_QUOTE_MAP[symbol][0]}",
+                                 FRED_QUOTE_MAP[symbol][1]))
                 elif src_name.startswith("coingecko:"):
                     max_age = 3
                 else:
@@ -851,37 +952,64 @@ def _fred_cutoff_rows(rows, years: int):
 
 def _fred_csv_series(series_id: str, years: int | None = None,
                      window_years: int | None = None):
-    """Fetch [(date, value|None)] from FRED's public fredgraph.csv with &cosd= window.
+    """Fetch FRED CSV data using a bounded window and a short 404 retry.
 
     `years`          -> cosd window AND a strict cutoff applied to the result
                         (used for rates / curve panels).
     `window_years`   -> cosd window only, no cutoff (used by quote lookups that
-                        must be able to *see* that a series went stale).
-    A 404 from fredgraph.csv usually means "no observations inside that window"
-    (discontinued series), so we widen the window once before giving up — that
-    turns a mystery 404 into an actionable "last observation 2020-04-24".
+                        must be able to *see* whether a series has gone stale).
+    A 404 is retried once with at most FRED_WIDEN_YEARS of history. A second 404
+    confirms the ID is unavailable in the useful window, so it is negatively
+    cached for FRED_DEAD_TTL rather than retried on every 10-minute refresh.
     """
-    eff_window = window_years or years or 1
-    cutoff = (datetime.now(timezone.utc) - timedelta(days=365 * eff_window + 15)).strftime("%Y-%m-%d")
-    url = f"https://fred.stlouisfed.org/graph/fredgraph.csv?id={series_id}&cosd={cutoff}"
+    if _fred_is_dead(series_id):
+        raise RuntimeError(
+            f"fred({series_id}): negative-cached after HTTP 404 for "
+            f"{FRED_DEAD_TTL // 3600}h")
+
+    eff_window = max(1, int(window_years or years or 1))
+
+    def url_for(window):
+        cutoff = (datetime.now(timezone.utc) -
+                  timedelta(days=365 * window + 15)).strftime("%Y-%m-%d")
+        return ("https://fred.stlouisfed.org/graph/fredgraph.csv"
+                f"?id={series_id}&cosd={cutoff}")
+
     if not provider_available("fred"):
-        # Skip straight to the official fallbacks instead of eating a 12s timeout
-        # for every one of the ~13 FRED series on the board.
         raise RuntimeError("fred: cooling down after recent timeouts/429s")
+
     try:
-        text = _get(url, timeout=12)
+        text = _get(url_for(eff_window), timeout=FRED_TIMEOUT)
     except Exception as exc:
         unreachable, limited = _classify(exc)
         if unreachable or limited:
             note_provider_failure("fred", exc, unreachable=unreachable, rate_limited=limited)
-        if "404" in str(exc) and eff_window < 20:
-            text = _get(
-                f"https://fred.stlouisfed.org/graph/fredgraph.csv?id={series_id}"
-                f"&cosd={(datetime.now(timezone.utc) - timedelta(days=365 * 20)).strftime('%Y-%m-%d')}",
-                timeout=12,
-            )
-        else:
+        if not _is_http_404(exc):
             raise
+
+        # Do not make the retry window unbounded. If this request already
+        # covered the maximum useful span, this 404 alone confirms the ID is
+        # dead for this dashboard's purposes.
+        if eff_window >= FRED_WIDEN_YEARS:
+            _fred_mark_dead(series_id)
+            raise RuntimeError(
+                f"fred({series_id}): HTTP 404 within {eff_window}y window; "
+                f"negative-cached for {FRED_DEAD_TTL // 3600}h") from exc
+
+        try:
+            text = _get(url_for(FRED_WIDEN_YEARS), timeout=FRED_WIDEN_TIMEOUT)
+        except Exception as widen_exc:
+            if _is_http_404(widen_exc):
+                _fred_mark_dead(series_id)
+                raise RuntimeError(
+                    f"fred({series_id}): HTTP 404 in {eff_window}y and "
+                    f"{FRED_WIDEN_YEARS}y windows; negative-cached for "
+                    f"{FRED_DEAD_TTL // 3600}h") from widen_exc
+            raise RuntimeError(
+                f"fred({series_id}): initial HTTP 404 at {eff_window}y; "
+                f"{FRED_WIDEN_YEARS}y retry failed: {widen_exc}") from widen_exc
+        else:
+            note_provider_ok("fred")
     else:
         note_provider_ok("fred")
 
@@ -891,6 +1019,12 @@ def _fred_csv_series(series_id: str, years: int | None = None,
     if not any(v is not None for _, v in out):
         raise RuntimeError(f"fred: no data for {series_id}")
     return out
+
+
+def _is_http_404(exc) -> bool:
+    message = str(exc).lower()
+    return ("http 404" in message or "http error 404" in message or
+            ("curl: (22)" in message and "404" in message))
 
 
 def _nyfed_effr_series(years: int | None = None):
@@ -956,6 +1090,15 @@ def _parse_us_date(raw: str) -> str | None:
     return None
 
 
+def _treasury_row_value(row: dict, header: str):
+    """Read a Treasury CSV column without depending on header capitalization."""
+    wanted = " ".join(header.casefold().split())
+    for name, value in row.items():
+        if " ".join(str(name).strip().casefold().split()) == wanted:
+            return value
+    return None
+
+
 def _ustreasury_curve_series(years: int | None = None):
     """Official US Treasury fallback for T10Y2Y (10 Yr minus 2 Yr par yield spread)."""
     eff_years = max(1, min(years or 4, 4))
@@ -967,9 +1110,9 @@ def _ustreasury_curve_series(years: int | None = None):
     for yr in fetch_years:
         try:
             for row in _ustreasury_csv_year(yr, "daily_treasury_yield_curve"):
-                d = _parse_us_date(row.get("Date") or "")
-                y10 = row.get("10 Yr")
-                y2 = row.get("2 Yr")
+                d = _parse_us_date(_treasury_row_value(row, "Date") or "")
+                y10 = _treasury_row_value(row, "10 Yr")
+                y2 = _treasury_row_value(row, "2 Yr")
                 if d and y10 and y2:
                     try:
                         out[d] = round(float(y10) - float(y2), 2)
@@ -994,13 +1137,13 @@ def _ustreasury_breakeven_series(years: int | None = None):
     for yr in (cur_year - 1, cur_year):
         try:
             for row in _ustreasury_csv_year(yr, "daily_treasury_yield_curve"):
-                d = _parse_us_date(row.get("Date") or "")
-                v = row.get("10 Yr")
+                d = _parse_us_date(_treasury_row_value(row, "Date") or "")
+                v = _treasury_row_value(row, "10 Yr")
                 if d and v:
                     nom_10y[d] = float(v)
             for row in _ustreasury_csv_year(yr, "daily_treasury_real_yield_curve"):
-                d = _parse_us_date(row.get("Date") or "")
-                v = row.get("10 Yr")
+                d = _parse_us_date(_treasury_row_value(row, "Date") or "")
+                v = _treasury_row_value(row, "10 Yr")
                 if d and v:
                     real_10y[d] = float(v)
         except Exception as exc:
@@ -1047,6 +1190,37 @@ def fred_series(series_id: str, years: int | None = None):
             errs.append(f"fallback({series_id}): {exc}")
 
     raise RuntimeError(" | ".join(errs))
+
+
+def _doctor_yahoo_cookie():
+    """Validate the cookie handshake without printing the cookie value."""
+    if not _yahoo_session_cookie(force=True):
+        raise RuntimeError("no cookie set")
+    return "cookie set"
+
+
+def _doctor_yahoo(run_checks):
+    """Probe v8 charts independently before the optional v7 spark batch.
+
+    A spark 429 must not trip the shared breaker first and turn every chart
+    check into a misleading zero-second "cooling down" result. Each chart probe
+    clears only Yahoo's breakers; the batch gets its own clean test afterward.
+    """
+    run_checks([
+        ("cookie handshake", _doctor_yahoo_cookie),
+    ], width=24)
+
+    for label, symbol in (("chart ^GSPC", "^spx"),
+                          ("chart ^GDAXI", "^dax"),
+                          ("chart ^HSI", "^hsi")):
+        reset_breakers("yahoo")
+        run_checks([(label, lambda s=symbol: _yahoo_history(s, days=30)[-1])], width=24)
+
+    reset_breakers("yahoo")
+    run_checks([
+        ("spark batch (all)", lambda: sorted(
+            _yahoo_spark_batch(list(YAHOO_MAP), days=30).keys())),
+    ], width=24)
 
 
 if __name__ == "__main__":
@@ -1142,27 +1316,28 @@ if __name__ == "__main__":
             ("ustreasury breakeven", lambda: _ustreasury_breakeven_series(years=1)[-1]),
         ], width=24)
 
-        print("\n[3/6] FRED quote series (mapped to board cards)")
+        print("\n[3/6] FRED quote series (mapped to board cards, including fallbacks)")
+        mapped_fred = {sid for sid, _age in FRED_QUOTE_MAP.values()}
+        mapped_fred.update(
+            sid for fallbacks in FRED_QUOTE_FALLBACKS.values()
+            for sid, _age in fallbacks
+        )
         _run_checks([
             (f"fred {sid}", lambda s=sid, m=sid.endswith("USDM"): _fred_probe(s, m))
-            for _, (sid, _age) in sorted(FRED_QUOTE_MAP.items())
+            for sid in sorted(mapped_fred)
         ], width=24)
 
         print("\n[4/6] FRED candidate series (not wired in yet)")
-        _run_checks([
-            (f"fred {sid}", lambda s=sid: _fred_probe(s, monthly=s.endswith("USDM")))
-            for sid in FRED_PROBE_CANDIDATES
-        ], width=24)
+        if FRED_PROBE_CANDIDATES:
+            _run_checks([
+                (f"fred {sid}", lambda s=sid: _fred_probe(s, monthly=s.endswith("USDM")))
+                for sid in FRED_PROBE_CANDIDATES
+            ], width=24)
+        else:
+            print("  (no unverified candidates)")
 
-        print("\n[5/6] Yahoo Finance")
-        _run_checks([
-            ("cookie handshake", lambda: _yahoo_session_cookie(force=True) or "no cookie set"),
-            ("spark batch (all)", lambda: sorted(
-                _yahoo_spark_batch(list(YAHOO_MAP), days=30).keys())),
-            ("chart ^GSPC", lambda: _yahoo_history("^spx", days=30)[-1]),
-            ("chart ^GDAXI", lambda: _yahoo_history("^dax", days=30)[-1]),
-            ("chart ^HSI", lambda: _yahoo_history("^hsi", days=30)[-1]),
-        ], width=24)
+        print("\n[5/6] Yahoo Finance (charts tested before the optional spark batch)")
+        _doctor_yahoo(_run_checks)
 
         print("\n[6/6] Stooq & CoinGecko")
         checks = []

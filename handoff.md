@@ -21,7 +21,7 @@ central-bank policy rates, and the US yield curve (recession indicator).
 | Server IP | `192.168.0.149` (LAN only) |
 | Access | root via SSH; web UI on LAN |
 | Repo | `shashidaren/econ` (this repo) |
-| Working branch | `arena/fb88ec58-econ` (session branch; merge to `main` via PR) |
+| Working branch | `arena/8d320fd8-econ` (this session; PR #3 merged to `main` on 2026-10-08; this follow-up goes through a new PR) |
 | Deploy model | server does `git fetch --all && git reset --hard origin/main && ./install.sh` |
 | App dir on server | `/opt/econ` |
 | Port | **8080** (override: `ECON_PORT=xxxx ./install.sh`) |
@@ -35,31 +35,34 @@ central-bank policy rates, and the US yield curve (recession indicator).
 |---|---|---|---|
 | D1 | Dashboard approach | **Custom dashboard app** (code in this repo) | Fully ours, glanceable wall-board, most repo-friendly |
 | D2 | Install style | **Native** (apt python3 + curl + systemd) | Lightest footprint in LXC; zero pip/venv/Docker |
-| D3 | Data sources | **No-key multi-source cascade** | Every panel has primary + independent fallback endpoints (Yahoo Finance → FRED → Stooq → CoinGecko for quotes; Frankfurter `.app`/`.dev` for FX; World Bank for macro; FRED `cosd=` → NY Fed / ECB Data Portal / US Treasury CSV for rates & curve) |
-| D4 | HTTP transport | **`curl -4` (HTTP/2, IPv4) + IPv4-first `urllib`** | Solves LXC broken-IPv6 timeouts, Akamai HTTP/1.1 TLS tarpitting on `fred.stlouisfed.org`, Cloudflare blocks on `stooq.com`, and Yahoo 429s from bot User-Agents |
+| D3 | Data sources | **No-key multi-source cascade** | Every panel has primary + independent fallback endpoints (Yahoo Finance → FRED → Stooq → CoinGecko for supported quotes; aluminum/nickel are FRED-only; Frankfurter `.app`/`.dev` for FX; World Bank for macro; FRED `cosd=` → NY Fed / ECB Data Portal / US Treasury CSV for rates & curve) |
+| D4 | HTTP transport | **`curl -4` (HTTP/2, IPv4) + bounded IPv4-first `urllib` fallback only for TLS/HTTP-protocol errors** | TCP failures and completed HTTP status errors are not retried with a second client; fallback shares the remaining total timeout, avoiding Stooq's measured 21 s curl-plus-urllib penalty |
 | D5 | Cache warming | **Fast macro first + 4-worker thread pool + disk persistence** | Prevents slow market-quote endpoints from blocking FX/World Bank/Rates on startup; restores last-good data on `systemctl restart` |
 | D6 | Dead-upstream handling | **Per-provider circuit breakers** (30 min cooldown, 15 min after a 429) **+ parallel 3 s pre-flight probes** | A blocked host cost ~45 s *per card*; now the first probe trips the breaker and the other 14 symbols skip it in ~0 ms. Breaker state is printed in the board footer so an empty panel explains itself |
-| D7 | Yahoo strategy | **One batched `v7/finance/spark` request per cycle** + 1.5 s pacing + `fc.yahoo.com` session cookie + stop at the first 429 | Yahoo 429s data-centre IPs that burst; 15 sequential chart calls reliably tripped it (Session 3 evidence) |
-| D8 | FRED as a quote source | **Freshness-gated** (reject observations older than the series' `max_age_days`) + widen the `cosd=` window once on a 404 | FRED keeps discontinued series frozen (`DCOILWTI`/`DCOILBRENTEU` 404 on a 1-year window); a 2020 price must never render as today's WTI |
+| D7 | Yahoo strategy | **Current pipeline: one batched `v7/finance/spark` request per cycle**, paced at 1.5 s with the `fc.yahoo.com` cookie; `--doctor` now probes v8 charts with that cookie before spark and resets Yahoo breakers between tests | The LXC measured spark HTTP 429 (0.30 s) but did not actually test v8; if the owner confirms v8 works, prefer chart+cookie and make spark optional (pending live evidence) |
+| D8 | FRED as a quote source | **Freshness-gated** + one 404 widen to at most 5 years (5 s timeout) + process-local negative cache for confirmed dead IDs (24 h TTL) | Confirmed series replace dead WTI/silver/gold IDs; stale observations must never render as current prices, and dead IDs must not be paid for every refresh |
 | D9 | Verification | **`tests/` (stdlib unittest, faked transport) + `tools/sim_lxc_network.py`** | The agent sandbox has no egress to these hosts, so the LXC's measured latencies are replayed against the real cascade code instead of guessed at |
+| D10 | Monthly commodity series | **Use the IMF monthly WTI / Brent fallback, copper, wheat, aluminum, and nickel with a 120-day freshness limit; daily Brent remains primary** | The LXC measured the newest confirmed monthly observations at 99 days old; the former 55-day gate incorrectly marked them stale |
 
 Data-source rules: free, no signups; every source fails independently (panel shows
 "awaiting data"/stale badge, board never breaks); polite fetch cadence via cache TTLs.
 
-## 4. Architecture (v0.3)
+## 4. Architecture (v0.3 deployed; v0.4 follow-up pending owner merge)
 
 ```
 dashboard/
   app.py        HTTP server (ThreadingHTTPServer) + disk-backed cache + 4-worker refresher
                 + pre-flight step: warm_providers() then prefetch_yahoo() before the fan-out
   config.py     ALL panels/symbols/TTLs/FRED_QUOTES — edit this to change the board
-  sources.py    multi-source fetchers + `curl -4` transport + per-provider circuit breakers
+  sources.py    multi-source fetchers + bounded curl/urllib transport + provider breakers
+                + 24 h FRED 404 cache, 5 y retry limit, Treasury header normalization,
                 + CLI diagnostics (`python3 sources.py` / `--doctor`)
   demo.py       same signatures as sources.py → synthetic data (ECON_DEMO=1)
   charts.py     server-side SVG: sparkline(), line_chart()
   render.py     single-page HTML/CSS builder (dark theme, source & stale badges,
                 footer "source issues" + "upstream health" lines, auto-refresh)
-tests/test_sources.py    22 stdlib unittests — cascade, breakers, FRED gate, rendering
+tests/test_sources.py    37 stdlib unittests — cascade, breakers, FRED gate/cache, transport,
+                         Yahoo doctor isolation, Treasury headers, rendering
 tools/sim_lxc_network.py replays the LXC's measured latencies against the real cascade
 tools/warm_ab.py         times warm_all() for any checkout (A/B comparisons)
 systemd/econ-dashboard.service
@@ -70,7 +73,7 @@ uninstall.sh
 
 - `/` board · `/api/summary` JSON (now includes `providers` breaker state) · `/healthz` probe
 - Each refresh cycle: **pre-flight** (probe stooq hosts 3 s, one batched Yahoo spark request for
-  every stale symbol) → 4-worker fan-out over fast macro sources first, then market quotes
+  stale Yahoo-mapped symbols) → 4-worker fan-out over fast macro sources first, then market quotes
 - Disk cache (`/var/tmp/econ-dashboard-cache.json`) keeps last good data across `systemctl restart`
 - Failed fetch keeps last good data and surfaces a ⚠ source-issue line in the footer
 - Charts are inline SVG — **no CDN, works fully offline on LAN** once data is cached
@@ -81,13 +84,13 @@ uninstall.sh
 # Deploy latest changes (overwrites any local ad-hoc edits in /opt/econ)
 cd /opt/econ
 git fetch --all
-git reset --hard origin/main    # or origin/arena/fb88ec58-econ before PR merge
+git reset --hard origin/main    # run after the owner merges the follow-up PR
 ./install.sh
 
 # Test upstream data sources directly from the LXC
 python3 /opt/econ/dashboard/sources.py             # quick: one check per panel
-python3 /opt/econ/dashboard/sources.py --doctor    # exhaustive: every provider, series
-                                                   # and FRED candidate + breaker report
+python3 /opt/econ/dashboard/sources.py --doctor    # exhaustive: every provider and mapped
+                                                   # FRED series/fallback + breaker report
 
 # Offline tests (no network needed; faked transport)
 cd /opt/econ && python3 -m unittest discover -s tests -v
@@ -101,85 +104,118 @@ Preview (no network needed): `ECON_DEMO=1 python3 dashboard/app.py` → sample d
 
 ## 6. Current status
 
-- [x] Repo + `handoff.md` convention
-- [x] D1–D5 decided
-- [x] App code (v0.1) — initial panels, demo mode, systemd unit (PR #1 merged to `main`)
-- [x] First deploy on `192.168.0.149` executed; diagnosed live network behaviors:
-  - `fx` (Frankfurter ECB) and `wb_cpi`/`wb_gdp` (World Bank) succeeded in <1s
-  - `stooq.com` timed out; `yahoo` returned 429 on non-browser UA; `fred.stlouisfed.org`
-    timed out when queried via Python `urllib` (HTTP/1.1 + full-history CSV without `cosd=`)
-  - Sequential `warm_all()` starting with 15 market quotes delayed `fx`/`wb` by ~15 min on restart
-- [x] **v0.2 multi-source + transport & concurrency upgrade committed to Git**:
-  - `curl -4` (HTTP/2, IPv4, browser UA, URL-escaped tickers) + IPv4-first `urllib` fallback
-  - Market quotes cascade: Yahoo (`query2`/`query1` with polite rate-lock) → FRED (`cosd=`) → Stooq (`.com`/`.pl`) → CoinGecko (`pax-gold` for Gold)
-  - Rates & curve cascade: FRED (`cosd=` windowed CSV) → NY Fed EFFR JSON (`DFF`), ECB Data Portal CSV (`ECBDFR`), US Treasury Daily Par/Real Yield Curve CSV (`T10Y2Y`, `T10YIE`)
-  - Refresher warms fast macro sources first using 4 worker threads + saves disk cache
-  - Fixed card labels (`S&P 500` instead of raw symbol `^spx`) and footer error display
-- [x] **v0.2 deployed on `192.168.0.149`** (2026-10-07). Verified live from the LXC:
-  - `fx` 8/8 (1.06 s) · `wb_cpi`/`wb_gdp` 7/7 (3.47 s) · curve 1043 pts
-  - FRED `fredgraph.csv` is **fast from the LXC** (DFF 0.11 s, ECBDFR 0.15 s, T10Y2Y 0.61 s,
-    T10YIE 0.12 s) — the Session-2 tarpitting theory did not survive contact with the server
-  - **Only 4/9 indices and 4/6 commodities filled.** Root causes, in order of impact:
-    Yahoo Finance **HTTP 429** on every symbol after the first (~15 sequential chart calls),
-    `stooq.com`/`stooq.pl` **TCP connect timeout after 5 s** (both, every symbol → ~45 s/card),
-    FRED **HTTP 404** for `DCOILWTI` (discontinued series, empty `cosd=` window)
-- [x] **v0.3 implemented and verified offline** — circuit breakers, pre-flight probes, batched
-  Yahoo spark prefetch, FRED freshness gate, `--doctor`, 22 unit tests (see §9 Session 3)
-- [ ] **Deploy v0.3 on `192.168.0.149`** and re-run the summary check + `sources.py --doctor`
+- [x] **PR #3 (v0.3) merged to `main` on 2026-10-08 and deployed on `192.168.0.149`** —
+  reported by the owner; the merge/deploy were not independently re-verified from this session.
+  The measured `--doctor` output is captured in §9 Session 4.
+- [x] v0.3 is running as `econ-dashboard.service` at `/opt/econ` (owner-reported); deployment
+  model remains `git reset --hard origin/main && ./install.sh` after an owner merge.
+- [x] **v0.4 follow-up implemented on `arena/8d320fd8-econ`; not yet merged or deployed.**
+  It wires confirmed FRED series and monthly freshness limits, adds the WTI/Brent replacements
+  plus FRED-only aluminum/nickel cards, bounds FRED 404 handling, prevents urllib retries after
+  TCP/HTTP-status errors, normalizes Treasury headers, and isolates the Yahoo chart checks.
+- [x] Offline verification for this follow-up: **37 stdlib tests pass**; demo `/`, `/api/summary`,
+  and `/healthz` all return 200 (9/9 indices, 8/8 commodities, 8/8 FX, CPI/GDP 7/7, 1460 curve
+  points, 365 breakeven points, no providers); details and A/B timings are in §9 Session 4.
+- [ ] Owner to review/merge the follow-up PR, deploy it from `origin/main`, then run the live
+  `--doctor` and API-summary checks in §8. No live provider behavior after this follow-up has been
+  verified from the sandbox.
 
 ## 7. Known risks / watch-list
 
-- **Ad-hoc edits on `/opt/econ`**: During Session 1 post-merge debugging, heredoc patches were
-  pasted directly into `/opt/econ/dashboard/{config,sources,app,render}.py`. Always use
-  `git fetch --all && git reset --hard origin/main` (or the session branch) before `./install.sh`
-  so git doesn't refuse to pull over local modifications.
-- **Yahoo Finance 429s (the current headline problem)**: Yahoo serves the first request then
-  rate-limits the IP. Mitigations in v0.3: one batched `v7/finance/spark` call per cycle instead
-  of 15 chart calls, 1.5 s pacing (`ECON_YAHOO_PACE`), `fc.yahoo.com` session cookie
-  (`ECON_YAHOO_COOKIE=0` to disable), stop-on-first-429, and a 15 min breaker. **Unverified from
-  the LXC** — the spark endpoint and the cookie handshake both need one `--doctor` run.
-- **5 indices depend solely on Yahoo**: `^dax`, `^ukx`, `^stx`, `^shc`, `^hsi` have no FRED
-  equivalent. If the batched call still 429s, they stay empty. Options if `--doctor` says so:
-  add CNBC's key-less `quote.cnbc.com` REST endpoint (history support unconfirmed), or trim the
-  board to what FRED covers.
-- **stooq is unreachable from the LXC** (`stooq.com`, `stooq.pl` and `http://stooq.com:80` all
-  time out at TCP level). v0.3 makes that cost 3 s once per 30 min instead of 45 s per card. If
-  `--doctor` confirms all three are dead from this network, delete them from `STOOQ_ENDPOINTS`.
-- **FRED discontinued series**: `DCOILWTI` and `DCOILBRENTEU` return 404 for a 1-year window
-  (last observations are from 2020). v0.3 widens the window once to confirm staleness and then
-  refuses the data instead of showing a six-year-old price as today's. Needs a live replacement
-  for WTI/Brent (see §8).
-- **Silver has no verified fallback**: `xagusd` is Yahoo-only; `kinesis-silver` on CoinGecko is
-  wired in as a guess and appears in `--doctor` — delete the `COINGECKO_MAP` line if it fails.
-  `FRED_PROBE_CANDIDATES` lists series (`PSILVUSDM`, `PALUMUSDM`, …) to confirm at the same time.
-- **FRED `fredgraph.csv` latency**: Mitigated by `&cosd=YYYY-MM-DD`, `curl -4` HTTP/2, and the
-  NY Fed / ECB / US Treasury fallbacks. Session 3 evidence: FRED is actually fast from the LXC,
-  so this risk is lower than believed in Session 2.
-- **Sandbox has no egress to data hosts**: nothing upstream can be verified from the agent
-  environment (only github/pypi are reachable). Every claim about live providers must come from a
-  run on the LXC — `tests/` + `tools/sim_lxc_network.py` cover the logic in the meantime.
+- **Yahoo remains unresolved.** The owner's 2026-10-08 run confirmed the cookie handshake but
+  got HTTP 429 from `v7/finance/spark`; it did not actually reach the v8 chart tests because the
+  shared breaker masked them. This branch changes `--doctor` to test v8 charts with the cookie
+  first and reset Yahoo breakers between probes. The sandbox's own doctor run cannot reach data
+  hosts, so whether v8 works with the cookie is still unverified.
+- **Five indices depend solely on Yahoo**: `^dax`, `^ukx`, `^stx`, `^shc`, and `^hsi` have no
+  confirmed FRED equivalent. If v8 chart+cookie fails, probe CNBC's key-less quote/history API
+  from the LXC before deciding whether to add it or trim the board; do not infer support.
+- **Stooq is dead from the deployed LXC**: the supplied `--doctor` measured 21.06 s for each
+  endpoint because the old transport retried TCP timeouts through urllib. This branch stops that
+  retry and still runs the 3 s parallel pre-flight probes. The post-fix LXC timings remain
+  unverified; keep Stooq as a fallback until the owner re-runs `--doctor`.
+- **FRED replacement maps are based on the owner's measured results**, not an agent-network probe:
+  Brent daily `DCOILBRENTEU` was fresh; `POILWTIUSDM`, `POILBREUSDM`, `PCOPPUSDM`, `PWHEAMTUSDM`,
+  `PALUMUSDM`, and `PNICKUSDM` were live at 99 days old. A 120-day gate now accepts the monthly
+  observations. Verify the new map and the Brent monthly fallback after deployment.
+- **Treasury breakeven fix is locally tested only.** Header matching is case-insensitive for both
+  `10 Yr` and `10 YR`; the real yield-curve CSV still needs a live LXC `--doctor` confirmation.
+- **Ad-hoc `/opt/econ` edits** were made during earlier deploy debugging. After the owner merges,
+  deploy with `git fetch --all && git reset --hard origin/main` before `./install.sh` so local
+  changes cannot block or contaminate the checkout.
+- **Sandbox has no egress to data hosts** (only GitHub/PyPI are available). The offline doctor run
+  in Session 4 exited 0 while every data source failed gracefully; no live claim after the
+  supplied LXC measurements is independently verified.
 
-## 8. Next steps (backlog)
+## 8. Next steps (owner after the follow-up PR)
 
-1. **Deploy v0.3 on the LXC** (merge this branch → `main`, then the §5 deploy block) and re-run
-   the summary one-liner. Expected: same macro panels, faster warm-up, and a footer that names
-   the provider that is failing instead of an unexplained empty card.
-2. **Run `python3 /opt/econ/dashboard/sources.py --doctor` and paste the output back.** It answers
-   every open question in one shot: does the batched Yahoo spark call work? does the cookie
-   handshake return a cookie? which FRED series are alive (`SP500`, `NASDAQ100`, `DJIA`,
-   `NIKKEI225`, `PCOPPUSDM`, `PWHEAMTUSDM`)? are `POILWTIUSDM`/`POILBREUSDM`/`PSILVUSDM` real
-   replacements for the discontinued oil/silver series? is any stooq host reachable at all?
-3. **Act on that output** (each is a 1–3 line change in `config.py`/`sources.py`):
-   promote confirmed FRED series into `FRED_QUOTE_MAP`, delete `COINGECKO_MAP` entries that fail,
-   drop dead hosts from `STOOQ_ENDPOINTS`.
-4. If Yahoo still 429s even batched: evaluate CNBC's key-less `quote.cnbc.com` REST API for
-   `^dax`, `^ukx`, `^stx`, `^shc`, `^hsi` (history support unconfirmed — probe first).
-5. Ideas pool: global shipping (BDI) panel · debt-to-GDP panel · central-bank meeting
-   calendar · multi-region yield curves · "snapshots" (PNG export for wall display).
+1. After reviewing and merging the PR, deploy on `root@econ`:
+   `cd /opt/econ && git fetch --all && git reset --hard origin/main && ./install.sh`.
+2. Re-run `python3 /opt/econ/dashboard/sources.py --doctor`. It now tests the cookie handshake,
+   then `chart ^GSPC`, `chart ^GDAXI`, and `chart ^HSI` independently, and only then the spark
+   batch. Paste the output back; it is the evidence needed to settle Yahoo.
+3. If any v8 chart works with the cookie, prefer chart+cookie in the warm path and keep spark
+   optional. If v8 fails, probe `quote.cnbc.com` from the LXC for key-less quote/history support
+   before choosing CNBC vs trimming the five Yahoo-only indices. Do not guess.
+4. Confirm `ustreasury breakeven` now returns a series, and verify the mapped FRED cards and their
+   freshness: WTI monthly `POILWTIUSDM`, Brent daily `DCOILBRENTEU` then monthly `POILBREUSDM`,
+   copper/wheat/aluminum/nickel monthly, plus CoinGecko gold/silver. The deployment summary should
+   count 9 indices and 8 commodities; the five Yahoo-only indices may remain empty until Yahoo or
+   a new provider is confirmed.
+5. Review `curl -s localhost:8080/api/summary` and the provider breaker footer; preserve its live
+   output in the next handoff rather than extrapolating from the simulation.
+6. Ideas pool: global shipping (BDI) panel · debt-to-GDP panel · central-bank meeting calendar ·
+   multi-region yield curves · "snapshots" (PNG export for wall display).
 
 ## 9. Session log
 
-### 2026-10-08 — Session 3: v0.2 live-deploy diagnosis → v0.3 (breakers, batched Yahoo, FRED gate)
+### 2026-10-08 — Session 4: LXC doctor evidence → confirmed series, bounded transport, Yahoo probe fix
+
+- **Input:** owner supplied the live `root@econ` doctor output captured at `2026-10-08T00:18:04Z`.
+  This is the LXC's measured ground truth; the sandbox could not independently re-query data hosts.
+  Key results:
+  - Frankfurter `.app`/`.dev`: 0.69/0.72 s; World Bank CPI/GDP: 1.81/0.48 s.
+  - FRED policy/curve IDs (`DFF`, `ECBDFR`, `T10Y2Y`, `T10YIE`) all worked in about 0.6–0.7 s;
+    NY Fed EFFR and Treasury 10y–2y worked. Treasury breakeven failed with `no 10Y breakeven data`
+    in 3.81 s and no cause detail.
+  - FRED `SP500`, `NASDAQ100`, `DJIA`, `NIKKEI225`, and daily Brent `DCOILBRENTEU` were live.
+    `DCOILWTI` returned 404 in 24.47 s. Copper/wheat and the monthly WTI/Brent/aluminum/nickel
+    candidates were live, with their latest observations 99 days old. `PSILVUSDM` and
+    `GOLDAMGBD228NLBM` returned 404 in 12.60/25.42 s.
+  - Yahoo cookie handshake succeeded; spark batch got HTTP 429 in 0.30 s. The old doctor then
+    skipped v8 chart tests in 0.00 s because the spark 429 had already tripped Yahoo's breaker;
+    chart+cookie behavior remains untested on the LXC.
+  - Stooq `.com`, `.pl`, and HTTP `.com` all timed out at about 21.06 s each. CoinGecko
+    `pax-gold`/`kinesis-silver` both worked in 0.47/0.54 s.
+- **Implemented on `arena/8d320fd8-econ` (v0.4 follow-up, pending owner merge):**
+  - FRED: replace WTI `DCOILWTI` with monthly `POILWTIUSDM`; keep daily Brent `DCOILBRENTEU` and
+    add monthly `POILBREUSDM` fallback; remove 404 silver/gold FRED candidates; set monthly IMF
+    freshness limits to 120 days. Add optional FRED-only aluminum/nickel cards from `PALUMUSDM` and
+    `PNICKUSDM`. Gold/silver CoinGecko mappings are unchanged.
+  - `_fred_csv_series`: 8 s regular request, one 5 s widen to at most 5 years, then a process-local
+    24 h `_FRED_DEAD` negative cache after a confirmed 404. Monthly quote histories request 5 years.
+  - `_get`: do not retry TCP failures or completed HTTP errors through urllib; allow only
+    TLS/HTTP-protocol fallback and share one total time budget between curl and urllib.
+  - Treasury CSV headers are normalized case-insensitively (`10 Yr`/`10 YR`); Yahoo `--doctor`
+    now probes cookie-backed v8 charts before spark and clears Yahoo breakers between probes.
+  - Updated the simulator with the measured per-provider latencies; it now fakes curl and urllib
+    separately so each checkout's real `_get()` fallback policy is exercised.
+- **Verification — offline only:**
+  - `python3 -m unittest discover -s tests -v` → **37 passed**; `py_compile` passed.
+  - Demo mode on port 8091: `/`, `/api/summary`, `/healthz` → **200**; 9/9 indices, 8/8 commodities,
+    8/8 FX, 7 CPI, 7 GDP, 1460 curve points, 365 breakeven points, `providers: []`; 29 inline SVGs.
+  - `python3 dashboard/sources.py --doctor` in the sandbox exited **0** and failed external checks
+    gracefully (no data-host egress). Its Yahoo chart probes were no longer masked by the spark
+    breaker, but these failures are not evidence about the LXC.
+  - Same simulated LXC network, baseline PR #3 code (`bd8c6d2`) vs this branch: `warm_all()`
+    **35.8 s / 14 of 22 keys → 6.3 s / 19 of 24 keys**; indices 4/9 → 4/9, commodities 3/6 → 8/8,
+    FX 8/8 and CPI/GDP 7/7 on both. The synthetic sim returns 30 curve/breakeven points; this is a
+    transport/cascade A/B, not a live-deploy measurement.
+- **Still needs LXC evidence:** rerun `--doctor` after deployment to confirm the new FRED mappings,
+  Treasury breakeven, Stooq cost, and especially whether v8 chart works with the cookie. Follow
+  §8; do not infer an answer from the sandbox.
+
+### 2026-10-08 — Session 3: v0.2 live-deploy diagnosis → v0.3 (breakers, batched Yahoo, FRED gate) v0.2 live-deploy diagnosis → v0.3 (breakers, batched Yahoo, FRED gate)
 - **Input:** the v0.2 deploy output pasted from `root@econ:/opt/econ`. Working: `fx` 8/8 (1.06 s),
   `wb_cpi`/`wb_gdp` 7/7 (3.47 s), `DFF`/`ECBDFR`/`T10Y2Y`/`T10YIE` all live off FRED CSV in
   0.11–0.61 s, curve 1043 pts. Broken: **indices 4/9, commodities 4/6**, and two quotes that took
@@ -222,6 +258,9 @@ Preview (no network needed): `ECON_DEMO=1 python3 dashboard/app.py` → sample d
 - **Still open:** none of the new Yahoo-spark / cookie / FRED-candidate behaviour is confirmed
   against the real network. One `python3 /opt/econ/dashboard/sources.py --doctor` run on the LXC
   settles all of it (§8.2).
+- **Follow-up (2026-10-08):** owner merged PR #3 into `main` (branch commit `bd8c6d2`) and
+  deployed it. This is recorded from the owner's report; the session that merged it lost
+  GitHub access afterward, so the merge was not independently verified here.
 
 ### 2026-10-07 — Session 2: live-deploy root-cause fixes + v0.2 pushed to Git
 - Reviewed terminal logs from the first live run on `root@econ:/opt/econ`:
