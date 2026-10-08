@@ -21,7 +21,7 @@ central-bank policy rates, and the US yield curve (recession indicator).
 | Server IP | `192.168.0.149` (LAN only) |
 | Access | root via SSH; web UI on LAN |
 | Repo | `shashidaren/econ` (this repo) |
-| Working branch | `arena/3caf56b5-econ` (this session; PR #4 merged to `main` at `e17d018` on 2026-10-08; follow-up v0.5 goes through this PR) |
+| Working branch | `arena/cda0bd47-econ` (this session; PR #5 merged to `main` at `e22471c` on 2026-10-08; docs-only handoff update, no code changes) |
 | Deploy model | server does `git fetch --all && git reset --hard origin/main && ./install.sh` |
 | App dir on server | `/opt/econ` |
 | Port | **8080** (override: `ECON_PORT=xxxx ./install.sh`) |
@@ -45,11 +45,12 @@ central-bank policy rates, and the US yield curve (recession indicator).
 | D10 | Monthly commodity series | **Use the IMF monthly WTI / Brent fallback, copper, wheat, aluminum, and nickel with a 120-day freshness limit; daily Brent remains primary** | The LXC measured the newest confirmed monthly observations at 99 days old; the former 55-day gate incorrectly marked them stale |
 | D11 | Yahoo crumb authentication | **Fetch session crumb via `v1/test/getcrumb` using the session cookie and pass `&crumb={crumb}` to chart & spark endpoints** | Live LXC testing proved cookie alone still returns HTTP 429 across all endpoints; modern Yahoo query APIs require a crumb matching the session cookie to authorize requests |
 | D12 | CNBC fallback for international indices | **Cascade across `Yahoo -> FRED -> CNBC -> Stooq -> CoinGecko` with 1-request batch caching for unmapped indices** | Euro Stoxx 50, DAX, FTSE 100, Shanghai Composite, and Hang Seng lack FRED coverage. When Yahoo fails, CNBC's key-less quote API provides live prices/changes in a single HTTP call; `--doctor` probes each independently |
+| D13 | Post-merge live verdict (2026-10-08 01:13 UTC) | **Yahoo = IP-level HTTP 429 (crumb endpoint itself 429); CNBC = HTTP 500 on all 6 probes; board stays at 4/9 indices** | Both v0.5 hypotheses falsified live on `root@econ`. FRED + Treasury + CoinGecko + Frankfurter + World Bank carry 100% of populated cards. Owner to decide: trim `INDICES` to 4 verified cards vs keep 9 with "awaiting data" vs investigate CNBC 500 root cause / alternative key-less feeds |
 
 Data-source rules: free, no signups; every source fails independently (panel shows
 "awaiting data"/stale badge, board never breaks); polite fetch cadence via cache TTLs.
 
-## 4. Architecture (v0.4 deployed; v0.5 PR #5 on arena/3caf56b5-econ)
+## 4. Architecture (v0.5 deployed; PR #5 merged at `e22471c`)
 
 ```
 dashboard/
@@ -107,71 +108,143 @@ Preview (no network needed): `ECON_DEMO=1 python3 dashboard/app.py` → sample d
 
 ## 6. Current status
 
-- [x] **PR #4 (v0.4) merged to `main` (`e17d018`) and deployed on `192.168.0.149`** —
-  confirmed by owner's terminal output at `2026-10-08T00:52:13+00:00`.
-- [x] **Live deploy measurements from PR #4:**
-  * FX & macro: 4/4 passed (0.14–1.34 s).
-  * Rates & curve: 8/8 passed! `ustreasury breakeven` now works (3.55 s -> 2.36), confirming
-    case-insensitive header fix in production.
-  * FRED quote series: 11/11 passed (0.11–0.55 s). 120-day IMF monthly lag gate accepted
-    observations at 99 days old; daily Brent and US/Nikkei indices were fresh.
-  * Stooq: TCP connect timeouts bounded to 5.02 s each (15 s total probe vs old 63 s).
-    CoinGecko PAX Gold (4123.7) and Kinesis Silver (60.2) passed in <0.5 s.
-  * Yahoo Finance: cookie set in 0.16 s, but all v8 charts (`^GSPC`, `^GDAXI`, `^HSI`) and
-    spark batch returned HTTP 429.
-  * Current board coverage on LXC: Commodities 8/8 (100%), FX 8/8 (100%), CPI 7/7 (100%),
-    GDP 7/7 (100%), Rates & Curve 100%. Indices: 4/9 populated, 5/9 unpopulated (`^stx`, `^dax`,
-    `^ukx`, `^shc`, `^hsi`).
-- [x] **v0.5 follow-up implemented on `arena/3caf56b5-econ` (PR #5 prepared):**
-  * Added Yahoo session crumb authentication flow (`_fetch_yahoo_crumb`, `_yahoo_session_crumb`,
-    and `&crumb={crumb}` parameter). `--doctor` now tests cookie and crumb handshakes.
-  * Added CNBC fallback quote provider (`CNBC_MAP`, `_cnbc_batch`, `_cnbc_history`) in cascade:
-    `Yahoo -> FRED -> CNBC -> Stooq -> CoinGecko`. 5 missing indices resolve in 1 HTTP call.
-  * Added Section `[6/7]` to `sources.py --doctor` to independently probe CNBC for `.GDAXI`,
-    `.FTSE`, `.HSI`, `.SSEC`, and `.STOXX50E`.
-  * Offline verification: **47 stdlib tests pass**; `sim_lxc_network.py` times `warm_all()` at
-    6.6 s with 24/24 keys filled (and 6.8 s / 19/24 keys under simulated CNBC 403 failure).
-- [ ] Owner to review/merge PR #5, deploy on `root@econ`, and run the live `--doctor` check in §8.
+- [x] **PR #5 (v0.5) merged to `main` (`e22471c`) and deployed on `192.168.0.149`** —
+  confirmed by owner's `--doctor` output at `2026-10-08T01:13:43+00:00`
+  (this run has the 7-section doctor with `crumb handshake` + §[6/7] CNBC probes, i.e. v0.5 code).
+- [x] **Live post-merge measurements (2026-10-08T01:13:43+00:00) — both v0.5 hypotheses falsified:**
+  * FX & macro: **4/4 passed** — stable. Frankfurter `.app` 1.08 s / `.dev` 0.33 s
+    (-> 2026-10-07); World Bank CPI 0.15 s (-> 2.95), GDP 0.13 s (-> 2.16). Unchanged values.
+  * Rates & curve: **6/8 passed** (was 8/8 at 00:52). FRED primaries all OK in 0.13–0.51 s
+    (`DFF` 3.88 @ 2026-10-06, `ECBDFR` 2.5 @ 2026-10-07, `T10Y2Y` 0.51, `T10YIE` 2.36) and both
+    Treasury fallbacks OK (10y-2y 1.77 s -> 0.51, breakeven 2.91 s -> 2.36). **New failures are
+    fallback-only:** `nyfed EFFR` SSL connection timeout (5.01 s) and `ecb DFR` operation timeout
+    (10.01 s) — board unaffected while FRED primaries answer, but re-probe to see if transient.
+  * FRED quote series: **11/11 passed** (0.10–0.56 s) — identical to 00:52 run. Daily Brent
+    125.44 (2d old), DJIA 51179.87 / SP500 7801.77 / NIKKEI225 70035.71 (1d old),
+    NASDAQ100 31224.69 (2d old); monthly IMF set still 99d old, accepted by the 120-day gate.
+  * Yahoo Finance: cookie set (1.23 s) but **`crumb handshake` itself returns HTTP 429**
+    (0.23 s, `query2`) — proving an **IP-level rate limit**, not a missing-auth problem.
+    All v8 charts (`^GSPC` 0.35 s, `^GDAXI` 1.64 s, `^HSI` 1.48 s) and spark batch (1.18 s)
+    still 429. Breaker: `yahoo: cooling retry_in=879s`.
+  * CNBC: **0/6 passed — all HTTP 500** (not the predicted 403): `.GDAXI` 2.58 s, `.FTSE` 0.15 s,
+    `.HSI` 0.11 s, `.SSEC` 0.12 s, `.STOXX50E` 0.09 s, batch 1.18 s. Fast failures suggest the
+    request reaches CNBC but the server errors — symbol format / params / endpoint drift suspect,
+    not a timeout. Breaker: `cnbc: degraded retry_in=0s`.
+  * Stooq still dead (3× 5.01 s connect timeouts). CoinGecko live: PAX Gold 4133.21 (+0.2% vs
+    4123.7), Kinesis Silver 60.79 (+1.0% vs 60.2), both <0.5 s and dated 2026-10-08.
+  * Board coverage on LXC (unchanged from PR #4): Commodities 8/8, FX 8/8, CPI 7/7, GDP 7/7,
+    Rates & Curve 100% (via FRED + Treasury). **Indices still 4/9** — `^stx`, `^dax`, `^ukx`,
+    `^shc`, `^hsi` remain unpopulated.
+- [x] This session (`arena/cda0bd47-econ`): **docs-only** — no code changes. Handoff updated with
+  the post-merge verdict; D13 recorded; §7/§8 rewritten around the trim-vs-investigate decision.
+- [ ] Owner decision required (§8): trim `INDICES` to the 4 verified FRED cards, keep 9 cards with
+  "awaiting data", and/or authorize a CNBC-500 root-cause investigation + Yahoo-cooldown re-probe.
 
 ## 7. Known risks / watch-list
 
-- **Yahoo HTTP 429 vs crumb authentication:** The LXC verified that cookie alone still returns
-  HTTP 429 across v8 chart and spark batch. Modern Yahoo query APIs require a matching `crumb`
-  token. This branch adds `_fetch_yahoo_crumb` and tests `crumb handshake` in `--doctor`. If
-  crumb acquisition works, Yahoo charts will include `&crumb=...`. If `getcrumb` also returns
-  429, the LXC IP is rate-limited by Yahoo and alternative providers must be used.
-- **International indices (DAX, FTSE, Euro Stoxx, Shanghai, Hang Seng):** These 5 indices lack
-  FRED coverage. CNBC fallback is wired into the cascade and probed in `--doctor` [6/7].
-  If CNBC responds from the LXC, all 5 cards get live quotes (filling 9/9 indices). If CNBC is
-  blocked (403 from server IPs), the owner can decide whether to trim the board to the 4 verified
-  indices or explore other key-less feeds.
-- **Stooq verified dead from the deployed LXC:** confirmed connect timeouts at 5.02 s each.
-  Circuit breakers and parallel 3 s pre-flight probes ensure it costs 0 ms during regular warming.
-- **FRED verified 100% operational:** all 11 mapped series and official fallbacks verified live.
-- **Treasury breakeven verified operational:** returns current 10Y breakeven rate live.
+- **Yahoo = IP-level HTTP 429 (settled 01:13 UTC):** `crumb handshake` itself returns 429 in
+  0.23 s, so the LXC's IP is rate-limited at Yahoo's edge — no cookie/crumb/pacing tweak on this
+  IP will fix it. Yahoo stays in the cascade (breaker-cooled, ~0 ms cost) in case the limit lifts,
+  but the board cannot depend on it. Re-probe after a long cooldown to confirm; otherwise the only
+  Yahoo paths are a different egress IP or a proxy (owner call).
+- **CNBC = HTTP 500 on all 6 probes (new, needs root-cause):** predicted failure was 403
+  (datacenter block); actual is fast 500s (0.09–2.58 s), which means the request reaches CNBC but
+  the server errors. Prime suspects, in order: (a) symbol format rejected (`.GDAXI`-style `symbolType=issue`
+  params no longer accepted — try `GDAXI`, exchange-suffixed, or single-symbol requests);
+  (b) endpoint/param drift (`quote-html-webservice/quote.htm?...&requestMethod=quick` changed);
+  (c) missing headers/cookies CNBC now requires; (d) IP-based abuse response surfaced as 500.
+  The 500 response *body* is not logged today — capturing it is step 1 (§8).
+- **International indices still 4/9:** DAX, FTSE, Euro Stoxx 50, Shanghai, Hang Seng have no FRED
+  coverage and all three key-less fallbacks (Yahoo 429, CNBC 500, Stooq timeout) fail live.
+  Nothing renders for these 5 cards except "awaiting data" + footer health line.
+- **NY Fed / ECB fallback timeouts (new, fallback-only):** `nyfed EFFR` SSL timeout (5.01 s) and
+  `ecb DFR` 10 s timeout at 01:13 UTC, after passing at 00:52. FRED primaries + Treasury CSVs
+  cover the board, so no user impact — but if persistent, the rates cascade loses redundancy.
+  Could be transient congestion, IPv4/TLS path issues, or LXC upstream flakiness. Re-probe first.
+- **Stooq verified dead from the deployed LXC:** 3× 5.01 s connect timeouts. Breakers + parallel
+  3 s pre-flight keep it at ~0 ms during regular warming.
+- **Solid core (do not touch):** FRED 11/11 quotes + 4/4 policy/curve primaries, Treasury 10y-2y +
+  breakeven, Frankfurter `.app`/`.dev`, World Bank CPI/GDP, CoinGecko gold/silver — all green with
+  sub-second to ~3 s latencies and fresh dates.
 - **Sandbox has no egress to data hosts:** only GitHub/PyPI are reachable from this environment.
   All local tests use faked transports; live provider behavior must be verified on `root@econ`.
 
-## 8. Next steps (owner after PR #5)
+## 8. Next steps (owner decision + diagnostics)
 
-1. Review and merge the PR, then deploy on `root@econ`:
+1. **Decide the board shape** (pick one; all are one-line `config.py` changes if trimming):
+   - **(A) Trim to 4 verified indices** (`^spx`, `^ndx`, `^dji`, `^nkx`) — clean board, zero empty
+     cards, everything live off FRED. Recommended if the 5 internationals are nice-to-have.
+   - **(B) Keep 9 cards** with "awaiting data" + footer health line — preserves layout while
+     alternatives are investigated. Zero code change.
+   - **(C) Authorize a CNBC-500 investigation** (agent work, needs 1–2 LXC curl outputs — step 2).
+2. **Capture the CNBC 500 body + variants from the LXC** (this is what unblocks the diagnosis —
+   today's doctor only logs the status code):
    ```bash
-   cd /opt/econ && git fetch --all && git reset --hard origin/main && ./install.sh
+   # Exact URL the app requests (batch of 5), with body shown:
+   curl -4 -sS -i --max-time 10 -A 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36' \
+     'https://quote.cnbc.com/quote-html-webservice/quote.htm?noform=1&partnerId=2&fund=1&exthrs=0&output=json&symbolType=issue&symbols=.GDAXI%7C.FTSE%7C.HSI%7C.SSEC%7C.STOXX50E&requestMethod=quick' | head -c 2000
+   # Single-symbol + alternate symbol spelling (tests the symbol-format hypothesis):
+   curl -4 -sS -i --max-time 10 -A 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36' \
+     'https://quote.cnbc.com/quote-html-webservice/quote.htm?noform=1&partnerId=2&fund=1&exthrs=0&output=json&symbolType=issue&symbols=.GDAXI&requestMethod=quick' | head -c 2000
    ```
-2. Re-run `python3 /opt/econ/dashboard/sources.py --doctor`.
-   It now probes:
-   - Section 5: cookie handshake + crumb handshake + charts with crumb + spark batch.
-   - Section 6: CNBC quote probes for `.GDAXI`, `.FTSE`, `.HSI`, `.SSEC`, `.STOXX50E`, and batch.
-   Paste the output back; this will determine whether Yahoo (with crumb) or CNBC works from the LXC.
-3. Review board coverage:
-   - If crumb or CNBC works: all 9 indices and 8 commodities will have live data!
-   - If both fail: decide whether to trim `INDICES` in `config.py` to the 4 verified FRED indices
-     (`^spx`, `^ndx`, `^dji`, `^nkx`), or evaluate alternative feeds.
-4. Check service status:
-   `curl -s localhost:8080/api/summary`
-   `journalctl -u econ-dashboard -n 30 --no-pager`
+   Paste both outputs back. If the body names a bad param/symbol, the fix is usually a small
+   `_cnbc_batch` URL change + new unit test; if it is an abuse/geo block, we stop and pick (A)/(B).
+3. **Re-probe transients** (Yahoo cooldown + NY Fed/ECB): wait ≥30 min after the last doctor run,
+   then `python3 /opt/econ/dashboard/sources.py --doctor` once and paste §§[2/7] + [5/7] + breakers.
+   - Yahoo 429 clearing → note the cooldown length; Yahoo stays opportunistic in the cascade.
+   - NY Fed/ECB green again → close as transient; still red → rates redundancy is FRED+Treasury only.
+4. **Confirm the served board:** `curl -s localhost:8080/api/summary` (expect indices 4/9,
+   commodities 8/8, fx 8/8, cpi/gdp 7/7, curve + breakeven present, `providers` showing yahoo/cnbc
+   state) and `journalctl -u econ-dashboard -n 30 --no-pager` for refresher errors.
 
 ## 9. Session log
+
+### 2026-10-08 — Session 6: Post-merge (PR #5) live verdict — Yahoo IP-banned, CNBC 500, docs-only handoff update
+
+- **Input:** owner merged PR #5 to `main` (`e22471c`), deployed on `root@econ:/opt/econ`
+  (`git fetch && git reset --hard origin/main && ./install.sh`), and ran
+  `python3 /opt/econ/dashboard/sources.py --doctor` at `2026-10-08T01:13:43+00:00`.
+  The output contains the v0.5 probes (`crumb handshake`, §[6/7] CNBC) so the deploy is confirmed.
+  Section-by-section observations vs the 00:52 (PR #4) run:
+  - **[1/7] FX & macro 4/4** — stable. Frankfurter `.app` 1.08 s / `.dev` 0.33 s (-> 2026-10-07);
+    World Bank CPI 0.15 s (-> 2.95), GDP 0.13 s (-> 2.16). Same values, normal latency jitter.
+  - **[2/7] Rates 6/8 (was 8/8)** — FRED primaries all green in 0.13–0.51 s
+    (`DFF` 3.88 @ 10-06, `ECBDFR` 2.5 @ 10-07, `T10Y2Y` 0.51, `T10YIE` 2.36) and both Treasury
+    fallbacks green (10y-2y 1.77 s, breakeven 2.91 s). **New: `nyfed EFFR` SSL connection timeout
+    (5.01 s) + `ecb DFR` 10.01 s timeout.** Fallback-only impact (board still 100% via FRED), but
+    rates redundancy is degraded until re-probed — possibly transient.
+  - **[3/7] FRED quotes 11/11** — byte-identical story to 00:52: daily Brent 125.44 (2d old),
+    US/Nikkei 1–2d old, monthly IMF set 99d old accepted by the 120-day gate. No data drift.
+  - **[4/7] FRED candidates** — `(no unverified candidates)` as expected; everything confirmed is wired.
+  - **[5/7] Yahoo — IP-level 429 proven.** Cookie set (1.23 s, slower than 0.16 s = jitter), but
+    **`crumb handshake` fails with HTTP 429 in 0.23 s on `query2`**, and all charts
+    (`^GSPC` 0.35 s, `^GDAXI` 1.64 s, `^HSI` 1.48 s) + spark batch (1.18 s) are 429.
+    The crumb *endpoint* rejecting the IP rules out any auth/pacing fix from this address.
+    Breaker correctly cooling (`retry_in=879s` ≈ 15-min 429 policy). The 1.5 s pacing +
+    cookie+crumb pipeline is implemented correctly — the network identity is what's blocked.
+  - **[6/7] CNBC 0/6 — all HTTP 500 (not the predicted 403).** `.GDAXI` 2.58 s, `.FTSE` 0.15 s,
+    `.HSI` 0.11 s, `.SSEC` 0.12 s, `.STOXX50E` 0.09 s, batch 1.18 s. Fast 500s = request reaches
+    CNBC, server errors. Most likely symbol-format/param rejection or endpoint drift
+    (`quote-html-webservice/quote.htm?...&requestMethod=quick`), less likely headers/IP block.
+    Doctor does not log the 500 body today, so root cause needs the manual curls in §8.2.
+    Breaker: `cnbc: degraded retry_in=0s`.
+  - **[7/7] Stooq 0/3 + CoinGecko 2/2** — Stooq still 5.01 s connect timeouts ×3 (dead, ~0 ms in
+    normal warming via breakers). CoinGecko fresh: PAX Gold 4133.21, Kinesis Silver 60.79
+    (2026-10-08, <0.5 s) — small upticks vs 00:52, proving daily quotes flow.
+- **Changes in this session (`arena/cda0bd47-econ`): docs-only, no code touched.**
+  `handoff.md`: §2 branch → `arena/cda0bd47-econ`, §4 → v0.5-deployed, new D13 verdict row,
+  §6 rewritten with the 01:13 measurements + unchanged board coverage (indices still 4/9:
+  `^stx`/`^dax`/`^ukx`/`^shc`/`^hsi` empty; everything else 100%), §7 risks updated
+  (Yahoo settled as IP ban; CNBC 500 suspects ordered; NY Fed/ECB flagged transient-or-redundant),
+  §8 replaced with the owner decision (trim-to-4 / keep-9 / investigate-CNBC) + the two curl
+  commands that unblock diagnosis + cooldown re-probe + summary check.
+- **What this rules in/out:** Yahoo needs no further code iteration from this IP (any retry logic
+  already exists and behaves correctly). CNBC is the only remaining cheap path to 9/9 indices,
+  and only if the 500 body shows a fixable request problem. FRED/Treasury/CoinGecko/Frankfurter/
+  World Bank are a verified-solid core — no changes proposed there.
+- **Still needs owner/LXC:** the §8 decision + (for option C) the two CNBC curl bodies + a
+  ≥30-min-cooldown `--doctor` re-run of §§[2/7]+[5/7] to classify Yahoo/NYFed/ECB as
+  transient vs permanent.
 
 ### 2026-10-08 — Session 5: Live doctor verification of PR #4, Yahoo crumb auth, CNBC index fallback
 
