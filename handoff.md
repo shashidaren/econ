@@ -115,12 +115,12 @@ Preview (no network needed): `ECON_DEMO=1 python3 dashboard/app.py` → sample d
 
 ## 6. Current status
 
-- [x] **Tencent/Sina index fallback (v0.7, this session, on `main`, not yet pulled on the LXC):**
-  cascade is Yahoo → FRED → CNBC → Tencent/Sina → Stooq → CoinGecko. Only the five empty
-  cards are mapped. Tencent preferred for Shanghai (`sh000001`), Hang Seng (`hkHSI`), and
-  FTSE (`ukUKX`); Sina `b_DAX` / `b_SX5E` fill DAX and Euro Stoxx 50. `--doctor` gains
-  §[8/8]. Two offline tests. Owner pulls with `git fetch --all && git reset --hard origin/main && ./install.sh`
-  (no trailing dot on `install.sh`).
+- [x] **Tencent/Sina index fallback (v0.7) deployed on `192.168.0.149` at `5fd45e6`.**
+  Doctor `2026-10-08T02:09:21+00:00` §[8/8] **5/5 passed**: Shanghai `tencent:sh000001`
+  3852.02 @ 2026-10-08, Hang Seng `tencent:hkHSI` 24069.56 @ 2026-10-08, FTSE
+  `tencent:ukUKX` 10458.5 @ 2026-10-07, DAX `sina:b_DAX` 25104.36 @ 2026-10-07,
+  Euro Stoxx `sina:b_SX5E` 6180.3 @ 2026-10-08. Yahoo still 429, CNBC still 500, Stooq
+  still timeout; NY Fed and ECB fallbacks green again (8/8). Board should now be 9/9 indices.
 - [x] **Investment briefing (v0.6) merged as PR #7 (`c2dc6b9`) and seen live** at
   `http://192.168.0.149:8080` on 2026-10-08 01:31 UTC — posture Cautious, curve 0.51%,
   Fed funds 3.88%, real-rate proxy 1.52%, markets 1/4 up with 5 index cards awaiting data.
@@ -242,7 +242,11 @@ Preview (no network needed): `ECON_DEMO=1 python3 dashboard/app.py` → sample d
   `--doctor` §[8/8]. `tests/test_asia_quotes.py`. Server version `econ/0.7`.
 - **Also this session:** confirmed PR #7 already on `main` (`c2dc6b9`); deleted the seven
   merged `arena/*` branches. Only `main` remains.
-- **Not done:** not run on `root@econ`. Owner pulls, then `--doctor` §[8/8] is the verdict.
+- **Live verdict (2026-10-08T02:09:21+00:00, `root@econ`):** owner pulled `5fd45e6` and ran
+  `--doctor`. §[8/8] 5/5. Levels as in §6. Yahoo crumb/charts/spark still HTTP 429, CNBC
+  still HTTP 500, Stooq still 5 s timeouts. Rates fallbacks recovered to 8/8 (NY Fed EFFR
+  and ECB DFR green again). No further index work unless a card stays empty after the
+  service warm (install restarted the unit).
 
 ### 2026-10-08 — Session 7: Investment briefing strip (v0.6)
  Investment briefing strip (v0.6)
