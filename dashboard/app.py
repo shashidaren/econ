@@ -196,6 +196,20 @@ def warm_all(force=False):
     if not todo:
         return []
 
+    # Yahoo rate-limits per IP, so pull every stale market symbol in ONE batched
+    # request before the workers fan out (15 requests -> 1). Dead optional hosts
+    # are probed up front so no worker pays their TCP timeout.
+    if not config.DEMO:
+        stale_syms = [k.split(":", 1)[1] for k, _, _ in todo if k.startswith("stooq:")]
+        if stale_syms:
+            try:
+                if hasattr(backend, "warm_providers"):
+                    backend.warm_providers()
+                if hasattr(backend, "prefetch_yahoo"):
+                    backend.prefetch_yahoo(stale_syms, days=config.SPARK_DAYS)
+            except Exception:  # pragma: no cover — pre-flight is best effort
+                traceback.print_exc()
+
     workers = 1 if config.DEMO else 4
     with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="warm") as pool:
         futures = [pool.submit(fetch_into_cache, key, fn, ttl) for key, fn, ttl in todo]
@@ -233,6 +247,7 @@ def summary():
     policy_series = {sid: get_data(f"fred:{sid}") for sid, _ in config.FRED_POLICY}
     with LOCK:
         errors = [f"{k}: {v['err']}" for k, v in CACHE.items() if v.get("err")]
+    providers = backend.provider_status() if hasattr(backend, "provider_status") else []
     return {
         "indices": [get_data(f"stooq:{s}") for _, s in config.INDICES],
         "commodities": [get_data(f"stooq:{s}") for _, s in config.COMMODITIES],
@@ -246,6 +261,7 @@ def summary():
         "breakeven": get_data("fred:breakeven") or [],
         "breakeven_meta": (be_sid, be_title),
         "errors": errors[:6],
+        "providers": providers,
     }
 
 
@@ -274,6 +290,7 @@ class Handler(BaseHTTPRequestHandler):
                     generated_at=datetime.now(timezone.utc).astimezone(),
                     refresh=config.REFRESH_SECONDS,
                     errors=s.get("errors"),
+                    providers=s.get("providers"),
                 )
                 self._send(200, page.encode(), "text/html; charset=utf-8")
             elif path == "/api/summary":

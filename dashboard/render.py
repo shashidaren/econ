@@ -157,12 +157,36 @@ def rate_cards(pairs, series_map):
     return "".join(out)
 
 
+def provider_html(providers, limit=5):
+    """One compact footer line explaining which upstreams are being skipped.
+
+    Without this, an empty panel looks like a bug; with it, the board says
+    "yahoo: cooling down (HTTP 429), retry in 9m" and nobody panics.
+    """
+    if not providers:
+        return ""
+    bits = []
+    for p in providers[:limit]:
+        mins = int(round((p.get("retry_in") or 0) / 60.0))
+        reason = (p.get("reason") or "").strip()
+        reason = reason.split(" | ")[0][:70]
+        state = "retry in %dm" % mins if p.get("state") == "cooling" and mins else "degraded"
+        bits.append(f"{esc(p.get('provider'))}: {state}"
+                    + (f" — {esc(reason)}" if reason else "")
+                    + (f" ({p.get('fails')} fails)" if p.get("fails") else ""))
+    more = f" · +{len(providers) - limit} more" if len(providers) > limit else ""
+    return ("<br><span class='warn-inline'>⧗ upstream health: "
+            + " · ".join(bits) + esc(more) + "</span>")
+
+
 def build_page(sections, *, demo=False, generated_at=None, refresh=300,
-               errors=None):
+               errors=None, providers=None):
     """sections: dict with keys indices, commodities, fx, cpi, gdp,
     policy_pairs, policy_series, curve, breakeven."""
     if errors is None:
         errors = sections.get("errors") or []
+    if providers is None:
+        providers = sections.get("providers") or []
     now = generated_at or datetime.now(timezone.utc).astimezone()
     banner = ('<span class="badge demo">DEMO MODE — sample data '
               '(live on the server)</span>' if demo else "")
@@ -242,9 +266,10 @@ def build_page(sections, *, demo=False, generated_at=None, refresh=300,
     warn = ""
     if errors:
         warn = "<br><span class='warn-inline'>⚠ source issues: " + esc("; ".join(errors)) + "</span>"
+    prov = provider_html(providers)
     body.append(f"""<footer>
 Sources: Yahoo Finance / FRED / Stooq (quotes) · Frankfurter/ECB (FX) · World Bank (macro aggregates) ·
-FRED / NY Fed / ECB / US Treasury (rates &amp; curve). Data for information only — not investment advice.{warn}
+FRED / NY Fed / ECB / US Treasury (rates &amp; curve). Data for information only — not investment advice.{warn}{prov}
 </footer>""")
 
     return (PAGE.replace("__STYLE__", STYLE)
