@@ -24,6 +24,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlparse
 
+import briefing
 import config
 import render
 import sources
@@ -248,7 +249,7 @@ def summary():
     with LOCK:
         errors = [f"{k}: {v['err']}" for k, v in CACHE.items() if v.get("err")]
     providers = backend.provider_status() if hasattr(backend, "provider_status") else []
-    return {
+    out = {
         "indices": [get_data(f"stooq:{s}") for _, s in config.INDICES],
         "commodities": [get_data(f"stooq:{s}") for _, s in config.COMMODITIES],
         "fx": get_data("fx") or [],
@@ -263,10 +264,12 @@ def summary():
         "errors": errors[:6],
         "providers": providers,
     }
+    out["briefing"] = briefing.build_briefing(out)
+    return out
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "econ/0.2"
+    server_version = "econ/0.6"
 
     def log_message(self, fmt, *args):  # quieter logs
         print(f"[http] {self.address_string()} {fmt % args}", flush=True)
