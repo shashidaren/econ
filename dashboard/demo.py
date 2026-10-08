@@ -12,8 +12,8 @@ from datetime import date, timedelta
 _BASE = {
     "^spx": 5735.0, "^ndx": 20180.0, "^dji": 42140.0, "^stx": 4960.0,
     "^dax": 18720.0, "^ukx": 8250.0, "^nkx": 38900.0, "^shc": 3065.0, "^hsi": 19630.0,
-    "cl.f": 71.4, "cb.f": 75.2, "xauusd": 2412.0, "xagusd": 30.4,
-    "hg.f": 4.31, "zw.f": 577.0,
+    "cl.f": 79.7, "cb.f": 125.4, "xauusd": 4118.9, "xagusd": 60.08,
+    "hg.f": 4.31, "zw.f": 577.0, "al.f": 3158.3, "ni.f": 16632.4,
 }
 _NAME = dict()
 _FX = {"EUR": 0.862, "JPY": 148.2, "CNY": 7.06, "GBP": 0.772,
@@ -30,9 +30,11 @@ _WB = {
 }
 _FRED_LEVEL = {
     "DFF": 4.83, "ECBDFR": 3.50, "T10Y2Y": -0.05, "T10YIE": 2.28,
-    "SP500": 5735.0, "NASDAQ100": 20180.0, "NASDAQCOM": 18150.0,
-    "DJIA": 42140.0, "NIKKEI225": 38900.0, "DCOILWTI": 71.4,
-    "DCOILBRENTEU": 75.2, "PCOPPUSDM": 9450.0, "PWHEAMTUSDM": 248.0,
+    "SP500": 7801.8, "NASDAQ100": 31224.7, "NASDAQCOM": 31224.7,
+    "DJIA": 51179.9, "NIKKEI225": 70035.7, "POILWTIUSDM": 79.7,
+    "DCOILBRENTEU": 125.4, "POILBREUSDM": 83.7,
+    "PCOPPUSDM": 13542.8, "PWHEAMTUSDM": 228.7,
+    "PALUMUSDM": 3158.3, "PNICKUSDM": 16632.4,
 }
 
 

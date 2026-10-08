@@ -44,7 +44,7 @@ python3 -m unittest discover -s tests -v
 
 | Panel | Primary | Automatic Fallback(s) |
 |---|---|---|
-| World indices & commodities | Yahoo Finance — one batched `v7/finance/spark` request per cycle, `v8` chart per symbol as a retry | FRED public CSV, freshness-gated (`SP500`, `NASDAQ100`, `DJIA`, `NIKKEI225`, `DCOILWTI`, `DCOILBRENTEU`, `PCOPPUSDM`, `PWHEAMTUSDM`) → Stooq (`.com`/`.pl`, https+http) → CoinGecko tokenised metal (`pax-gold`, `kinesis-silver`) |
+| World indices & commodities | Yahoo Finance — current warm path tries one batched `v7/finance/spark` request first, then v8 chart per unserved symbol; `--doctor` probes v8 charts with the cookie before spark | FRED public CSV, freshness-gated (`SP500`, `NASDAQ100`, `DJIA`, `NIKKEI225`, monthly `POILWTIUSDM`, daily `DCOILBRENTEU` → monthly `POILBREUSDM`, `PCOPPUSDM`, `PWHEAMTUSDM`, `PALUMUSDM`, `PNICKUSDM`; 120-day freshness for monthly IMF data) → Stooq (`.com`/`.pl`, https+http) → CoinGecko tokenised metals (`pax-gold`, `kinesis-silver`) |
 | Currencies (FX, USD base) | Frankfurter (`api.frankfurter.app`, ECB rates) | `api.frankfurter.dev/v1` |
 | Annual inflation & GDP growth | World Bank API (`api.worldbank.org`) | Cached last-good snapshot on disk |
 | Central-bank policy rates (`DFF`, `ECBDFR`) | FRED public CSV (`fredgraph.csv?cosd=...`) | NY Fed Markets API (`markets.newyorkfed.org`) for `DFF`; ECB Data Portal (`data-api.ecb.europa.eu`) for `ECBDFR` |
@@ -53,10 +53,13 @@ python3 -m unittest discover -s tests -v
 ### Resilience
 
 Every upstream sits behind a **circuit breaker**: a host that 429s or times out is skipped for
-30 minutes (15 after a rate limit) instead of being retried by all 15 quote fetchers, and a 3-second
-pre-flight probe catches dead hosts before the fan-out starts. Slow providers therefore cost
-milliseconds rather than ~45 s per card, and the board's footer names the provider that is failing
-instead of leaving an empty card unexplained.
+30 minutes (15 after a rate limit) instead of being retried by all quote fetchers, and a 3-second
+pre-flight probe catches dead hosts before the fan-out starts. The HTTP transport does not retry
+TCP failures with a second client; urllib fallback is reserved for TLS/HTTP-protocol errors and
+shares curl's remaining time budget. Confirmed FRED 404s are negatively cached for 24 hours, and
+the one wider FRED probe is limited to five years. Slow providers therefore cost milliseconds
+rather than repeated multi-second retries, and the board's footer names the provider that is
+failing instead of leaving an empty card unexplained.
 
 `/api/summary` includes the breaker state (`providers`), so the board is debuggable with `curl`.
 

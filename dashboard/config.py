@@ -36,8 +36,9 @@ INDICES = [
     ("Hang Seng (HK)",     "^hsi"),
 ]
 
-# Commodities — the pulse of the real economy (cascades across
-# Yahoo Finance -> FRED -> Stooq -> CoinGecko PAXG for gold).
+# Commodities — the pulse of the real economy. Most use Yahoo -> FRED ->
+# Stooq (and CoinGecko for gold/silver); aluminum and nickel are FRED-only
+# because no Yahoo/Stooq ticker has been verified for these new cards.
 COMMODITIES = [
     ("WTI Crude",   "cl.f"),
     ("Brent Crude", "cb.f"),
@@ -45,20 +46,25 @@ COMMODITIES = [
     ("Silver",      "xagusd"),
     ("Copper",      "hg.f"),
     ("Wheat",       "zw.f"),
+    ("Aluminium",   "al.f"),
+    ("Nickel",      "ni.f"),
 ]
 
-# FRED quote fallback series (label, FRED series id, max_age_days before card
-# shows a "stale" badge). Used automatically by sources.py when market quote
-# endpoints are blocked or rate-limited.
+# FRED quote series (label, FRED series id, max_age_days before card shows a
+# "stale" badge). Brent's monthly series is a fallback to the daily quote.
+# IMF monthly commodities are allowed 120 days for their publication lag.
 FRED_QUOTES = [
-    ("S&P 500",                   "SP500",        10),
-    ("NASDAQ 100",                "NASDAQ100",    10),
-    ("Dow Jones 30",              "DJIA",         10),
-    ("Nikkei 225 (JP)",           "NIKKEI225",    10),
-    ("WTI Crude",                 "DCOILWTI",     10),
-    ("Brent Crude",               "DCOILBRENTEU", 10),
-    ("Copper — global (monthly)", "PCOPPUSDM",    55),
-    ("Wheat — global (monthly)",  "PWHEAMTUSDM",  55),
+    ("S&P 500",                         "SP500",        10),
+    ("NASDAQ 100",                      "NASDAQ100",    10),
+    ("Dow Jones 30",                    "DJIA",         10),
+    ("Nikkei 225 (JP)",                 "NIKKEI225",    10),
+    ("WTI Crude — global (monthly)",    "POILWTIUSDM", 120),
+    ("Brent Crude",                     "DCOILBRENTEU", 10),
+    ("Brent Crude — monthly fallback",  "POILBREUSDM",  120),
+    ("Copper — global (monthly)",       "PCOPPUSDM",    120),
+    ("Wheat — global (monthly)",        "PWHEAMTUSDM",  120),
+    ("Aluminium — global (monthly)",    "PALUMUSDM",    120),
+    ("Nickel — global (monthly)",       "PNICKUSDM",    120),
 ]
 
 # Currencies, USD base, via ECB reference rates (frankfurter.app)
