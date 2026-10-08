@@ -230,6 +230,7 @@ Preview (no network needed): `ECON_DEMO=1 python3 dashboard/app.py` → sample d
 ### 2026-10-08 — Session 10: Summary tab
 
 - **Inflation meter:** semicircle on `/summary`, needle on 10y breakeven (0–5%, green/amber/red). No new fetch.
+- **Recession meter:** semicircle on `/summary`, needle on the 10y–2y spread (−1 to +1.5). Red inverted, amber flat, green positive. No new fetch.
 
 - **Fix:** summary Commodities said "Nothing loaded" even when the board had cards. Formatter now keeps a quote with a missing close as "awaiting data" and no longer drops the row. Same cache as the board.
 

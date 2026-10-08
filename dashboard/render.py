@@ -264,6 +264,43 @@ def inflation_gauge(value, label="10y breakeven"):
     )
 
 
+
+def recession_gauge(spread):
+    """Semicircle for the 10y-2y spread. Left is inverted, right is a normal slope."""
+    if spread is None:
+        return "<p>Recession meter needs the 10y-2y spread.</p>"
+    import math
+    # Map -1.0 (inverted, left/red) to +1.5 (steep, right/green) onto the arc.
+    lo, hi = -1.0, 1.5
+    v = max(lo, min(hi, float(spread)))
+    frac = (v - lo) / (hi - lo)
+    ang = math.radians(180 - frac * 180)
+    cx, cy, r = 110, 108, 78
+    nx = cx + r * math.cos(ang)
+    ny = cy - r * math.sin(ang)
+    if spread < 0:
+        word = "inverted — recession warning"
+    elif spread < 0.5:
+        word = "flat — little cushion"
+    else:
+        word = "positive — not inverted"
+    return (
+        f'<svg class="gauge" viewBox="0 0 220 130" role="img" aria-label="recession meter {spread:.2f} percent">'
+        f'<path d="M32 108 A78 78 0 0 1 188 108" fill="none" stroke="#232a38" stroke-width="14" stroke-linecap="round"/>'
+        f'<path d="M32 108 A78 78 0 0 1 94 36" fill="none" stroke="#ef5350" stroke-width="14"/>'
+        f'<path d="M94 36 A78 78 0 0 1 126 36" fill="none" stroke="#e5a50a" stroke-width="14"/>'
+        f'<path d="M126 36 A78 78 0 0 1 188 108" fill="none" stroke="#26a69a" stroke-width="14" stroke-linecap="round"/>'
+        f'<line x1="{cx}" y1="{cy}" x2="{nx:.1f}" y2="{ny:.1f}" stroke="#e6e9f0" stroke-width="3" stroke-linecap="round"/>'
+        f'<circle cx="{cx}" cy="{cy}" r="4" fill="#e6e9f0"/>'
+        f'<text x="18" y="124" fill="#8b93a7" font-size="11">-1</text>'
+        f'<text x="96" y="22" fill="#8b93a7" font-size="11">0</text>'
+        f'<text x="176" y="124" fill="#8b93a7" font-size="11">+1.5</text>'
+        f'<text x="110" y="78" fill="#e6e9f0" font-size="18" font-weight="700" text-anchor="middle">{spread:.2f}%</text>'
+        f'<text x="110" y="96" fill="#8b93a7" font-size="11" text-anchor="middle">10y-2y · {word}</text>'
+        f'</svg>'
+    )
+
+
 def _fmt_quote(q):
     if not q:
         return None
@@ -376,6 +413,11 @@ def build_summary_page(sections, *, demo=False, generated_at=None, refresh=300):
     <h3>Inflation meter</h3>
     {inflation_gauge(be_v if be_v is not None else (cpi[0]["value"] if cpi else None), "10y breakeven" if be_v is not None else "CPI")}
     <p class="meta">Green under 2%, amber to 3%, red above. Needle is the 10y breakeven when loaded. Not a forecast.</p>
+  </section>
+  <section>
+    <h3>Recession meter</h3>
+    {recession_gauge(curve_v)}
+    <p class="meta">Red is an inverted 10y-2y spread, amber is flat, green is a normal slope. Same series as the curve chart. Not a forecast.</p>
   </section>
   <section>
     <h3>Rates and inflation</h3>
