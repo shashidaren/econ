@@ -373,6 +373,11 @@ def build_summary_page(sections, *, demo=False, generated_at=None, refresh=300):
     <ul>{read or "<li>Briefing not ready.</li>"}</ul>
   </section>
   <section>
+    <h3>Inflation meter</h3>
+    {inflation_gauge(be_v if be_v is not None else (cpi[0]["value"] if cpi else None), "10y breakeven" if be_v is not None else "CPI")}
+    <p class="meta">Green under 2%, amber to 3%, red above. Needle is the 10y breakeven when loaded. Not a forecast.</p>
+  </section>
+  <section>
     <h3>Rates and inflation</h3>
     {rates_html}
   </section>
