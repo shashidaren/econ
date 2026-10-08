@@ -201,6 +201,33 @@ def _fake_request(url, timeout=None, headers=None, connect_timeout=5, layer="cur
         prices = [[start_ms + i * 86_400_000, 4000 + i] for i in range(30)]
         return _json_response({"prices": prices})
 
+    if "quote.cnbc.com" in url:
+        time.sleep(0.40)
+        if os.environ.get("ECON_SIM_CNBC_FAIL") == "1":
+            raise RuntimeError("curl: (22) The requested URL returned error: 403 HTTP 403")
+        today_str = date.today().isoformat()
+        qq_list = [
+            {"symbol": ".GDAXI", "last": "25449.19", "previous_day_closing": "25404.00",
+             "change": "45.19", "change_pct": "0.18", "last_time": today_str + "T16:30:00"},
+            {"symbol": ".FTSE", "last": "10545.89", "previous_day_closing": "10497.94",
+             "change": "47.95", "change_pct": "0.46", "last_time": today_str + "T16:30:00"},
+            {"symbol": ".HSI", "last": "23972.29", "previous_day_closing": "23364.80",
+             "change": "607.49", "change_pct": "2.60", "last_time": today_str + "T16:30:00"},
+            {"symbol": ".SSEC", "last": "3350.25", "previous_day_closing": "3340.10",
+             "change": "10.15", "change_pct": "0.30", "last_time": today_str + "T16:30:00"},
+            {"symbol": ".STOXX50E", "last": "6238.50", "previous_day_closing": "6175.45",
+             "change": "63.05", "change_pct": "1.02", "last_time": today_str + "T16:30:00"},
+            {"symbol": ".SPX", "last": "7801.77", "previous_day_closing": "7780.00",
+             "change": "21.77", "change_pct": "0.28", "last_time": today_str + "T16:30:00"},
+            {"symbol": ".NDX", "last": "31224.69", "previous_day_closing": "31100.00",
+             "change": "124.69", "change_pct": "0.40", "last_time": today_str + "T16:30:00"},
+            {"symbol": ".DJI", "last": "51179.87", "previous_day_closing": "51000.00",
+             "change": "179.87", "change_pct": "0.35", "last_time": today_str + "T16:30:00"},
+            {"symbol": ".N225", "last": "70035.71", "previous_day_closing": "69800.00",
+             "change": "235.71", "change_pct": "0.34", "last_time": today_str + "T16:30:00"},
+        ]
+        return _json_response({"QuickQuoteResult": {"QuickQuote": qq_list}})
+
     raise AssertionError(f"unhandled URL in network simulation ({layer}): {url}")
 
 
