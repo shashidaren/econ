@@ -275,7 +275,7 @@ def summary():
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "econ/0.8"
+    server_version = "econ/0.9"
 
     def log_message(self, fmt, *args):  # quieter logs
         print(f"[http] {self.address_string()} {fmt % args}", flush=True)
@@ -300,6 +300,15 @@ class Handler(BaseHTTPRequestHandler):
                     refresh=config.REFRESH_SECONDS,
                     errors=s.get("errors"),
                     providers=s.get("providers"),
+                )
+                self._send(200, page.encode(), "text/html; charset=utf-8")
+            elif path == "/summary":
+                s = summary()
+                page = render.build_summary_page(
+                    s,
+                    demo=config.DEMO,
+                    generated_at=datetime.now(timezone.utc).astimezone(),
+                    refresh=config.REFRESH_SECONDS,
                 )
                 self._send(200, page.encode(), "text/html; charset=utf-8")
             elif path == "/api/summary":

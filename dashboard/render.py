@@ -22,7 +22,16 @@ body{background:var(--bg);color:var(--text);
   font:15px/1.45 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
   padding:20px 24px 40px}
 a{color:var(--accent);text-decoration:none}
-header{display:flex;flex-wrap:wrap;align-items:baseline;gap:12px;margin-bottom:18px}
+header{display:flex;flex-wrap:wrap;align-items:baseline;gap:12px;margin-bottom:8px}
+nav.tabs{display:flex;gap:8px;margin:0 0 18px}
+nav.tabs a{font-size:13px;color:var(--muted);border:1px solid var(--line);border-radius:8px;padding:4px 10px}
+nav.tabs a.on{color:var(--text);border-color:var(--accent);background:#121a28}
+.sum{display:grid;gap:12px}
+.sum section{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:14px 16px}
+.sum h3{font-size:13px;letter-spacing:1.2px;text-transform:uppercase;color:var(--muted);margin-bottom:8px}
+.sum p{font-size:14.5px;margin:0 0 8px}
+.sum ul{margin:0;padding-left:18px}
+.sum li{margin:3px 0}
 header h1{font-size:22px;font-weight:700;letter-spacing:.5px}
 header h1 span{color:var(--accent)}
 .updated{color:var(--muted);font-size:13px}
@@ -214,6 +223,140 @@ def briefing_html(brief):
     return '<div class="brief">' + "".join(cards) + "</div>"
 
 
+
+def tabs(active):
+    def link(href, key, label):
+        cls = "on" if active == key else ""
+        return f'<a class="{cls}" href="{href}">{label}</a>'
+    return ('<nav class="tabs">'
+            + link("/", "board", "Board")
+            + link("/summary", "summary", "Summary")
+            + "</nav>")
+
+
+def _fmt_quote(q):
+    if not q or q.get("close") is None:
+        return None
+    chg = q.get("chg_pct")
+    move = f" {chg:+.1f}%" if chg is not None else ""
+    src = q.get("source") or ""
+    when = q.get("date") or "?"
+    return f"{q.get('name')}: {q['close']:,.2f}{move} ({when}, {src})"
+
+
+def build_summary_page(sections, *, demo=False, generated_at=None, refresh=300):
+    """A second tab: prose summary of whatever the board has already fetched."""
+    now = generated_at or datetime.now(timezone.utc).astimezone()
+    banner = ('<span class="badge demo">DEMO MODE — sample data '
+              '(live on the server)</span>' if demo else "")
+    brief = sections.get("briefing") or {}
+    indices = [q for q in (sections.get("indices") or []) if q]
+    commodities = [q for q in (sections.get("commodities") or []) if q]
+    fx = [q for q in (sections.get("fx") or []) if q]
+    cpi = sections.get("cpi") or []
+    gdp = sections.get("gdp") or []
+
+    def bullets(items, limit=12):
+        lines = [_fmt_quote(q) for q in items[:limit]]
+        lines = [f"<li>{esc(x)}</li>" for x in lines if x]
+        return "<ul>" + "".join(lines) + "</ul>" if lines else "<p>Nothing loaded.</p>"
+
+    def macro_lines(rows, suffix="%"):
+        if not rows:
+            return "<p>Nothing loaded.</p>"
+        bits = "".join(
+            f"<li>{esc(r.get('name'))} {r.get('value'):+.1f}{suffix} ({esc(r.get('year') or '?')})</li>"
+            for r in rows if r.get("value") is not None)
+        return "<ul>" + bits + "</ul>"
+
+    curve = sections.get("curve") or []
+    curve_v = next((v for _, v in reversed(curve) if v is not None), None)
+    be = sections.get("breakeven") or []
+    be_v = next((v for _, v in reversed(be) if v is not None), None)
+    real = sections.get("real_yield") or []
+    real_v = next((v for _, v in reversed(real) if v is not None), None)
+    policy = sections.get("policy_series") or {}
+    fed = next((v for _, v in reversed(policy.get("DFF") or []) if v is not None), None)
+    ecb = next((v for _, v in reversed(policy.get("ECBDFR") or []) if v is not None), None)
+
+    rates = []
+    if curve_v is not None:
+        rates.append(f"<li>10y–2y spread {curve_v:.2f}%</li>")
+    if fed is not None:
+        rates.append(f"<li>Fed funds {fed:.2f}%</li>")
+    if ecb is not None:
+        rates.append(f"<li>ECB deposit {ecb:.2f}%</li>")
+    if be_v is not None:
+        rates.append(f"<li>10y breakeven {be_v:.2f}%</li>")
+    if real_v is not None:
+        rates.append(f"<li>10y real yield {real_v:.2f}%</li>")
+    rates_html = "<ul>" + "".join(rates) + "</ul>" if rates else "<p>Rates not loaded.</p>"
+
+    cards = brief.get("cards") or []
+    read = "".join(
+        f"<li><b>{esc(c.get('label'))}</b> — {esc(c.get('value'))}. {esc(c.get('text'))}</li>"
+        for c in cards)
+    posture = esc(brief.get("posture") or "Awaiting data")
+    headline = esc(brief.get("headline") or "Not enough series loaded to summarize.")
+
+    missing = sum(1 for q in (sections.get("indices") or []) if not q)
+    cov = (f"{len(indices)} index cards, {len(commodities)} commodities, {len(fx)} FX crosses, "
+           f"{len(cpi)} CPI rows, {len(gdp)} GDP rows"
+           + (f", {missing} index card(s) still empty" if missing else ""))
+
+    body = f"""<header>
+  <h1>ECON<span>.</span>world</h1>
+  <span class="updated">updated {esc(now.strftime("%Y-%m-%d %H:%M %Z"))}</span>
+  {banner}
+</header>
+{tabs("summary")}
+<div class="sum">
+  <section>
+    <h3>Posture</h3>
+    <p class="posture-name tone-{esc(brief.get("tone") or "muted")}">{posture}</p>
+    <p>{headline}</p>
+    <p class="meta">{esc(brief.get("disclaimer") or "Read of this board. Not a forecast and not investment advice.")}</p>
+  </section>
+  <section>
+    <h3>What the board is saying</h3>
+    <ul>{read or "<li>Briefing not ready.</li>"}</ul>
+  </section>
+  <section>
+    <h3>Rates and inflation</h3>
+    {rates_html}
+  </section>
+  <section>
+    <h3>Indices</h3>
+    {bullets(indices)}
+  </section>
+  <section>
+    <h3>Commodities</h3>
+    {bullets(commodities)}
+  </section>
+  <section>
+    <h3>Currencies, USD base</h3>
+    {bullets(fx)}
+  </section>
+  <section>
+    <h3>Inflation, CPI % YoY</h3>
+    {macro_lines(cpi)}
+  </section>
+  <section>
+    <h3>Real GDP growth, % YoY</h3>
+    {macro_lines(gdp)}
+  </section>
+  <section>
+    <h3>Coverage</h3>
+    <p>{esc(cov)}. Same cache as the board. Empty cards are missing sources, not a failed page.</p>
+  </section>
+</div>
+<footer>Summary of data already gathered. Not a forecast and not investment advice.</footer>
+"""
+    return (PAGE.replace("__STYLE__", STYLE)
+                .replace("__REFRESH__", str(max(60, int(refresh))))
+                .replace("__BODY__", body))
+
+
 def build_page(sections, *, demo=False, generated_at=None, refresh=300,
                errors=None, providers=None):
     """sections: dict with keys indices, commodities, fx, cpi, gdp,
@@ -230,7 +373,8 @@ def build_page(sections, *, demo=False, generated_at=None, refresh=300,
   <h1>ECON<span>.</span>world</h1>
   <span class="updated">updated {esc(now.strftime("%Y-%m-%d %H:%M %Z"))}</span>
   {banner}
-</header>"""]
+</header>
+{tabs("board")}"""]
 
     brief = sections.get("briefing")
     if brief is None:
