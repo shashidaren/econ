@@ -32,6 +32,7 @@ nav.tabs a.on{color:var(--text);border-color:var(--accent);background:#121a28}
 .sum p{font-size:14.5px;margin:0 0 8px}
 .sum ul{margin:0;padding-left:18px}
 .sum li{margin:3px 0}
+.gauge{width:min(420px,100%);height:auto;display:block;margin:4px 0 8px}
 header h1{font-size:22px;font-weight:700;letter-spacing:.5px}
 header h1 span{color:var(--accent)}
 .updated{color:var(--muted);font-size:13px}
@@ -232,6 +233,35 @@ def tabs(active):
             + link("/", "board", "Board")
             + link("/summary", "summary", "Summary")
             + "</nav>")
+
+
+
+def inflation_gauge(value, label="10y breakeven"):
+    """Semicircle meter, 0-5%. Needle is market-expected inflation, not a forecast."""
+    if value is None:
+        return "<p>Inflation meter needs a breakeven or CPI print.</p>"
+    import math
+    v = max(0.0, min(5.0, float(value)))
+    ang = math.radians(180 - (v / 5.0) * 180)
+    cx, cy, r = 110, 108, 78
+    nx = cx + r * math.cos(ang)
+    ny = cy - r * math.sin(ang)
+    word = "below target" if v < 2 else ("near a 2% anchor" if v < 3 else "hot")
+    return (
+        f'<svg class="gauge" viewBox="0 0 220 130" role="img" aria-label="inflation meter {v:.2f} percent">'
+        f'<path d="M32 108 A78 78 0 0 1 188 108" fill="none" stroke="#232a38" stroke-width="14" stroke-linecap="round"/>'
+        f'<path d="M32 108 A78 78 0 0 1 94 36" fill="none" stroke="#26a69a" stroke-width="14"/>'
+        f'<path d="M94 36 A78 78 0 0 1 126 36" fill="none" stroke="#e5a50a" stroke-width="14"/>'
+        f'<path d="M126 36 A78 78 0 0 1 188 108" fill="none" stroke="#ef5350" stroke-width="14" stroke-linecap="round"/>'
+        f'<line x1="{cx}" y1="{cy}" x2="{nx:.1f}" y2="{ny:.1f}" stroke="#e6e9f0" stroke-width="3" stroke-linecap="round"/>'
+        f'<circle cx="{cx}" cy="{cy}" r="4" fill="#e6e9f0"/>'
+        f'<text x="28" y="124" fill="#8b93a7" font-size="11">0</text>'
+        f'<text x="100" y="22" fill="#8b93a7" font-size="11">2.5</text>'
+        f'<text x="184" y="124" fill="#8b93a7" font-size="11">5%</text>'
+        f'<text x="110" y="78" fill="#e6e9f0" font-size="18" font-weight="700" text-anchor="middle">{v:.2f}%</text>'
+        f'<text x="110" y="96" fill="#8b93a7" font-size="11" text-anchor="middle">{esc(label)} · {word}</text>'
+        f'</svg>'
+    )
 
 
 def _fmt_quote(q):
