@@ -28,6 +28,7 @@ import briefing
 import config
 import render
 import sources
+import stocks as stock_screener
 
 if config.DEMO:
     import demo as backend
@@ -179,6 +180,25 @@ def build_registry():
             )
         reg.append((f"stooq:{sym}", make(), config.TTL["market"]))
 
+    # 5. US short-term stock screen: bounded universe, technical/risk-only.
+    def stock_screen_data():
+        symbols = [row[0] for row in config.STOCK_UNIVERSE]
+        vendor_symbols = {row[0]: row[3] for row in config.STOCK_UNIVERSE}
+        histories = backend.stock_history_batch(
+            symbols,
+            vendor_symbols=vendor_symbols,
+            days=config.STOCK_HISTORY_SESSIONS,
+        )
+        return stock_screener.build_screen(
+            config.STOCK_UNIVERSE,
+            histories,
+            max_price=config.STOCK_MAX_PRICE,
+            min_price=config.STOCK_MIN_PRICE,
+            min_avg_dollar_volume=config.STOCK_MIN_AVG_DOLLAR_VOLUME,
+            limit=config.STOCK_MAX_RESULTS,
+        )
+    reg.append(("stock_screen", stock_screen_data, config.TTL["stocks"]))
+
     return reg
 
 
@@ -194,6 +214,12 @@ def warm_all(force=False):
     for key, fn, ttl in REGISTRY:
         entry = cache_get(key)
         if not force and cache_valid(entry):
+            continue
+        # The stock screen fans out across a fixed watchlist. If every provider
+        # fails, honour its 1 h TTL even with no last-good cache so a 5 min board
+        # refresh does not repeat the full stock-source cascade.
+        if (not force and key == "stock_screen" and entry and entry.get("err")
+                and (time.time() - entry.get("at", 0)) < ttl):
             continue
         todo.append((key, fn, ttl))
 
@@ -253,6 +279,24 @@ def summary():
     with LOCK:
         errors = [f"{k}: {v['err']}" for k, v in CACHE.items() if v.get("err")]
     providers = backend.provider_status() if hasattr(backend, "provider_status") else []
+    stock_entry = cache_get("stock_screen") or {}
+    stock_error = stock_entry.get("err")
+    stock_screen_data = stock_entry.get("data")
+    if stock_screen_data is None:
+        stock_screen_data = stock_screener.build_screen(
+            config.STOCK_UNIVERSE,
+            {},
+            max_price=config.STOCK_MAX_PRICE,
+            min_price=config.STOCK_MIN_PRICE,
+            min_avg_dollar_volume=config.STOCK_MIN_AVG_DOLLAR_VOLUME,
+            limit=config.STOCK_MAX_RESULTS,
+            fetch_error=stock_error,
+        )
+    else:
+        stock_screen_data = stock_screener.current_view(stock_screen_data)
+        if stock_error:
+            stock_screen_data = dict(stock_screen_data)
+            stock_screen_data["refresh_error"] = str(stock_error)[:240]
     out = {
         "indices": [get_data(f"stooq:{s}") for _, s in config.INDICES],
         "commodities": [get_data(f"stooq:{s}") for _, s in config.COMMODITIES],
@@ -269,13 +313,14 @@ def summary():
         "real_yield_meta": (real_sid, real_title),
         "errors": errors[:6],
         "providers": providers,
+        "stock_screen": stock_screen_data,
     }
     out["briefing"] = briefing.build_briefing(out)
     return out
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "econ/0.9"
+    server_version = "econ/1.0"
 
     def log_message(self, fmt, *args):  # quieter logs
         print(f"[http] {self.address_string()} {fmt % args}", flush=True)
@@ -311,6 +356,19 @@ class Handler(BaseHTTPRequestHandler):
                     refresh=config.REFRESH_SECONDS,
                 )
                 self._send(200, page.encode(), "text/html; charset=utf-8")
+            elif path == "/stocks":
+                s = summary()
+                page = render.build_stocks_page(
+                    s.get("stock_screen"),
+                    demo=config.DEMO,
+                    generated_at=datetime.now(timezone.utc).astimezone(),
+                    refresh=config.REFRESH_SECONDS,
+                )
+                self._send(200, page.encode(), "text/html; charset=utf-8")
+            elif path == "/api/stocks":
+                s = summary()
+                body = json.dumps(s.get("stock_screen") or {}, default=str, indent=1).encode()
+                self._send(200, body, "application/json")
             elif path == "/api/summary":
                 s = summary()
                 body = json.dumps(s, default=str, indent=1).encode()

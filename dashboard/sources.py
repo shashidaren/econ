@@ -14,7 +14,8 @@ Why multi-source + curl -4 transport?
 
 Sources & Fallbacks:
   * Market quotes   Yahoo Finance (v7 spark batch / v8 chart) -> FRED CSV ->
-                    Stooq (.com / .pl, https + http) -> CoinGecko (tokenised metal)
+                    CNBC / Tencent-Sina indices -> Stooq -> CoinGecko metals
+  * US stocks       Tencent adjusted daily K-lines -> Yahoo spark batch -> Stooq .us
   * FX rates        Frankfurter ECB (api.frankfurter.app / api.frankfurter.dev)
   * Macro annual    World Bank (api.worldbank.org)
   * Policy & curve  FRED fredgraph.csv (with &cosd= date window) ->
@@ -38,6 +39,7 @@ import csv
 import gzip
 import io
 import json
+import math
 import os
 import shutil
 import socket
@@ -534,25 +536,36 @@ def _yahoo_session_crumb(force: bool = False) -> str | None:
 
 
 
-def _parse_chart_result(result) -> list[tuple[str, float]]:
-    """[(date, close)] from a Yahoo v8 chart `result` object."""
+def _parse_chart_result_with_volume(result) -> list[tuple[str, float, float | None]]:
+    """[(date, close, volume)] from a Yahoo chart/spark result object."""
     if not result:
         return []
     ts_list = result.get("timestamp") or []
     quotes = ((result.get("indicators") or {}).get("quote") or [{}])[0]
     closes = quotes.get("close") or []
-    out: dict[str, float] = {}
-    for ts, c in zip(ts_list, closes):
+    volumes = quotes.get("volume") or []
+    out: dict[str, tuple[float, float | None]] = {}
+    for i, (ts, c) in enumerate(zip(ts_list, closes)):
         if ts is None or c is None:
             continue
         try:
-            v = float(c)
-        except (TypeError, ValueError):
-            continue
-        if v > 0:
+            close = float(c)
+            if close <= 0 or not math.isfinite(close):
+                continue
+            raw_volume = volumes[i] if i < len(volumes) else None
+            volume = float(raw_volume) if raw_volume is not None else None
+            if volume is not None and (volume < 0 or not math.isfinite(volume)):
+                volume = None
             d = datetime.fromtimestamp(int(ts), tz=timezone.utc).strftime("%Y-%m-%d")
-            out[d] = round(v, 4)
-    return sorted(out.items())
+            out[d] = (round(close, 4), volume)
+        except (TypeError, ValueError, OverflowError):
+            continue
+    return [(d, close, volume) for d, (close, volume) in sorted(out.items())]
+
+
+def _parse_chart_result(result) -> list[tuple[str, float]]:
+    """[(date, close)] from a Yahoo v8 chart `result` object."""
+    return [(d, close) for d, close, _volume in _parse_chart_result_with_volume(result)]
 
 
 def _yahoo_history(symbol: str, days: int = 150):
@@ -606,11 +619,12 @@ def _yahoo_history(symbol: str, days: int = 150):
     raise RuntimeError(f"yahoo({ysym}): {last_err}")
 
 
-def _yahoo_spark_batch(symbols, days: int = 150) -> dict[str, list]:
+def _yahoo_spark_batch(symbols, days: int = 150, *, include_volume: bool = False) -> dict[str, list]:
     """ONE request for many symbols via the v7 spark endpoint.
 
-    Returns {symbol: [(date, close)]}. Yahoo rate-limits per IP, so fetching the
-    whole board in a single call is the difference between "works" and "429".
+    Returns {symbol: [(date, close)]}, or [(date, close, volume)] for the stock
+    screener. Yahoo rate-limits per IP, so fetching a watchlist in one call is
+    preferable to one request per ticker.
     """
     syms = list(dict.fromkeys(symbols))
     if not syms:
@@ -641,7 +655,8 @@ def _yahoo_spark_batch(symbols, days: int = 150) -> dict[str, list]:
         resp = (item.get("response") or [None])[0]
         if not ysym or not resp:
             continue
-        rows = _parse_chart_result(resp)
+        rows = (_parse_chart_result_with_volume(resp) if include_volume
+                else _parse_chart_result(resp))
         if rows:
             by_yahoo[ysym] = rows
 
@@ -742,6 +757,28 @@ def _parse_stooq_csv(text: str):
             continue
         if d and close > 0:
             out.append((d, close))
+    out.sort(key=lambda x: x[0])
+    return out
+
+
+def _parse_stooq_csv_with_volume(text: str):
+    """Yield (date_str, close, volume) for a Stooq stock-history CSV."""
+    out = []
+    for row in csv.DictReader(io.StringIO(text)):
+        try:
+            d = (row.get("Date") or "").strip()
+            close = float(row["Close"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if not d or close <= 0 or not math.isfinite(close):
+            continue
+        try:
+            volume = float(row.get("Volume") or "")
+            if volume < 0 or not math.isfinite(volume):
+                volume = None
+        except (TypeError, ValueError):
+            volume = None
+        out.append((d, close, volume))
     out.sort(key=lambda x: x[0])
     return out
 
@@ -1193,6 +1230,171 @@ def stooq_history(symbol: str, days: int = 150):
 
     raise RuntimeError(f"all sources failed -> {' | '.join(errs)}")
 
+
+def _parse_tencent_kline_payload(payload, code: str):
+    """Parse Tencent daily K-lines to [(date, close, volume)]."""
+    if isinstance(payload, str):
+        text = payload.strip()
+        if "(" in text and not text.startswith("{"):
+            text = text[text.find("(") + 1:text.rfind(")")].strip().rstrip(";")
+        try:
+            payload = json.loads(text)
+        except (TypeError, ValueError):
+            return []
+    if not isinstance(payload, dict):
+        return []
+    data = payload.get("data") or {}
+    item = data.get(code)
+    if item is None:
+        # Tencent occasionally normalizes the casing of a symbol key.
+        item = next((v for k, v in data.items() if str(k).lower() == code.lower()), None)
+    if not isinstance(item, dict):
+        return []
+    raw_rows = (item.get("qfqday") or item.get("day") or item.get("dayqfq") or [])
+    out = {}
+    for row in raw_rows:
+        if not isinstance(row, (list, tuple)) or len(row) < 3:
+            continue
+        day = str(row[0])[:10]
+        try:
+            date.fromisoformat(day)
+            close = float(str(row[2]).replace(",", ""))
+        except (TypeError, ValueError):
+            continue
+        if close <= 0 or not math.isfinite(close):
+            continue
+        volume = None
+        if len(row) > 5:
+            try:
+                volume = float(str(row[5]).replace(",", ""))
+                if volume < 0 or not math.isfinite(volume):
+                    volume = None
+            except (TypeError, ValueError):
+                volume = None
+        out[day] = (day, close, volume)
+    return [out[d] for d in sorted(out)]
+
+
+def _tencent_us_stock_history(code: str, days: int = 130):
+    """Fetch Tencent's adjusted daily K-lines for one US ticker."""
+    if not provider_available("tencent_kline"):
+        raise RuntimeError("tencent K-line provider cooling down")
+    params = urllib.parse.urlencode({"param": f"{code},day,,,{int(days)},qfq"})
+    url = f"https://web.ifzq.gtimg.cn/appstock/app/fqkline/get?{params}"
+    try:
+        text = _get(url, timeout=10, headers={"Referer": "https://gu.qq.com/"})
+        rows = _parse_tencent_kline_payload(text, code)
+        if not rows:
+            # Some Tencent responses include a callback wrapper; the parser also
+            # accepts that form, so an empty result is treated as a symbol miss.
+            raise RuntimeError(f"no daily K-lines for {code}")
+        note_provider_ok("tencent_kline")
+        return rows[-days:]
+    except Exception as exc:
+        message = str(exc)
+        # A per-symbol 404 is a mapping miss, not evidence that the shared host
+        # is unavailable; keep trying the next configured US ticker/fallback.
+        if "no daily K-lines" not in message and "HTTP 404" not in message:
+            unreachable, limited = _classify(exc)
+            note_provider_failure(
+                "tencent_kline", exc, unreachable=unreachable, rate_limited=limited)
+        raise RuntimeError(f"tencent-kline({code}): {exc}")
+
+
+def _stooq_us_stock_history(symbol: str, days: int = 130):
+    """Stooq fallback for US shares, whose symbols use the `.us` suffix."""
+    d1 = (date.today() - timedelta(days=int(days * 1.7))).strftime("%Y%m%d")
+    d2 = date.today().strftime("%Y%m%d")
+    last_err = None
+    for scheme, domain, port_tag in STOOQ_ENDPOINTS:
+        key = f"stooq:{domain}{port_tag}"
+        if not provider_available(key):
+            continue
+        sym = urllib.parse.quote(f"{symbol.lower()}.us", safe="")
+        url = f"{scheme}://{domain}/q/d/l/?s={sym}&d1={d1}&d2={d2}&i=d"
+        try:
+            text = _get(url, timeout=6, connect_timeout=3)
+            rows = _parse_stooq_csv_with_volume(text)
+            if rows:
+                note_provider_ok(key)
+                return rows[-days:]
+            last_err = RuntimeError("empty stock CSV")
+        except Exception as exc:
+            last_err = exc
+            unreachable, limited = _classify(exc)
+            note_provider_failure(key, exc, unreachable=unreachable, rate_limited=limited)
+    if last_err is None:
+        last_err = RuntimeError("all Stooq hosts are cooling down")
+    raise RuntimeError(f"stooq({symbol}.us): {last_err}")
+
+
+def _stock_history_has_liquidity(rows):
+    return (len(rows) >= 61
+            and sum(1 for row in rows[-20:] if len(row) > 2 and row[2] is not None) >= 15)
+
+
+def stock_history_batch(symbols, vendor_symbols=None, days: int = 130):
+    """Fetch stock daily histories: Tencent K-line -> Yahoo batch -> Stooq.
+
+    Tencent is preferred because its live quote host is already used by this
+    dashboard; Yahoo is batched to respect its per-IP rate limit. Stooq is a
+    last fallback. Only histories with enough rows and usable volume fields are
+    accepted for the liquidity screen.
+    """
+    symbols = list(dict.fromkeys(str(s).upper() for s in symbols if s))
+    vendor_symbols = vendor_symbols or {}
+    out = {}
+    errors = []
+
+    def fetch_tencent(symbol):
+        code = vendor_symbols.get(symbol)
+        if not code:
+            raise RuntimeError(f"no Tencent K-line mapping for {symbol}")
+        rows = _tencent_us_stock_history(code, days=days)
+        if not _stock_history_has_liquidity(rows):
+            raise RuntimeError(f"Tencent history/volume too short for {symbol}")
+        return symbol, rows
+
+    with ThreadPoolExecutor(max_workers=4, thread_name_prefix="stocks-tencent") as pool:
+        futures = {pool.submit(fetch_tencent, symbol): symbol for symbol in symbols}
+        for future, symbol in ((f, s) for f, s in futures.items()):
+            try:
+                ticker, rows = future.result()
+                out[ticker] = {"rows": rows, "source": "Tencent K-line"}
+            except Exception as exc:
+                errors.append(f"{symbol}: {exc}")
+
+    missing = [symbol for symbol in symbols if symbol not in out]
+    if missing and provider_available("yahoo"):
+        try:
+            yahoo_rows = _yahoo_spark_batch(missing, days=days, include_volume=True)
+            for symbol, rows in yahoo_rows.items():
+                if _stock_history_has_liquidity(rows):
+                    out[symbol] = {"rows": rows, "source": "Yahoo Finance"}
+        except Exception as exc:
+            errors.append(f"Yahoo Finance batch: {exc}")
+
+    missing = [symbol for symbol in symbols if symbol not in out]
+    if missing:
+        def fetch_stooq(symbol):
+            rows = _stooq_us_stock_history(symbol, days=days)
+            if not _stock_history_has_liquidity(rows):
+                raise RuntimeError(f"Stooq history/volume too short for {symbol}")
+            return symbol, rows
+
+        with ThreadPoolExecutor(max_workers=4, thread_name_prefix="stocks-stooq") as pool:
+            futures = {pool.submit(fetch_stooq, symbol): symbol for symbol in missing}
+            for future, symbol in ((f, s) for f, s in futures.items()):
+                try:
+                    ticker, rows = future.result()
+                    out[ticker] = {"rows": rows, "source": "Stooq"}
+                except Exception as exc:
+                    errors.append(f"{symbol}: {exc}")
+
+    if not out:
+        detail = " | ".join(errors[:6]) or "all providers unavailable"
+        raise RuntimeError(f"no usable US stock histories ({detail})")
+    return out
 
 
 def quote_from_history(name: str, hist, source: str | None = None,
