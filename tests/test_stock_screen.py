@@ -310,5 +310,175 @@ class StockDataAdapterTests(unittest.TestCase):
         self.assertEqual(screen["history_errors"]["count"], 1)
 
 
+class StockProviderScopeTests(unittest.TestCase):
+    """Stock diagnostics must reflect only the providers its refresh used."""
+
+    def setUp(self):
+        sources.reset_breakers()
+        self._cookie_setting = sources.YAHOO_USE_COOKIE
+        sources.YAHOO_USE_COOKIE = False
+        sources._YAHOO_LAST_AT = 0.0
+
+    def tearDown(self):
+        sources.YAHOO_USE_COOKIE = self._cookie_setting
+        sources.reset_breakers()
+
+    def test_full_tencent_coverage_ignores_unrelated_global_breakers(self):
+        rows = _history(days=70)
+        # Board-wide trouble unrelated to stocks: index quotes failing on Stooq
+        # and spark charts failing on Yahoo open their shared breakers.
+        sources.note_provider_failure(
+            "stooq:stooq.com", "curl: (28) Failed to connect: Timeout was reached",
+            unreachable=True)
+        sources.note_provider_failure(
+            "yahoo", "curl: (22) error: 429 HTTP 429", rate_limited=True)
+
+        with mock.patch.object(sources, "_tencent_us_stock_history",
+                               side_effect=lambda code, days=130: rows) as tencent, \
+                mock.patch.object(sources, "_yahoo_spark_batch") as yahoo, \
+                mock.patch.object(sources, "_stooq_us_stock_history") as stooq:
+            out = sources.stock_history_batch(
+                ["AAA", "BBB"], {"AAA": "usAAA.OQ", "BBB": "usBBB.N"}, days=70)
+
+        self.assertEqual(set(out) - {"_meta"}, {"AAA", "BBB"})
+        self.assertTrue(all(out[s]["source"] == "Tencent K-line"
+                            for s in ("AAA", "BBB")))
+        self.assertEqual(out["_meta"]["history_providers"], ["tencent_kline"])
+        self.assertNotIn("history_errors", out["_meta"])
+        self.assertEqual(tencent.call_count, 2)
+        yahoo.assert_not_called()
+        stooq.assert_not_called()
+
+        screen = stocks.build_screen([_spec("AAA"), _spec("BBB")], out)
+        self.assertEqual(screen["status"], "ok")
+        self.assertEqual(screen["usable_history_count"], 2)
+        self.assertEqual(screen["history_errors"]["count"], 0)
+        self.assertEqual(
+            app._stock_provider_issues(sources.provider_status(), screen), [])
+        # Without the refresh scope the shared breakers would have leaked in.
+        self.assertEqual(len(app._stock_provider_issues(sources.provider_status())), 2)
+
+        screen["provider_issues"] = app._stock_provider_issues(
+            sources.provider_status(), screen)
+        page = render.build_stocks_page(screen, demo=False)
+        self.assertIn('class="stock-status ok"', page)
+        self.assertNotIn('class="stock-status warn"', page)
+        self.assertIn("2/2 tickers with usable history", page)
+        self.assertNotIn("Data notes", page)
+        self.assertNotIn("cooling down", page)
+        self.assertNotIn("HTTP 429", page)
+
+    def test_genuine_stock_source_failures_keep_stock_scoped_warnings(self):
+        rows = _history(days=70)
+
+        def fake_get(url, timeout=None, **kwargs):
+            if "web.ifzq.gtimg.cn" in url:
+                if "usGOOD.OQ" in url:
+                    payload = {"data": {"usGOOD.OQ": {"qfqday": [
+                        [d, str(c), str(c), str(c), str(c), str(v)]
+                        for d, c, v in rows]}}}
+                    return json.dumps(payload)
+                # A per-symbol mapping miss: no K-lines, and by design no
+                # breaker trip for the shared Tencent host.
+                return json.dumps({"data": {}})
+            if "finance.yahoo.com" in url:
+                raise RuntimeError("curl: (22) error: 429 HTTP 429")
+            if "stooq." in url:
+                raise RuntimeError(
+                    "curl: (28) Failed to connect: Timeout was reached")
+            raise AssertionError(f"unexpected URL {url}")
+
+        with mock.patch.object(sources, "_get", side_effect=fake_get):
+            out = sources.stock_history_batch(
+                ["GOOD", "MISS"], {"GOOD": "usGOOD.OQ", "MISS": "usMISS.OQ"},
+                days=70)
+
+        self.assertEqual(out["GOOD"]["source"], "Tencent K-line")
+        self.assertEqual(out["_meta"]["history_providers"],
+                         ["tencent_kline", "yahoo", "stooq"])
+        diagnostics = out["_meta"]["history_errors"]
+        self.assertEqual(diagnostics["count"], 1)
+        self.assertIn("Tencent K-line", diagnostics["samples"]["MISS"])
+        self.assertIn("Yahoo Finance", diagnostics["samples"]["MISS"])
+        self.assertIn("Stooq", diagnostics["samples"]["MISS"])
+
+        # Yahoo and Stooq were genuinely attempted for this refresh, so their
+        # breaker states are in scope; the global list alone is not trusted.
+        screen = stocks.build_screen([_spec("GOOD"), _spec("MISS")], out)
+        self.assertEqual(screen["history_errors"]["count"], 1)
+        issues = app._stock_provider_issues(sources.provider_status(), screen)
+        names = {issue["provider"] for issue in issues}
+        self.assertIn("yahoo", names)
+        self.assertTrue(any(name.startswith("stooq") for name in names))
+
+        screen["provider_issues"] = issues
+        page = render.build_stocks_page(screen, demo=False)
+        self.assertIn('class="stock-status warn"', page)
+        self.assertIn("Data notes", page)
+        self.assertIn("1 ticker(s) lacked usable history", page)
+        self.assertIn("MISS", page)
+        self.assertIn("yahoo: cooling down", page)
+        self.assertIn("HTTP 429", page)
+        self.assertTrue("stooq:stooq.com" in page or "stooq:stooq.pl" in page)
+
+    def test_scope_filter_keeps_family_view_without_refresh_metadata(self):
+        providers = [
+            {"provider": "stooq:stooq.com", "state": "cooling", "retry_in": 60,
+             "reason": "Timeout was reached"},
+            {"provider": "yahoo", "state": "cooling", "retry_in": 30,
+             "reason": "HTTP 429"},
+            {"provider": "tencent_kline", "state": "degraded", "retry_in": 0,
+             "reason": "timeout"},
+            {"provider": "fred", "state": "cooling", "retry_in": 60,
+             "reason": "no data"},
+        ]
+        # Legacy filter: the three stock-history provider families only.
+        self.assertEqual(
+            [p["provider"] for p in app._stock_provider_issues(providers)],
+            ["stooq:stooq.com", "yahoo", "tencent_kline"])
+        # Scoped to a Tencent-only refresh: shared Stooq/Yahoo breakers drop out.
+        self.assertEqual(
+            app._stock_provider_issues(providers, {"history_providers": ["tencent_kline"]}),
+            [dict(providers[2])])
+        scoped = app._stock_provider_issues(
+            providers, {"history_providers": ["tencent_kline", "stooq"]})
+        self.assertEqual([p["provider"] for p in scoped],
+                         ["stooq:stooq.com", "tencent_kline"])
+        # Screens without refresh scope (demo/synthetic data) keep the
+        # family-wide view instead of hiding everything.
+        self.assertEqual(len(app._stock_provider_issues(providers, {})), 3)
+        self.assertEqual(
+            len(app._stock_provider_issues(providers, {"history_providers": None})), 3)
+
+    def test_warning_styling_is_preserved_for_stale_and_failed_refreshes(self):
+        ok_screen = stocks.build_screen(
+            [_spec("FRESH")],
+            {"FRESH": {"rows": _history(), "source": "Tencent K-line"}})
+        self.assertEqual(ok_screen["status"], "ok")
+
+        # A failed refresh keeps the panel warned while last-good data shows.
+        failed = dict(ok_screen)
+        failed["refresh_error"] = "no usable US stock histories (all providers down)"
+        page = render.build_stocks_page(failed, demo=False)
+        self.assertIn('class="stock-status warn"', page)
+        self.assertIn("Last refresh failed", page)
+
+        # Stale cached history is flagged, not quietly green.
+        stale = stocks.current_view(ok_screen, as_of=date.today() + timedelta(days=6))
+        page = render.build_stocks_page(stale, demo=False)
+        self.assertIn('class="stock-status bad"', page)
+        self.assertIn("stale", page)
+
+        # Total source failure: bad panel with the fetch detail preserved.
+        dead = stocks.build_screen(
+            [_spec("MISS")], {},
+            fetch_error="Tencent timeout; Yahoo HTTP 429")
+        page = render.build_stocks_page(dead, demo=False)
+        self.assertEqual(dead["status"], "unavailable")
+        self.assertIn('class="stock-status bad"', page)
+        self.assertIn("History fetch detail", page)
+        self.assertIn("Tencent timeout; Yahoo HTTP 429", page)
+
+
 if __name__ == "__main__":
     unittest.main()

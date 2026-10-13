@@ -1339,13 +1339,19 @@ def stock_history_batch(symbols, vendor_symbols=None, days: int = 130):
     Tencent is preferred because its live quote host is already used by this
     dashboard; Yahoo is batched to respect its per-IP rate limit. Stooq is a
     last fallback. Only histories with enough rows and usable volume fields are
-    accepted for the liquidity screen.
+    accepted for the liquidity screen. `_meta` records which cascade stages ran
+    (`history_providers`) plus per-ticker errors for unresolved symbols.
     """
     symbols = list(dict.fromkeys(str(s).upper() for s in symbols if s))
     vendor_symbols = vendor_symbols or {}
     out = {}
     errors = []
     symbol_errors = {}
+    # Providers this refresh actually needed or touched (one per cascade stage
+    # that ran). Downstream diagnostics scope to this list so shared-breaker
+    # trouble from unrelated board features (index quotes, spark charts) cannot
+    # mark a fully covered refresh degraded.
+    history_providers = ["tencent_kline"]
 
     def add_symbol_error(symbol, provider, exc):
         symbol_errors.setdefault(symbol, []).append(f"{provider}: {exc}")
@@ -1370,6 +1376,10 @@ def stock_history_batch(symbols, vendor_symbols=None, days: int = 130):
                 add_symbol_error(symbol, "Tencent K-line", exc)
 
     missing = [symbol for symbol in symbols if symbol not in out]
+    if missing:
+        # The Yahoo stage is relevant to this refresh even when its breaker is
+        # already cooling and the attempt is skipped.
+        history_providers.append("yahoo")
     if missing and provider_available("yahoo"):
         try:
             yahoo_rows = _yahoo_spark_batch(missing, days=days, include_volume=True)
@@ -1392,6 +1402,7 @@ def stock_history_batch(symbols, vendor_symbols=None, days: int = 130):
 
     missing = [symbol for symbol in symbols if symbol not in out]
     if missing:
+        history_providers.append("stooq")
         def fetch_stooq(symbol):
             rows = _stooq_us_stock_history(symbol, days=days)
             if not _stock_history_has_liquidity(rows):
@@ -1415,16 +1426,16 @@ def stock_history_batch(symbols, vendor_symbols=None, days: int = 130):
             for symbol in unavailable[:6]
         ) or " | ".join(errors[:6]) or "all providers unavailable"
         raise RuntimeError(f"no usable US stock histories ({detail})")
+    meta = out.setdefault("_meta", {})
+    meta["history_providers"] = list(history_providers)
     if unavailable:
-        out["_meta"] = {
-            "history_errors": {
-                "count": len(unavailable),
-                "samples": {
-                    symbol: "; ".join(symbol_errors.get(symbol, [])) or
-                    "no usable history after provider cascade"
-                    for symbol in unavailable[:6]
-                },
-            }
+        meta["history_errors"] = {
+            "count": len(unavailable),
+            "samples": {
+                symbol: "; ".join(symbol_errors.get(symbol, [])) or
+                "no usable history after provider cascade"
+                for symbol in unavailable[:6]
+            },
         }
     return out
 
