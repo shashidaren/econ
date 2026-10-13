@@ -3,9 +3,11 @@
 Self-hosted, glanceable **global macro dashboard** for a Debian LXC container
 (hostname `econ`, LAN IP `192.168.0.149`, port `8080`).
 
-A single dark-mode wall-board: world indices, commodities, currencies, inflation,
-central-bank rates, and the US yield curve — served by a **Python-stdlib-only app**
-(no pip, no venv, no Docker, no CDN, no API keys).
+A dark-mode wall-board for world indices, commodities, currencies, inflation,
+central-bank rates, and the US yield curve — plus a separate **Stocks** tab that
+screens a fixed US watchlist and shows at most three short-term technical
+candidates under $50 with backward-looking low/medium/high risk labels. Served
+by a **Python-stdlib-only app** (no pip, no venv, no Docker, no CDN, no API keys).
 
 **Start here → [`handoff.md`](handoff.md)** — project state, decisions, ops runbook,
 and the session log. It is updated on every change session.
@@ -26,6 +28,28 @@ cd /opt/econ && git fetch --all && git reset --hard origin/main && ./install.sh
 ```
 
 Preview without a server (sample data): `ECON_DEMO=1 python3 dashboard/app.py`
+
+## Stocks watchlist
+
+- `/stocks` — top three technical candidates from the editable universe in
+  `dashboard/config.py`; `/api/stocks` returns the same screen as JSON and
+  `/api/summary` includes it as `stock_screen`.
+- US-listed names only; last daily close must be **$5 to under $50**, average
+  20-session dollar volume at least **$5 million**, quote no more than five
+  calendar days old, positive 20-session return, and price above its 20-day
+  average. The screen ranks 5/20/60-session momentum after small volatility and
+  drawdown penalties. Results refresh hourly.
+- Risk labels use 20-session annualized realized volatility and 60-session
+  drawdown only. They are backward-looking, not a measure of total or future
+  risk. The screen has no fundamentals, news, earnings calendar, analyst
+  targets, intraday prices, or trade execution. A share price under $50 does not
+  mean the stock is cheap; this is a research shortlist, not a buy signal.
+- History sources: Tencent adjusted daily K-lines (primary), one batched Yahoo
+  Finance spark request (fallback), then Stooq. Tencent's US-stock K-line path
+  and exchange suffixes still need live verification on the target LXC; if all
+  providers fail, the screen shows unavailable/no candidates rather than guessed
+  or synthetic live picks. DEMO mode is synthetic and must not be used for
+  investment decisions.
 
 Test live upstream sources directly on the server:
 
@@ -49,6 +73,7 @@ python3 -m unittest discover -s tests -v
 | Annual inflation & GDP growth | World Bank API (`api.worldbank.org`) | Cached last-good snapshot on disk |
 | Central-bank policy rates (`DFF`, `ECBDFR`) | FRED public CSV (`fredgraph.csv?cosd=...`) | NY Fed Markets API (`markets.newyorkfed.org`) for `DFF`; ECB Data Portal (`data-api.ecb.europa.eu`) for `ECBDFR` |
 | US 10Y–2Y yield curve & 10Y breakeven | FRED public CSV (`T10Y2Y`, `T10YIE`) | Official US Treasury Daily Par & Real Yield Curve CSV (`home.treasury.gov`) |
+| Short-term US stock history | Tencent daily K-lines (per configured watchlist symbol) | One Yahoo Finance `v7/finance/spark` batch → Stooq `.us` daily CSV |
 
 ### Resilience
 

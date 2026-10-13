@@ -70,6 +70,22 @@ def stooq_history(symbol: str, days: int = 150):
     return _walk(symbol, base, days)
 
 
+def stock_history_batch(symbols, vendor_symbols=None, days: int = 130):
+    """Synthetic watchlist histories for layout testing only."""
+    out = {}
+    for symbol in symbols:
+        seed = _seed("stock:" + symbol)
+        base = 12.0 + (seed % 3600) / 100.0
+        drift = ((seed % 41) - 12) / 10000.0
+        walk = _walk("stock:" + symbol, base, days, vol=0.014, drift=drift)
+        volume = 900_000 + (seed % 3_000_000)
+        out[symbol] = {
+            "rows": [(d, close, volume) for d, close in walk],
+            "source": "DEMO synthetic",
+        }
+    return out
+
+
 def fx_latest(currencies, base: str = "USD"):
     rates = {}
     for c in currencies:

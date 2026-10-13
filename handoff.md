@@ -21,7 +21,7 @@ central-bank policy rates, and the US yield curve (recession indicator).
 | Server IP | `192.168.0.149` (LAN only) |
 | Access | root via SSH; web UI on LAN |
 | Repo | `shashidaren/econ` (this repo) |
-| Working branch | `main` (v0.9 summary tab on top of v0.8 gold read) |
+| Working branch | `arena/a6249866-econ` (this session's stocks-tab work; not yet live-deployed) |
 | Deploy model | server does `git fetch --all && git reset --hard origin/main && ./install.sh` |
 | App dir on server | `/opt/econ` |
 | Port | **8080** (override: `ECON_PORT=xxxx ./install.sh`) |
@@ -50,30 +50,35 @@ central-bank policy rates, and the US yield curve (recession indicator).
 | D15 | Five missing indices | **Tencent then Sina, after CNBC, only for `^shc` `^hsi` `^ukx` `^dax` `^stx`** | 2026-10-08 probe: Tencent `sh000001` / `hkHSI` / `ukUKX` are live or previous close; Sina `b_DAX` / `b_SX5E` cover the two Tencent misses. Do not use Sina `int_dax`, `int_ftse` (stale 9284 vs 10458), or `int_fsx5e` (empty). Eastmoney was HTTP 502. GBK pages; parser keeps ASCII prices. Card source reads `tencent:…` or `sina:…` |
 | D16 | Gold inflation read | **FRED `DFII10` 10y real yield chart plus a briefing card** | Owner invests mostly in gold. Breakeven is expected inflation; the real yield is the opportunity cost. Card uses DFII10, else funds − breakeven. ≥1.5 headwind, 0.5–1.5 caution, negative is the classic tailwind. Not a price forecast |
 | D17 | Summary tab | **`/summary` page, same cache as `/`** | Second tab, not a new fetch. Posture, briefing lines, rates, and the loaded quotes/CPI/GDP in prose. Board tab links to it |
+| D18 | Short-term stock watchlist | **`/stocks` + `/api/stocks`, maximum 3 US-listed names under $50** | Editable 32-symbol universe; $5 floor, $5M 20-session average dollar-volume floor, fresh daily bars, positive 20-session return and close above the 20-day average. Rank 5/20/60-session momentum with volatility/drawdown penalties. Low/Medium/High are backward-looking realized-risk buckets only. Tencent K-line → batched Yahoo → Stooq; no fundamentals, news, earnings calendar, analyst targets, or intraday data. Not a buy signal |
 
 Data-source rules: free, no signups; every source fails independently (panel shows
 "awaiting data"/stale badge, board never breaks); polite fetch cadence via cache TTLs.
 
-## 4. Architecture (v0.7 Tencent/Sina index fallback on `main`; v0.6 briefing deployed at `c2dc6b9`)
+## 4. Architecture (v1.0 short-term stock watchlist added on `arena/a6249866-econ`; live LXC verification pending)
 
 ```
 dashboard/
   app.py        HTTP server (ThreadingHTTPServer) + disk-backed cache + 4-worker refresher
                 + pre-flight step: warm_providers() then prefetch_yahoo() before the fan-out
-  config.py     ALL panels/symbols/TTLs/FRED_QUOTES/CNBC_MAP — edit this to change the board
-  sources.py    multi-source fetchers + bounded curl/urllib transport + provider breakers
-                + Yahoo cookie & crumb flow, CNBC batch quote provider,
-                + 24 h FRED 404 cache, 5 y retry limit, Treasury header normalization,
-                + CLI diagnostics (`python3 sources.py` / `--doctor` with 7 probe sections)
-  demo.py       same signatures as sources.py → synthetic data (ECON_DEMO=1)
+  config.py     panels/symbols/TTLs plus the 32-symbol US stock watchlist and filters
+  sources.py    quote/rates cascades + transport/breakers + Tencent US daily K-lines,
+                volume-aware Yahoo batch and Stooq .us fallback for the stock screen;
+                CLI diagnostics (`python3 sources.py` / `--doctor`)
+  demo.py       same backend signatures with synthetic data (ECON_DEMO=1); stock bars
+                are explicitly demo-only and must never be treated as live picks
   charts.py     server-side SVG: sparkline(), line_chart()
   render.py     single-page HTML/CSS builder (dark theme, source & stale badges,
                 investment-briefing strip under the header,
                 footer "source issues" + "upstream health" lines, auto-refresh)
   briefing.py   posture + signal cards from the summary dict already in memory
                 (curve, policy real-rate proxy, CPI, GDP, index breadth). No I/O
+  stocks.py     technical watchlist scoring, $5-$50/volume/freshness/trend filters,
+                observed volatility/drawdown risk buckets, max-three output
 tests/test_sources.py    47 stdlib unittests — cascade, breakers, FRED gate/cache, transport,
                          Yahoo cookie+crumb, CNBC parsing & caching, Treasury headers, rendering
+tests/test_stock_screen.py 10 stdlib unittests — filters, rank cap, freshness, risk labels,
+                           Tencent/Yahoo parser and provider fallback
 tests/test_briefing.py   4 stdlib unittests — defensive/constructive/empty posture + page strip
 tests/test_asia_quotes.py 2 stdlib unittests — Tencent/Sina parsers and cascade preference
 tools/sim_lxc_network.py replays the LXC's measured latencies against the real cascade
@@ -84,7 +89,11 @@ uninstall.sh
 .env.example    optional overrides + reserved FRED key slot
 ```
 
-- `/` board · `/api/summary` JSON (`providers` breaker state + `briefing` posture) · `/healthz` probe
+- `/` board · `/summary` macro summary · `/stocks` top-three watchlist · `/api/summary` JSON
+  (includes `stock_screen`) · `/api/stocks` screen JSON · `/healthz` probe
+- Stock screen cache TTL: 1 h; US daily K-lines are retrieved with four concurrent Tencent requests
+  at a time, then Yahoo is batched and Stooq is per-symbol fallback. It only returns current,
+  sufficiently liquid names passing the configured price/trend filters.
 - Each refresh cycle: **pre-flight** (probe stooq hosts 3 s, one batched Yahoo spark request for
   stale Yahoo-mapped symbols) → 4-worker fan-out over fast macro sources first, then market quotes
 - Disk cache (`/var/tmp/econ-dashboard-cache.json`) keeps last good data across `systemctl restart`
@@ -108,8 +117,9 @@ python3 /opt/econ/dashboard/sources.py --doctor    # exhaustive: every provider 
 # Offline tests (no network needed; faked transport)
 cd /opt/econ && python3 -m unittest discover -s tests -v
 
-# Check API summary & service logs
-curl -s localhost:8080/api/summary | python3 -c "import json,sys; s=json.load(sys.stdin); print('indices:',sum(q is not None for q in s['indices']),'/',len(s['indices']),'| commodities:',sum(q is not None for q in s['commodities']),'/',len(s['commodities']),'| fx:',len(s['fx']),'/',8,'| cpi:',len(s['cpi']),'| gdp:',len(s['gdp']),'| curve pts:',len(s['curve'])); print('errors:',s['errors']); print('providers:',[(p['provider'],p['state'],p['retry_in']) for p in s['providers']])"
+# Check API summary, top-three stock screen, and service logs
+curl -s localhost:8080/api/summary | python3 -c "import json,sys; s=json.load(sys.stdin); print('indices:',sum(q is not None for q in s['indices']),'/',len(s['indices']),'| commodities:',sum(q is not None for q in s['commodities']),'/',len(s['commodities']),'| fx:',len(s['fx']),'/',8,'| cpi:',len(s['cpi']),'| gdp:',len(s['gdp']),'| curve pts:',len(s['curve'])); print('stock screen:',s['stock_screen']['status'],s['stock_screen']['source'],s['stock_screen']['data_date']); print('errors:',s['errors']); print('providers:',[(p['provider'],p['state'],p['retry_in']) for p in s['providers']])"
+curl -s localhost:8080/api/stocks | python3 -m json.tool
 journalctl -u econ-dashboard -n 30 --no-pager
 ```
 
@@ -117,8 +127,9 @@ Preview (no network needed): `ECON_DEMO=1 python3 dashboard/app.py` → sample d
 
 ## 6. Current status
 
-- [ ] **Summary tab (v0.9, this session, on `main`, not yet pulled):** `/summary`, linked from the board header. No new sources.
-- [ ] **Gold read (v0.8, on `main`, not yet pulled):** `DFII10` chart under breakeven, and a Gold read card on the briefing. Pull with the usual reset and `./install.sh`. Doctor should show `fred DFII10` if probed via the rates path; the board fetches it as `fred:real`.
+- [ ] **Short-term Stocks tab (v1.0, this session, on `arena/a6249866-econ`; not deployed):** `/stocks` and `/api/stocks`, up to three US-listed candidates below $50, with explicit price/liquidity/trend screens and observed Low/Medium/High risk buckets. Tencent K-line → Yahoo batch → Stooq. Offline tests and demo page pass; real Tencent US K-line symbols/provider response still need live LXC verification.
+- [x] **Summary tab, Gold read, and recession meter are present in this checkout.** No fresh live LXC output was supplied for this session.
+- [x] **Stock screen tests:** 63 standard-library tests pass; demo server rendered `/stocks` and `/api/stocks` successfully. Demo quote data is synthetic and is not evidence of live picks.
 - [x] **Tencent/Sina index fallback (v0.7) deployed on `192.168.0.149` at `5fd45e6`.**
   Doctor `2026-10-08T02:09:21+00:00` §[8/8] **5/5 passed**: Shanghai `tencent:sh000001`
   3852.02 @ 2026-10-08, Hang Seng `tencent:hkHSI` 24069.56 @ 2026-10-08, FTSE
@@ -159,11 +170,12 @@ Preview (no network needed): `ECON_DEMO=1 python3 dashboard/app.py` → sample d
   the post-merge verdict; D13 recorded; §7/§8 rewritten around the trim-vs-investigate decision.
 - [x] This session (`arena/invest-briefing`): briefing strip + `/api/summary.briefing` + tests.
   Does not change the index-coverage decision in §8.
-- [ ] Owner decision required (§8): trim `INDICES` to the 4 verified FRED cards, keep 9 cards with
-  "awaiting data", and/or authorize a CNBC-500 root-cause investigation + Yahoo-cooldown re-probe.
+- [x] The old index-coverage decision no longer blocks work: the LXC later confirmed 9/9 indices via Tencent/Sina. The historical CNBC/Yahoo/Stooq failures remain relevant to source fallback expectations.
 
 ## 7. Known risks / watch-list
 
+- **Stocks screen is not investment advice or a forecast:** it uses daily-price momentum and trailing liquidity/volatility/drawdown only. It does not screen valuation, earnings, balance-sheet strength, news, or upcoming catalysts. Price below $50 is not a valuation signal; user should verify quote/earnings/news before any trade.
+- **New Tencent US-stock K-line integration is unverified on the LXC:** Tencent index quotes were live on 2026-10-08, but the separate `web.ifzq.gtimg.cn/appstock/app/fqkline/get` path, US exchange suffixes (`.N`/`.OQ`), adjusted-bar schema, and volume units have not been tested from the owner’s server. If Tencent K-lines fail, current recorded Yahoo 429 + Stooq timeout may leave the screen unavailable. The page must show no picks rather than stale/synthetic claims.
 - **Yahoo = IP-level HTTP 429 (settled 01:13 UTC):** `crumb handshake` itself returns 429 in
   0.23 s, so the LXC's IP is rate-limited at Yahoo's edge — no cookie/crumb/pacing tweak on this
   IP will fix it. Yahoo stays in the cascade (breaker-cooled, ~0 ms cost) in case the limit lifts,
@@ -176,9 +188,7 @@ Preview (no network needed): `ECON_DEMO=1 python3 dashboard/app.py` → sample d
   (b) endpoint/param drift (`quote-html-webservice/quote.htm?...&requestMethod=quick` changed);
   (c) missing headers/cookies CNBC now requires; (d) IP-based abuse response surfaced as 500.
   The 500 response *body* is not logged today — capturing it is step 1 (§8).
-- **International indices still 4/9:** DAX, FTSE, Euro Stoxx 50, Shanghai, Hang Seng have no FRED
-  coverage and all three key-less fallbacks (Yahoo 429, CNBC 500, Stooq timeout) fail live.
-  Nothing renders for these 5 cards except "awaiting data" + footer health line.
+- **International-index failure is historical:** the 2026-10-08 01:13 snapshot was 4/9; the later 02:09 Tencent/Sina LXC doctor passed 5/5 missing-index probes and restored expected 9/9 coverage. Recheck only if current cards regress.
 - **NY Fed / ECB fallback timeouts (new, fallback-only):** `nyfed EFFR` SSL timeout (5.01 s) and
   `ecb DFR` 10 s timeout at 01:13 UTC, after passing at 00:52. FRED primaries + Treasury CSVs
   cover the board, so no user impact — but if persistent, the rates cascade loses redundancy.
@@ -191,41 +201,34 @@ Preview (no network needed): `ECON_DEMO=1 python3 dashboard/app.py` → sample d
 - **Sandbox has no egress to data hosts:** only GitHub/PyPI are reachable from this environment.
   All local tests use faked transports; live provider behavior must be verified on `root@econ`.
 
-## 8. Next steps (owner decision + diagnostics)
+## 8. Next steps (live verification of the new stock data path)
 
-0. **Pull v0.7 on the LXC** (briefing is already there; this adds the five index cards):
-   `cd /opt/econ && git fetch --all && git reset --hard origin/main && ./install.sh`
-   Then `python3 /opt/econ/dashboard/sources.py --doctor` and check §[8/8]. Expect Shanghai
-   and Hang Seng live, FTSE/DAX/Stoxx previous close outside Europe hours. Card footer
-   should say `tencent:…` or `sina:…`, not "awaiting data".
-1. **Decide the board shape** only if §[8/8] fails on the LXC (sandbox reached both hosts;
-   the LXC is the one that blocked Yahoo/Stooq):
-   - **(A) Trim to 4 verified indices** (`^spx`, `^ndx`, `^dji`, `^nkx`) — clean board, zero empty
-     cards, everything live off FRED. Recommended if the 5 internationals are nice-to-have.
-   - **(B) Keep 9 cards** with "awaiting data" + footer health line — preserves layout while
-     alternatives are investigated. Zero code change.
-   - **(C) Authorize a CNBC-500 investigation** (agent work, needs 1–2 LXC curl outputs — step 2).
-2. **Capture the CNBC 500 body + variants from the LXC** (this is what unblocks the diagnosis —
-   today's doctor only logs the status code):
+1. **After this branch is merged, deploy the update to the LXC** using the established main deploy:
+   `cd /opt/econ && git fetch --all && git reset --hard origin/main && ./install.sh`.
+2. **Check the screen/API and provider health:**
    ```bash
-   # Exact URL the app requests (batch of 5), with body shown:
-   curl -4 -sS -i --max-time 10 -A 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36' \
-     'https://quote.cnbc.com/quote-html-webservice/quote.htm?noform=1&partnerId=2&fund=1&exthrs=0&output=json&symbolType=issue&symbols=.GDAXI%7C.FTSE%7C.HSI%7C.SSEC%7C.STOXX50E&requestMethod=quick' | head -c 2000
-   # Single-symbol + alternate symbol spelling (tests the symbol-format hypothesis):
-   curl -4 -sS -i --max-time 10 -A 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36' \
-     'https://quote.cnbc.com/quote-html-webservice/quote.htm?noform=1&partnerId=2&fund=1&exthrs=0&output=json&symbolType=issue&symbols=.GDAXI&requestMethod=quick' | head -c 2000
+   curl -s localhost:8080/api/stocks | python3 -m json.tool
+   curl -s localhost:8080/api/summary | python3 -c "import json,sys; s=json.load(sys.stdin); print('screen:',s['stock_screen']['status'],s['stock_screen']['source'],s['stock_screen']['data_date']); print('providers:',[(p['provider'],p['state'],p['retry_in']) for p in s['providers']])"
+   journalctl -u econ-dashboard -n 40 --no-pager
    ```
-   Paste both outputs back. If the body names a bad param/symbol, the fix is usually a small
-   `_cnbc_batch` URL change + new unit test; if it is an abuse/geo block, we stop and pick (A)/(B).
-3. **Re-probe transients** (Yahoo cooldown + NY Fed/ECB): wait ≥30 min after the last doctor run,
-   then `python3 /opt/econ/dashboard/sources.py --doctor` once and paste §§[2/7] + [5/7] + breakers.
-   - Yahoo 429 clearing → note the cooldown length; Yahoo stays opportunistic in the cascade.
-   - NY Fed/ECB green again → close as transient; still red → rates redundancy is FRED+Treasury only.
-4. **Confirm the served board:** `curl -s localhost:8080/api/summary` (expect indices 4/9,
-   commodities 8/8, fx 8/8, cpi/gdp 7/7, curve + breakeven present, `providers` showing yahoo/cnbc
-   state) and `journalctl -u econ-dashboard -n 30 --no-pager` for refresher errors.
+   Expect no more than 3 names, each under $50, with a close date no more than 5 days old and a risk label. If the provider is blocked or symbols return no K-lines, the page/API should say unavailable or no candidates instead of substituting demo data.
+3. **Confirm the new Tencent path from `root@econ`** if stock coverage is zero; the sandbox cannot query these providers. An individual probe is:
+   ```bash
+   curl -4 -sS --max-time 10 'https://web.ifzq.gtimg.cn/appstock/app/fqkline/get?param=usPFE.N%2Cday%2C%2C%2C130%2Cqfq' | head -c 1200
+   ```
+   Paste the response (and `/api/stocks` `fetch_error`) if parsing or exchange suffixes need adjustment. Yahoo HTTP 429 and Stooq timeouts were already observed on the LXC, so Tencent K-lines are the critical new provider to verify.
+4. The earlier CNBC/Yahoo/Stooq index investigations are historical. Tencent/Sina restored 9/9 index coverage in the 2026-10-08 LXC doctor run; revisit those only if coverage regresses.
 
 ## 9. Session log
+
+### 2026-10-13 — Session 11: Short-term stock watchlist tab
+
+- **Ask:** add another tab for short-term stock research, classify High/Medium/Low risk, show no more than three stocks, and keep candidate share prices below $50.
+- **UI/API:** added `/stocks`, `/api/stocks`, and `stock_screen` in `/api/summary`; all pages share the existing disk-backed cache. Output is capped at three US-listed names from an editable 32-symbol watchlist.
+- **Screen:** daily data must be fresh (≤5 calendar days), price $5–<$50, average 20-session dollar volume ≥$5M, positive 20-session return, and close above its 20-day average. Ranking combines 5/20/60-session returns, a 50-day trend bonus, and realized-volatility/drawdown penalties. Risk labels use trailing 20-session annualized volatility and 60-session drawdown; thresholds and limitations are shown in the tab.
+- **Providers:** Tencent adjusted daily K-lines with four-way concurrency → one Yahoo Finance spark batch for misses → Stooq `.us` history. The sandbox has no market-provider egress; Tencent's US K-line endpoint/exchange suffixes/volume units remain unverified on the LXC. Existing Yahoo 429 + Stooq timeout may leave the screen without live data; it returns no picks rather than using demo data.
+- **Demo/tests:** demo backend generates synthetic bars with a visible DEMO-only banner. `py_compile` passed and `python3 -m unittest discover -s tests -v` passed **63 tests**. Demo HTTP checks for `/stocks`, `/api/stocks`, `/api/summary`, and `/healthz` returned 200; demo candidates are synthetic, not live.
+- **Not done:** no LXC deploy/live provider validation. See §8 for exact verification commands.
 
 ### 2026-10-08 — Session 10: Summary tab
 

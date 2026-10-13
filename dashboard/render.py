@@ -77,6 +77,33 @@ h2:after{content:"";flex:1;height:1px;background:var(--line)}
 .brief .kicker{font-size:11px;letter-spacing:1.2px;text-transform:uppercase;color:var(--muted);font-weight:600}
 .brief .posture-name{font-size:22px;font-weight:700;letter-spacing:.2px}
 .brief p{font-size:12.5px;color:var(--text)}
+.stock-intro{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:14px 16px;margin-bottom:14px}
+.stock-intro p{font-size:13px;color:var(--muted);margin-top:5px}
+.stock-status{padding:11px 14px;background:var(--panel);border:1px solid var(--line);border-radius:9px;margin:12px 0;font-size:13px}
+.stock-status.ok{border-color:#27685e}.stock-status.warn{border-color:#78631e}.stock-status.bad{border-color:#773c3a}
+.stock-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:12px;margin:12px 0}
+.stock-card{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:14px;display:flex;flex-direction:column;gap:8px}
+.stock-head{display:flex;align-items:flex-start;justify-content:space-between;gap:8px}
+.stock-rank{font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:1px}
+.stock-symbol{font-size:21px;font-weight:750;letter-spacing:.2px}
+.stock-name{color:var(--muted);font-size:12px}
+.stock-price{font-size:23px;font-weight:700;font-variant-numeric:tabular-nums}
+.risk-badge{display:inline-block;border:1px solid;border-radius:999px;padding:2px 9px;font-size:11px;font-weight:700;white-space:nowrap}
+.risk-low{color:var(--up);border-color:#27685e;background:#10221f}
+.risk-medium{color:var(--warn);border-color:#78631e;background:#211d10}
+.risk-high{color:var(--down);border-color:#773c3a;background:#251414}
+.stock-stats{display:grid;grid-template-columns:repeat(3,1fr);gap:7px}
+.stock-stat{background:var(--panel2);border-radius:7px;padding:7px 8px}
+.stock-stat small{display:block;color:var(--muted);font-size:10px;text-transform:uppercase;letter-spacing:.5px}
+.stock-stat b{display:block;font-size:13px;margin-top:2px;font-variant-numeric:tabular-nums}
+.stock-pct.up{color:var(--up)} .stock-pct.down{color:var(--down)} .stock-pct.flat{color:var(--muted)}
+.stock-reasons{padding-left:18px;color:var(--muted);font-size:12px}
+.stock-reasons li{margin:2px 0}
+.stock-meta{color:var(--muted);font-size:10.5px;border-top:1px solid var(--line);padding-top:7px}
+.stock-method{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:13px 16px;margin-top:16px}
+.stock-method summary{cursor:pointer;font-weight:650;font-size:13px}
+.stock-method p,.stock-method li{color:var(--muted);font-size:12px;margin-top:6px}
+.stock-method ul{padding-left:19px;margin-top:6px}
 .tone-risk{color:var(--down)} .tone-caution{color:var(--warn)} .tone-ok{color:var(--up)} .tone-muted{color:var(--muted)}
 footer{margin-top:36px;color:var(--muted);font-size:12px;border-top:1px solid var(--line);
   padding-top:14px}
@@ -232,6 +259,7 @@ def tabs(active):
     return ('<nav class="tabs">'
             + link("/", "board", "Board")
             + link("/summary", "summary", "Summary")
+            + link("/stocks", "stocks", "Stocks")
             + "</nav>")
 
 
@@ -449,6 +477,126 @@ def build_summary_page(sections, *, demo=False, generated_at=None, refresh=300):
   </section>
 </div>
 <footer>Summary of data already gathered. Not a forecast and not investment advice.</footer>
+"""
+    return (PAGE.replace("__STYLE__", STYLE)
+                .replace("__REFRESH__", str(max(60, int(refresh))))
+                .replace("__BODY__", body))
+
+
+def build_stocks_page(screen, *, demo=False, generated_at=None, refresh=300):
+    """Render the top-three, US stock watchlist and its transparent risk rules."""
+    now = generated_at or datetime.now(timezone.utc).astimezone()
+    screen = screen or {}
+    banner = ('<span class="badge demo">DEMO MODE — synthetic stock history; not live</span>'
+              if demo else "")
+    status = str(screen.get("status") or "waiting")
+    state_class = "ok" if status == "ok" else (
+        "bad" if status in ("unavailable", "stale") else "warn")
+    message = esc(screen.get("message") or "Waiting for stock data.")
+    if screen.get("refresh_error"):
+        state_class = "warn"
+        message += " Last refresh failed; showing the last successful screen."
+    quote_count = int(screen.get("quote_count") or 0)
+    universe_size = int(screen.get("universe_size") or 0)
+    coverage = (f"{quote_count}/{universe_size} tickers returned usable history"
+                if universe_size else "No ticker universe loaded")
+    data_date = esc(screen.get("data_date") or "—")
+    data_source = esc(screen.get("source") or "not yet available")
+    generated_screen = esc(screen.get("generated_at") or "not yet refreshed")
+    candidates = list(screen.get("candidates") or [])[:3]
+
+    def pct(value):
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            return '<span class="stock-pct flat">—</span>'
+        cls = "up" if number > 0 else ("down" if number < 0 else "flat")
+        return f'<span class="stock-pct {cls}">{number:+.1f}%</span>'
+
+    cards = []
+    for rank, item in enumerate(candidates, 1):
+        risk = str(item.get("risk") or "Unknown")
+        risk_class = risk.lower() if risk.lower() in ("low", "medium", "high") else "medium"
+        adv = item.get("avg_dollar_volume20")
+        try:
+            adv_text = f"${float(adv) / 1_000_000:.1f}M"
+        except (TypeError, ValueError):
+            adv_text = "—"
+        try:
+            price_text = f"${float(item.get('close')):,.2f}"
+        except (TypeError, ValueError):
+            price_text = "—"
+        try:
+            score_text = f"{float(item.get('rank_score')):+.2f}"
+        except (TypeError, ValueError):
+            score_text = "—"
+        reasons = "".join(f"<li>{esc(reason)}</li>" for reason in item.get("reasons") or [])
+        cards.append(f"""<article class="stock-card">
+  <div class="stock-head">
+    <div><div class="stock-rank">Rank #{rank}</div>
+      <div class="stock-symbol">{esc(item.get("symbol") or "?")}</div>
+      <div class="stock-name">{esc(item.get("name") or "")}</div>
+    </div>
+    <span class="risk-badge risk-{risk_class}">{esc(risk)} risk</span>
+  </div>
+  <div class="stock-head"><div class="stock-price">{price_text}</div>
+    <div class="stock-name">{esc(item.get("sector") or "")}</div>
+  </div>
+  <div class="stock-stats">
+    <div class="stock-stat"><small>5 sessions</small><b>{pct(item.get("ret5_pct"))}</b></div>
+    <div class="stock-stat"><small>20 sessions</small><b>{pct(item.get("ret20_pct"))}</b></div>
+    <div class="stock-stat"><small>60 sessions</small><b>{pct(item.get("ret60_pct"))}</b></div>
+    <div class="stock-stat"><small>20d volatility</small><b>{fmt_num(item.get("vol20_annual_pct"), 1)}%</b></div>
+    <div class="stock-stat"><small>60d drawdown</small><b>{fmt_num(item.get("drawdown60_pct"), 1)}%</b></div>
+    <div class="stock-stat"><small>20d $ volume</small><b>{adv_text}</b></div>
+  </div>
+  <ul class="stock-reasons">{reasons}</ul>
+  <div class="stock-meta">relative rank score {score_text} · close {esc(item.get("as_of") or "?")} ·
+    {esc(item.get("source") or "unknown source")} · quote age {int(item.get("quote_age_days") or 0)}d</div>
+</article>""")
+
+    cards_html = ("<div class='stock-grid'>" + "".join(cards) + "</div>") if cards else (
+        '<div class="section-empty">No stock picks are being shown. '
+        'This can mean the feeds are warming, quotes are stale, or no ticker passed the filters.</div>')
+    fetch_error = screen.get("fetch_error") or screen.get("refresh_error")
+    error_label = "Refresh issue / using last-good data" if screen.get("refresh_error") else "Data-source detail"
+    error_html = (f'<p class="note">{error_label}: {esc(fetch_error)}</p>'
+                  if fetch_error else "")
+    exclusions = screen.get("exclusions") or {}
+    excluded_html = " · ".join(
+        f"{esc(key.replace('_', ' '))}: {int(value)}"
+        for key, value in exclusions.items() if value
+    ) or "none"
+
+    body = f"""<header>
+  <h1>ECON<span>.</span>world</h1>
+  <span class="updated">updated {esc(now.strftime("%Y-%m-%d %H:%M %Z"))}</span>
+  {banner}
+</header>
+{tabs("stocks")}
+<section class="stock-intro">
+  <h2>Short-term stock watchlist <span class="src">· U.S.-listed · maximum 3 names</span></h2>
+  <p>Daily closing-price screen of a configured ticker universe. It looks for recent positive momentum and liquidity, then labels recent realized volatility/drawdown risk. This is not a forecast, trade signal, or order recommendation.</p>
+</section>
+<div class="stock-status {state_class}"><b>{message}</b><br>
+  {esc(coverage)} · latest history date {data_date} · source(s): {data_source} ·
+  screen generated {generated_screen}
+</div>
+{cards_html}
+<details class="stock-method">
+  <summary>How the screen and risk labels work</summary>
+  <ul>
+    <li>Price filter: ${fmt_num((screen.get("filters") or {}).get("price_min"), 2)} to under ${fmt_num((screen.get("filters") or {}).get("price_max_exclusive"), 2)}. The $5 floor excludes penny stocks; a low share price does not mean a company is cheap.</li>
+    <li>Freshness: the latest daily close must be no more than {int((screen.get("filters") or {}).get("max_quote_age_days", 5))} calendar days old.</li>
+    <li>Liquidity: at least ${fmt_num((screen.get("filters") or {}).get("min_avg_dollar_volume", 5_000_000) / 1_000_000, 1)}M average daily dollar volume over the last 20 sessions.</li>
+    <li>Trend screen: positive 20-session return and latest close above its 20-day average. {esc(screen.get("method") or "The relative score is not a probability or expected return.")}</li>
+    <li>Risk buckets: {esc(screen.get("risk_method") or "Not available.")}</li>
+    <li>Excluded counts: {excluded_html}. Universe size: {universe_size} tickers. The displayed list is always capped at three.</li>
+  </ul>
+  <p>{esc(screen.get("limitations") or "Technical data only; verify the quote and research the company before investing.")}</p>
+  {error_html}
+</details>
+<footer>Data uses daily closes, not intraday prices. Short-term stock investing can lose money quickly. Check current price, bid/ask spread, upcoming earnings/news, company filings, and your broker’s execution details before acting. The screen does not personalize risk or guarantee performance.</footer>
 """
     return (PAGE.replace("__STYLE__", STYLE)
                 .replace("__REFRESH__", str(max(60, int(refresh))))

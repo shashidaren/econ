@@ -104,3 +104,52 @@ TTL = {
 
 # Days of history used for sparklines / charts
 SPARK_DAYS = 120
+
+# --- Short-term stock watchlist ---------------------------------------------
+# Editable US-listed watch universe. Tencent codes include the exchange suffix
+# used by its K-line endpoint (.OQ = Nasdaq, .N = NYSE). A live price filter is
+# applied later; the list is not a statement that any of these stocks is a buy.
+STOCK_UNIVERSE = [
+    ("PFE",   "Pfizer",                    "Health Care",          "usPFE.N"),
+    ("BMY",   "Bristol Myers Squibb",       "Health Care",          "usBMY.N"),
+    ("CVS",   "CVS Health",                 "Health Care",          "usCVS.N"),
+    ("VTRS",  "Viatris",                    "Health Care",          "usVTRS.OQ"),
+    ("BAC",   "Bank of America",            "Financials",           "usBAC.N"),
+    ("C",     "Citigroup",                  "Financials",           "usC.N"),
+    ("SOFI",  "SoFi Technologies",           "Financials",           "usSOFI.OQ"),
+    ("NU",    "Nu Holdings",                "Financials",           "usNU.N"),
+    ("PYPL",  "PayPal",                     "Financials",           "usPYPL.OQ"),
+    ("T",     "AT&T",                       "Communication Services", "usT.N"),
+    ("VZ",    "Verizon",                    "Communication Services", "usVZ.N"),
+    ("CMCSA", "Comcast",                    "Communication Services", "usCMCSA.OQ"),
+    ("WBD",   "Warner Bros. Discovery",       "Communication Services", "usWBD.OQ"),
+    ("INTC",  "Intel",                      "Information Technology", "usINTC.OQ"),
+    ("HPQ",   "HP Inc.",                    "Information Technology", "usHPQ.N"),
+    ("HPE",   "Hewlett Packard Enterprise",  "Information Technology", "usHPE.N"),
+    ("NOK",   "Nokia ADR",                  "Information Technology", "usNOK.N"),
+    ("SNAP",  "Snap",                       "Communication Services", "usSNAP.N"),
+    ("F",     "Ford Motor",                 "Consumer Discretionary", "usF.N"),
+    ("GM",    "General Motors",              "Consumer Discretionary", "usGM.N"),
+    ("CCL",   "Carnival",                   "Consumer Discretionary", "usCCL.N"),
+    ("NCLH",  "Norwegian Cruise Line",        "Consumer Discretionary", "usNCLH.N"),
+    ("LYFT",  "Lyft",                       "Consumer Discretionary", "usLYFT.OQ"),
+    ("AAL",   "American Airlines Group",     "Industrials",          "usAAL.OQ"),
+    ("KHC",   "Kraft Heinz",                "Consumer Staples",     "usKHC.OQ"),
+    ("CAG",   "Conagra Brands",              "Consumer Staples",     "usCAG.N"),
+    ("OXY",   "Occidental Petroleum",        "Energy",               "usOXY.N"),
+    ("DVN",   "Devon Energy",               "Energy",               "usDVN.N"),
+    ("CTRA",  "Coterra Energy",             "Energy",               "usCTRA.N"),
+    ("AA",    "Alcoa",                      "Materials",            "usAA.N"),
+    ("PLUG",  "Plug Power",                 "Industrials",          "usPLUG.OQ"),
+    ("CHPT",  "ChargePoint",                "Industrials",          "usCHPT.N"),
+]
+STOCK_HISTORY_SESSIONS = 130
+STOCK_MIN_PRICE = float(os.environ.get("ECON_STOCK_MIN_PRICE", "5"))
+STOCK_MAX_PRICE = float(os.environ.get("ECON_STOCK_MAX_PRICE", "50"))
+STOCK_MIN_AVG_DOLLAR_VOLUME = float(
+    os.environ.get("ECON_STOCK_MIN_DOLLAR_VOLUME", "5000000"))
+STOCK_MAX_RESULTS = 3
+
+# Cache daily-history screens for an hour; historical closes do not justify
+# hammering keyless providers every five-minute dashboard refresh.
+TTL["stocks"] = 60 * 60
