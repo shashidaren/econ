@@ -160,6 +160,13 @@ def build_screen(
                       if isinstance(metadata, dict) else None) or {
                           "count": 0, "samples": {}
                       }
+    # Providers the history refresh's cascade actually needed; None when the
+    # batch did not report scope (demo/synthetic data), leaving diagnostics to
+    # fall back to the wider provider-name filter.
+    history_providers = None
+    if isinstance(metadata, dict) and metadata.get("history_providers") is not None:
+        history_providers = [str(name)
+                             for name in metadata.get("history_providers") or []]
 
     for spec in universe:
         symbol, name, sector = _spec_parts(spec)
@@ -259,6 +266,7 @@ def build_screen(
         "quote_count": quote_count,
         "usable_history_count": quote_count,
         "history_errors": history_errors,
+        "history_providers": history_providers,
         "data_date_timezone": "America/New_York",
         "data_date_kind": "daily U.S. market session date; no intraday timestamp",
         "eligible_count": eligible_count,

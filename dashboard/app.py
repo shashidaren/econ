@@ -272,13 +272,37 @@ def get_data(key):
     return (entry or {}).get("data")
 
 
-def _stock_provider_issues(providers):
-    """Keep stock-tab diagnostics scoped to its three history providers."""
+def _stock_breaker_family(name):
+    """Map a breaker key to the stock-history cascade stage that shares it."""
+    if name == "tencent_kline":
+        return "tencent_kline"
+    if name == "yahoo":
+        return "yahoo"
+    if name.startswith("stooq"):
+        return "stooq"
+    return None
+
+
+def _stock_provider_issues(providers, screen=None):
+    """Keep stock-tab diagnostics scoped to its three history providers.
+
+    When `screen` records the providers its latest history refresh actually
+    needed (`history_providers`), only those are reported. The `yahoo` and
+    `stooq:*` breakers are shared with non-stock features (index quotes, spark
+    charts), so their outages must not degrade a fully covered refresh that
+    never touched them. Screens without that scope keep the wider view.
+    """
+    scope = (screen or {}).get("history_providers")
+    scope = {str(name) for name in scope} if scope is not None else None
     stock_names = []
     for item in providers or []:
         name = str(item.get("provider") or "")
-        if name == "tencent_kline" or name == "yahoo" or name.startswith("stooq"):
-            stock_names.append(dict(item))
+        family = _stock_breaker_family(name)
+        if family is None:
+            continue
+        if scope is not None and family not in scope:
+            continue
+        stock_names.append(dict(item))
     return stock_names
 
 
@@ -386,7 +410,8 @@ def summary():
             stock_screen_data["refresh_error"] = str(stock_error)[:240]
     stock_screen_data = _with_indicative_myr(
         stock_screen_data, fx_entry, demo=config.DEMO)
-    stock_screen_data["provider_issues"] = _stock_provider_issues(providers)
+    stock_screen_data["provider_issues"] = _stock_provider_issues(
+        providers, stock_screen_data)
     out = {
         "indices": [get_data(f"stooq:{s}") for _, s in config.INDICES],
         "commodities": [get_data(f"stooq:{s}") for _, s in config.COMMODITIES],
