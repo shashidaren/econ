@@ -1345,6 +1345,10 @@ def stock_history_batch(symbols, vendor_symbols=None, days: int = 130):
     vendor_symbols = vendor_symbols or {}
     out = {}
     errors = []
+    symbol_errors = {}
+
+    def add_symbol_error(symbol, provider, exc):
+        symbol_errors.setdefault(symbol, []).append(f"{provider}: {exc}")
 
     def fetch_tencent(symbol):
         code = vendor_symbols.get(symbol)
@@ -1363,16 +1367,28 @@ def stock_history_batch(symbols, vendor_symbols=None, days: int = 130):
                 out[ticker] = {"rows": rows, "source": "Tencent K-line"}
             except Exception as exc:
                 errors.append(f"{symbol}: {exc}")
+                add_symbol_error(symbol, "Tencent K-line", exc)
 
     missing = [symbol for symbol in symbols if symbol not in out]
     if missing and provider_available("yahoo"):
         try:
             yahoo_rows = _yahoo_spark_batch(missing, days=days, include_volume=True)
-            for symbol, rows in yahoo_rows.items():
-                if _stock_history_has_liquidity(rows):
+            for symbol in missing:
+                rows = yahoo_rows.get(symbol)
+                if rows and _stock_history_has_liquidity(rows):
                     out[symbol] = {"rows": rows, "source": "Yahoo Finance"}
+                else:
+                    add_symbol_error(
+                        symbol, "Yahoo Finance",
+                        "no usable history or volume returned",
+                    )
         except Exception as exc:
             errors.append(f"Yahoo Finance batch: {exc}")
+            for symbol in missing:
+                add_symbol_error(symbol, "Yahoo Finance batch", exc)
+    elif missing:
+        for symbol in missing:
+            add_symbol_error(symbol, "Yahoo Finance", "provider cooling down")
 
     missing = [symbol for symbol in symbols if symbol not in out]
     if missing:
@@ -1390,10 +1406,26 @@ def stock_history_batch(symbols, vendor_symbols=None, days: int = 130):
                     out[ticker] = {"rows": rows, "source": "Stooq"}
                 except Exception as exc:
                     errors.append(f"{symbol}: {exc}")
+                    add_symbol_error(symbol, "Stooq", exc)
 
+    unavailable = [symbol for symbol in symbols if symbol not in out]
     if not out:
-        detail = " | ".join(errors[:6]) or "all providers unavailable"
+        detail = " | ".join(
+            f"{symbol}: {'; '.join(symbol_errors.get(symbol, [])) or 'no usable history'}"
+            for symbol in unavailable[:6]
+        ) or " | ".join(errors[:6]) or "all providers unavailable"
         raise RuntimeError(f"no usable US stock histories ({detail})")
+    if unavailable:
+        out["_meta"] = {
+            "history_errors": {
+                "count": len(unavailable),
+                "samples": {
+                    symbol: "; ".join(symbol_errors.get(symbol, [])) or
+                    "no usable history after provider cascade"
+                    for symbol in unavailable[:6]
+                },
+            }
+        }
     return out
 
 

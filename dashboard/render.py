@@ -5,7 +5,9 @@ and the page reloads itself every few minutes (wall-board friendly).
 """
 
 import html
+import math
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 
 from charts import line_chart, sparkline
 
@@ -88,6 +90,12 @@ h2:after{content:"";flex:1;height:1px;background:var(--line)}
 .stock-symbol{font-size:21px;font-weight:750;letter-spacing:.2px}
 .stock-name{color:var(--muted);font-size:12px}
 .stock-price{font-size:23px;font-weight:700;font-variant-numeric:tabular-nums}
+.stock-myr{color:var(--muted);font-size:11px;font-variant-numeric:tabular-nums}
+.stock-myr b{color:var(--text);font-size:12px}
+.stock-myr small{margin-left:4px}
+.stock-currency-note,.stock-verification{color:var(--muted);font-size:11.5px;margin-top:7px}
+.stock-currency-note a,.stock-verification a{text-decoration:underline}
+.stock-diagnostics{border-top:1px solid var(--line);padding-top:7px;margin-top:7px;color:var(--warn);font-size:11px;overflow-wrap:anywhere}
 .risk-badge{display:inline-block;border:1px solid;border-radius:999px;padding:2px 9px;font-size:11px;font-weight:700;white-space:nowrap}
 .risk-low{color:var(--up);border-color:#27685e;background:#10221f}
 .risk-medium{color:var(--warn);border-color:#78631e;background:#211d10}
@@ -124,6 +132,43 @@ __BODY__
 
 def esc(s) -> str:
     return html.escape(str(s), quote=True)
+
+
+def _parse_timestamp(value):
+    if isinstance(value, datetime):
+        moment = value
+    else:
+        raw = str(value or "").strip()
+        if raw.endswith("Z"):
+            raw = raw[:-1] + "+00:00"
+        moment = datetime.fromisoformat(raw)
+    return moment.replace(tzinfo=timezone.utc) if moment.tzinfo is None else moment
+
+
+def _dual_market_time(value):
+    """Format a timestamp in explicit Malaysia and U.S. Eastern zones."""
+    if not value:
+        return "not yet refreshed"
+    try:
+        moment = _parse_timestamp(value)
+        myt = moment.astimezone(ZoneInfo("Asia/Kuala_Lumpur"))
+        eastern = moment.astimezone(ZoneInfo("America/New_York"))
+        return (
+            f"Kuala Lumpur: {myt.strftime('%Y-%m-%d %H:%M')} MYT · "
+            f"U.S. Eastern: {eastern.strftime('%Y-%m-%d %H:%M %Z')}"
+        )
+    except (TypeError, ValueError, OverflowError, OSError):
+        return esc(value)
+
+
+def _myt_timestamp(value):
+    if not value:
+        return "timestamp unavailable"
+    try:
+        moment = _parse_timestamp(value).astimezone(ZoneInfo("Asia/Kuala_Lumpur"))
+        return moment.strftime("%Y-%m-%d %H:%M MYT")
+    except (TypeError, ValueError, OverflowError, OSError):
+        return esc(value)
 
 
 def fmt_num(v, dec=2) -> str:
@@ -485,7 +530,7 @@ def build_summary_page(sections, *, demo=False, generated_at=None, refresh=300):
 
 def build_stocks_page(screen, *, demo=False, generated_at=None, refresh=300):
     """Render the top-three, US stock watchlist and its transparent risk rules."""
-    now = generated_at or datetime.now(timezone.utc).astimezone()
+    now = generated_at or datetime.now(timezone.utc)
     screen = screen or {}
     banner = ('<span class="badge demo">DEMO MODE — synthetic stock history; not live</span>'
               if demo else "")
@@ -496,14 +541,31 @@ def build_stocks_page(screen, *, demo=False, generated_at=None, refresh=300):
     if screen.get("refresh_error"):
         state_class = "warn"
         message += " Last refresh failed; showing the last successful screen."
-    quote_count = int(screen.get("quote_count") or 0)
+    quote_count = int(screen.get("usable_history_count", screen.get("quote_count")) or 0)
+    history_count = int(screen.get("history_count") or quote_count)
     universe_size = int(screen.get("universe_size") or 0)
-    coverage = (f"{quote_count}/{universe_size} tickers returned usable history"
+    missing_history = max(0, universe_size - quote_count)
+    min_sessions = int((screen.get("filters") or {}).get("minimum_sessions", 61))
+    coverage = (f"{quote_count}/{universe_size} tickers with usable history "
+                f"(at least {min_sessions} sessions)"
                 if universe_size else "No ticker universe loaded")
+    if missing_history:
+        coverage += f" · {missing_history} missing/insufficient"
+    insufficient_sessions = max(0, history_count - quote_count)
+    if insufficient_sessions:
+        coverage += f" · {insufficient_sessions} below {min_sessions} sessions"
+    if status == "ok" and (missing_history or screen.get("provider_issues")):
+        state_class = "warn"
     data_date = esc(screen.get("data_date") or "—")
     data_source = esc(screen.get("source") or "not yet available")
-    generated_screen = esc(screen.get("generated_at") or "not yet refreshed")
+    generated_screen = _dual_market_time(screen.get("generated_at"))
     candidates = list(screen.get("candidates") or [])[:3]
+    currency_reference = screen.get("currency_reference") or {}
+    if demo:
+        currency_reference = {
+            "available": False,
+            "reason": "MYR conversion is disabled for synthetic demo data.",
+        }
 
     def pct(value):
         try:
@@ -512,6 +574,31 @@ def build_stocks_page(screen, *, demo=False, generated_at=None, refresh=300):
             return '<span class="stock-pct flat">—</span>'
         cls = "up" if number > 0 else ("down" if number < 0 else "flat")
         return f'<span class="stock-pct {cls}">{number:+.1f}%</span>'
+
+    if currency_reference.get("available"):
+        try:
+            fx_rate_text = f"{float(currency_reference.get('rate')):,.4f}"
+        except (TypeError, ValueError):
+            fx_rate_text = "—"
+        rate_date = esc(currency_reference.get("rate_date") or "unknown date")
+        fetched_myt = _myt_timestamp(currency_reference.get("fetched_at_utc"))
+        currency_note = (
+            '<p class="stock-currency-note">MYR figures are indicative share-price conversions only: '
+            f"USD/MYR {fx_rate_text}, {esc(currency_reference.get('source') or 'unknown source')}, "
+            f"reference date {rate_date}; fetched {fetched_myt}. "
+            "Not an executable or all-in price. Broker, regulatory, stamp-duty, spread and FX "
+            f"conversion costs are excluded. See <a href=\"https://www.moomoo.com/my/support/topic9_136\" "
+            'target="_blank" rel="noopener noreferrer">Moomoo Malaysia’s current U.S. fee schedule</a>.</p>'
+        )
+    else:
+        currency_reason = esc(currency_reference.get("reason") or "No fresh USD/MYR reference is available.")
+        currency_note = (
+            f'<p class="stock-currency-note">MYR estimate omitted: {currency_reason} '
+            "Any conversion would be indicative only, not an executable or all-in price; broker, "
+            "regulatory, stamp-duty, spread and FX conversion costs are excluded. See "
+            '<a href="https://www.moomoo.com/my/support/topic9_136" target="_blank" '
+            'rel="noopener noreferrer">Moomoo Malaysia’s current U.S. fee schedule</a>.</p>'
+        )
 
     cards = []
     for rank, item in enumerate(candidates, 1):
@@ -526,10 +613,23 @@ def build_stocks_page(screen, *, demo=False, generated_at=None, refresh=300):
             price_text = f"${float(item.get('close')):,.2f}"
         except (TypeError, ValueError):
             price_text = "—"
+        myr_price_html = ""
+        if currency_reference.get("available"):
+            try:
+                myr_price = float(item.get("close_myr_indicative"))
+                if math.isfinite(myr_price) and myr_price > 0:
+                    myr_price_html = (
+                        f'<div class="stock-myr">≈ <b>RM {myr_price:,.2f}</b> '
+                        "<small>indicative</small></div>"
+                    )
+            except (TypeError, ValueError):
+                pass
         try:
             score_text = f"{float(item.get('rank_score')):+.2f}"
         except (TypeError, ValueError):
             score_text = "—"
+        quote_age = max(0, int(item.get("quote_age_days") or 0))
+        quote_age_unit = "day" if quote_age == 1 else "days"
         reasons = "".join(f"<li>{esc(reason)}</li>" for reason in item.get("reasons") or [])
         cards.append(f"""<article class="stock-card">
   <div class="stock-head">
@@ -539,7 +639,7 @@ def build_stocks_page(screen, *, demo=False, generated_at=None, refresh=300):
     </div>
     <span class="risk-badge risk-{risk_class}">{esc(risk)} risk</span>
   </div>
-  <div class="stock-head"><div class="stock-price">{price_text}</div>
+  <div class="stock-head"><div><div class="stock-price">{price_text}</div>{myr_price_html}</div>
     <div class="stock-name">{esc(item.get("sector") or "")}</div>
   </div>
   <div class="stock-stats">
@@ -551,8 +651,8 @@ def build_stocks_page(screen, *, demo=False, generated_at=None, refresh=300):
     <div class="stock-stat"><small>20d $ volume</small><b>{adv_text}</b></div>
   </div>
   <ul class="stock-reasons">{reasons}</ul>
-  <div class="stock-meta">relative rank score {score_text} · close {esc(item.get("as_of") or "?")} ·
-    {esc(item.get("source") or "unknown source")} · quote age {int(item.get("quote_age_days") or 0)}d</div>
+  <div class="stock-meta">relative rank score {score_text} · U.S. daily-bar date {esc(item.get("as_of") or "?")} (Eastern Time) ·
+    {esc(item.get("source") or "unknown source")} · quote age {quote_age} calendar {quote_age_unit}</div>
 </article>""")
 
     cards_html = ("<div class='stock-grid'>" + "".join(cards) + "</div>") if cards else (
@@ -562,6 +662,41 @@ def build_stocks_page(screen, *, demo=False, generated_at=None, refresh=300):
     error_label = "Refresh issue / using last-good data" if screen.get("refresh_error") else "Data-source detail"
     error_html = (f'<p class="note">{error_label}: {esc(fetch_error)}</p>'
                   if fetch_error else "")
+
+    diagnostics = []
+    if screen.get("refresh_error"):
+        diagnostics.append(f"Last refresh failed: {str(screen.get('refresh_error'))[:240]}")
+    elif status in ("unavailable", "stale") and screen.get("fetch_error"):
+        diagnostics.append(f"History fetch detail: {str(screen.get('fetch_error'))[:240]}")
+    history_errors = screen.get("history_errors") or {}
+    if isinstance(history_errors, dict):
+        history_error_count = int(history_errors.get("count") or 0)
+        samples = history_errors.get("samples") or {}
+        if history_error_count:
+            sample_text = "; ".join(
+                f"{symbol}: {detail}" for symbol, detail in list(samples.items())[:4]
+            ) if isinstance(samples, dict) else ""
+            suffix = f" Sample: {sample_text}" if sample_text else ""
+            omitted = max(0, history_error_count - len(samples)) if isinstance(samples, dict) else history_error_count
+            if omitted:
+                suffix += f" (+{omitted} more not shown)"
+            diagnostics.append(
+                f"{history_error_count} ticker(s) lacked usable history after the provider cascade.{suffix}"
+            )
+    provider_issues = list(screen.get("provider_issues") or [])
+    for issue in provider_issues[:4]:
+        name = str(issue.get("provider") or "stock data provider")
+        state = "cooling down" if issue.get("state") == "cooling" else "degraded"
+        retry = int(issue.get("retry_in") or 0)
+        detail = (str(issue.get("reason") or "").split(" | ")[0])[:120]
+        retry_text = f"; retry in about {max(1, round(retry / 60))} min" if retry > 0 else ""
+        reason_text = f" — {detail}" if detail else ""
+        diagnostics.append(f"{name}: {state}{retry_text}{reason_text}")
+    diagnostics_html = (
+        '<div class="stock-diagnostics"><b>Data notes:</b> '
+        + "<br>".join(esc(line) for line in diagnostics)
+        + "</div>"
+    ) if diagnostics else ""
     exclusions = screen.get("exclusions") or {}
     excluded_html = " · ".join(
         f"{esc(key.replace('_', ' '))}: {int(value)}"
@@ -570,23 +705,27 @@ def build_stocks_page(screen, *, demo=False, generated_at=None, refresh=300):
 
     body = f"""<header>
   <h1>ECON<span>.</span>world</h1>
-  <span class="updated">updated {esc(now.strftime("%Y-%m-%d %H:%M %Z"))}</span>
+  <span class="updated">Page time · {_dual_market_time(now)}</span>
   {banner}
 </header>
 {tabs("stocks")}
 <section class="stock-intro">
   <h2>Short-term stock watchlist <span class="src">· U.S.-listed · maximum 3 names</span></h2>
   <p>Daily closing-price screen of a configured ticker universe. It looks for recent positive momentum and liquidity, then labels recent realized volatility/drawdown risk. This is not a forecast, trade signal, or order recommendation.</p>
+  <p class="stock-verification">This editable universe is not checked against Moomoo Malaysia’s live symbol availability or order eligibility. Verify each ticker in the app before relying on it; fractional-share eligibility is limited to selected U.S. securities and the list can change. See <a href="https://www.moomoo.com/my/support/topic9_193" target="_blank" rel="noopener noreferrer">Moomoo Malaysia’s fractional-share guide</a>.</p>
 </section>
 <div class="stock-status {state_class}"><b>{message}</b><br>
-  {esc(coverage)} · latest history date {data_date} · source(s): {data_source} ·
+  {esc(coverage)} · latest daily-bar date {data_date} (U.S. market session date, Eastern Time) · source(s): {data_source} ·
   screen generated {generated_screen}
+  {diagnostics_html}
 </div>
+{currency_note}
 {cards_html}
 <details class="stock-method">
   <summary>How the screen and risk labels work</summary>
   <ul>
     <li>Price filter: ${fmt_num((screen.get("filters") or {}).get("price_min"), 2)} to under ${fmt_num((screen.get("filters") or {}).get("price_max_exclusive"), 2)}. The $5 floor excludes penny stocks; a low share price does not mean a company is cheap.</li>
+    <li>History: at least {int((screen.get("filters") or {}).get("minimum_sessions", 61))} daily sessions are required for usable 60-session analysis.</li>
     <li>Freshness: the latest daily close must be no more than {int((screen.get("filters") or {}).get("max_quote_age_days", 5))} calendar days old.</li>
     <li>Liquidity: at least ${fmt_num((screen.get("filters") or {}).get("min_avg_dollar_volume", 5_000_000) / 1_000_000, 1)}M average daily dollar volume over the last 20 sessions.</li>
     <li>Trend screen: positive 20-session return and latest close above its 20-day average. {esc(screen.get("method") or "The relative score is not a probability or expected return.")}</li>

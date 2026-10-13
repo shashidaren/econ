@@ -14,12 +14,13 @@ Endpoints:  /            the dashboard
 """
 
 import json
+import math
 import os
 import threading
 import time
 import traceback
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlparse
@@ -271,6 +272,90 @@ def get_data(key):
     return (entry or {}).get("data")
 
 
+def _stock_provider_issues(providers):
+    """Keep stock-tab diagnostics scoped to its three history providers."""
+    stock_names = []
+    for item in providers or []:
+        name = str(item.get("provider") or "")
+        if name == "tencent_kline" or name == "yahoo" or name.startswith("stooq"):
+            stock_names.append(dict(item))
+    return stock_names
+
+
+def _with_indicative_myr(screen, fx_entry, *, demo=False, now=None):
+    """Attach a clearly non-executable USD/MYR reference to stock prices.
+
+    Conversion is suppressed for demo data, failed/expired FX cache entries,
+    invalid rates, or reference dates older than the stock screen's freshness
+    window. It uses the dashboard's existing ECB/Frankfurter FX cache only.
+    """
+    view = dict(screen or {})
+    candidates = [dict(item) for item in (view.get("candidates") or [])
+                  if isinstance(item, dict)]
+    now = now or datetime.now(timezone.utc)
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
+    now = now.astimezone(timezone.utc)
+    reference = {
+        "pair": "USD/MYR",
+        "source": "ECB reference rate via Frankfurter",
+        "available": False,
+        "rate_date": None,
+        "fetched_at_utc": None,
+        "max_reference_age_days": 5,
+    }
+    rate = None
+    reason = None
+
+    if demo:
+        reason = "MYR conversion is disabled for synthetic demo data."
+        reference["source"] = "DEMO synthetic FX (not used for conversion)"
+    else:
+        quotes = (fx_entry or {}).get("data") or []
+        quote = next((item for item in quotes
+                      if isinstance(item, dict) and
+                      str(item.get("name") or "").endswith("(MYR)")), None)
+        if not quote:
+            reason = "No USD/MYR reference quote is available."
+        else:
+            reference["rate_date"] = quote.get("date")
+            try:
+                stamp = float((fx_entry or {}).get("at"))
+                reference["fetched_at_utc"] = datetime.fromtimestamp(
+                    stamp, timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+                rate = float(quote.get("close"))
+                if not math.isfinite(rate) or rate <= 0:
+                    raise ValueError("invalid USD/MYR rate")
+                rate_date = date.fromisoformat(str(quote.get("date"))[:10])
+                age_days = (now.date() - rate_date).days
+                cache_age = now.timestamp() - stamp
+                if (fx_entry or {}).get("err"):
+                    reason = "The USD/MYR refresh failed; the reference is omitted."
+                elif cache_age < 0 or cache_age > config.TTL["fx"]:
+                    reason = "The USD/MYR cache is stale; the reference is omitted."
+                elif age_days < 0 or age_days > reference["max_reference_age_days"]:
+                    reason = f"The USD/MYR reference date is {age_days} days old; conversion is omitted."
+                else:
+                    reference["available"] = True
+                    reference["rate"] = rate
+            except (TypeError, ValueError, OverflowError, OSError):
+                reason = "The USD/MYR reference rate or timestamp is invalid; conversion is omitted."
+
+    if reason:
+        reference["reason"] = reason
+    for item in candidates:
+        item["close_myr_indicative"] = (
+            round(float(item["close"]) * rate, 2)
+            if reference["available"] and rate is not None
+            and isinstance(item.get("close"), (int, float))
+            and math.isfinite(float(item["close"]))
+            else None
+        )
+    view["candidates"] = candidates
+    view["currency_reference"] = reference
+    return view
+
+
 def summary():
     curve_sid, curve_title, curve_years = config.FRED_CURVE
     be_sid, be_title = config.FRED_BREAKEVEN
@@ -279,6 +364,8 @@ def summary():
     with LOCK:
         errors = [f"{k}: {v['err']}" for k, v in CACHE.items() if v.get("err")]
     providers = backend.provider_status() if hasattr(backend, "provider_status") else []
+    fx_entry = cache_get("fx") or {}
+    fx_quotes = fx_entry.get("data") or []
     stock_entry = cache_get("stock_screen") or {}
     stock_error = stock_entry.get("err")
     stock_screen_data = stock_entry.get("data")
@@ -297,10 +384,13 @@ def summary():
         if stock_error:
             stock_screen_data = dict(stock_screen_data)
             stock_screen_data["refresh_error"] = str(stock_error)[:240]
+    stock_screen_data = _with_indicative_myr(
+        stock_screen_data, fx_entry, demo=config.DEMO)
+    stock_screen_data["provider_issues"] = _stock_provider_issues(providers)
     out = {
         "indices": [get_data(f"stooq:{s}") for _, s in config.INDICES],
         "commodities": [get_data(f"stooq:{s}") for _, s in config.COMMODITIES],
-        "fx": get_data("fx") or [],
+        "fx": fx_quotes,
         "cpi": get_data("wb_cpi") or [],
         "gdp": get_data("wb_gdp") or [],
         "policy_pairs": config.FRED_POLICY,

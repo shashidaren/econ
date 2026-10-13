@@ -153,7 +153,13 @@ def build_screen(
     candidates = []
     data_dates = []
     sources = set()
+    history_count = 0
     quote_count = 0
+    metadata = market_data.get("_meta") if isinstance(market_data, dict) else None
+    history_errors = (metadata.get("history_errors")
+                      if isinstance(metadata, dict) else None) or {
+                          "count": 0, "samples": {}
+                      }
 
     for spec in universe:
         symbol, name, sector = _spec_parts(spec)
@@ -162,13 +168,14 @@ def build_screen(
         if not rows:
             exclusions["no_history"] += 1
             continue
-        quote_count += 1
+        history_count += 1
         sources.add(source)
         data_dates.append(rows[-1][0])
         metrics = _metrics(rows)
         if metrics is None:
             exclusions["insufficient_history"] += 1
             continue
+        quote_count += 1
         try:
             quote_age = (as_of - date.fromisoformat(metrics["as_of"])).days
         except ValueError:
@@ -232,9 +239,9 @@ def build_screen(
             f"{eligible_count} stock(s) passed the screen; showing up to "
             f"{len(candidates)} ranked candidates."
         )
-    elif quote_count:
+    elif history_count:
         status = "no_candidates"
-        message = "No stocks passed all of today’s price, liquidity, freshness, and trend filters."
+        message = "No stocks passed all of today’s history, price, liquidity, freshness, and trend filters."
     elif fetch_error:
         status = "unavailable"
         message = "Fresh stock history is unavailable from the configured data sources."
@@ -248,7 +255,12 @@ def build_screen(
         "data_date": data_date,
         "source": ", ".join(sorted(sources)) if sources else None,
         "universe_size": len(universe),
+        "history_count": history_count,
         "quote_count": quote_count,
+        "usable_history_count": quote_count,
+        "history_errors": history_errors,
+        "data_date_timezone": "America/New_York",
+        "data_date_kind": "daily U.S. market session date; no intraday timestamp",
         "eligible_count": eligible_count,
         "max_candidates": MAX_RESULTS,
         "candidates": candidates,
