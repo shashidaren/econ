@@ -21,7 +21,7 @@ central-bank policy rates, and the US yield curve (recession indicator).
 | Server IP | `192.168.0.149` (LAN only) |
 | Access | root via SSH; web UI on LAN |
 | Repo | `shashidaren/econ` (this repo) |
-| Working branch | `arena/a6249866-econ` (this session's stocks-tab work; not yet live-deployed) |
+| Working branch | `arena/a5e9894b-econ` (Arena session branch; Stocks baseline is reported merged/deployed, follow-up UI changes here are not deployed) |
 | Deploy model | server does `git fetch --all && git reset --hard origin/main && ./install.sh` |
 | App dir on server | `/opt/econ` |
 | Port | **8080** (override: `ECON_PORT=xxxx ./install.sh`) |
@@ -50,12 +50,13 @@ central-bank policy rates, and the US yield curve (recession indicator).
 | D15 | Five missing indices | **Tencent then Sina, after CNBC, only for `^shc` `^hsi` `^ukx` `^dax` `^stx`** | 2026-10-08 probe: Tencent `sh000001` / `hkHSI` / `ukUKX` are live or previous close; Sina `b_DAX` / `b_SX5E` cover the two Tencent misses. Do not use Sina `int_dax`, `int_ftse` (stale 9284 vs 10458), or `int_fsx5e` (empty). Eastmoney was HTTP 502. GBK pages; parser keeps ASCII prices. Card source reads `tencent:…` or `sina:…` |
 | D16 | Gold inflation read | **FRED `DFII10` 10y real yield chart plus a briefing card** | Owner invests mostly in gold. Breakeven is expected inflation; the real yield is the opportunity cost. Card uses DFII10, else funds − breakeven. ≥1.5 headwind, 0.5–1.5 caution, negative is the classic tailwind. Not a price forecast |
 | D17 | Summary tab | **`/summary` page, same cache as `/`** | Second tab, not a new fetch. Posture, briefing lines, rates, and the loaded quotes/CPI/GDP in prose. Board tab links to it |
-| D18 | Short-term stock watchlist | **`/stocks` + `/api/stocks`, maximum 3 US-listed names under $50** | Editable 32-symbol universe; $5 floor, $5M 20-session average dollar-volume floor, fresh daily bars, positive 20-session return and close above the 20-day average. Rank 5/20/60-session momentum with volatility/drawdown penalties. Low/Medium/High are backward-looking realized-risk buckets only. Tencent K-line → batched Yahoo → Stooq; no fundamentals, news, earnings calendar, analyst targets, or intraday data. Not a buy signal |
+| D18 | Short-term stock watchlist | **`/stocks` + `/api/stocks`, maximum 3 U.S.-listed names under $50** | Editable 32-symbol universe; $5 floor, $5M 20-session average dollar-volume floor, at least 61 sessions, daily close no more than 5 calendar days old, positive 20-session return and close above the 20-day average. Rank 5/20/60-session momentum with volatility/drawdown penalties. Low/Medium/High are backward-looking realized-risk buckets only. Tencent K-line → batched Yahoo → Stooq; no fundamentals, news, earnings calendar, analyst targets, or intraday data. Not a buy signal |
+| D19 | Moomoo Malaysia use | **Read-only, no broker integration; preserve the editable U.S. universe and existing limits** | Moomoo MY's official help center says fractional availability is limited to selected U.S. securities and its in-app eligibility list may change. This app cannot validate live per-symbol tradability. Show an optional fresh ECB/Frankfurter USD/MYR reference with source/date/fetch time and prominent non-executable/no-fees caveats; link the official fee schedule rather than calculating charges |
 
 Data-source rules: free, no signups; every source fails independently (panel shows
 "awaiting data"/stale badge, board never breaks); polite fetch cadence via cache TTLs.
 
-## 4. Architecture (v1.0 short-term stock watchlist added on `arena/a6249866-econ`; live LXC verification pending)
+## 4. Architecture (Stocks baseline merged; follow-up Moomoo-usability work on `arena/a5e9894b-econ`)
 
 ```
 dashboard/
@@ -102,11 +103,13 @@ uninstall.sh
 
 ## 5. Ops runbook (on the server)
 
+Only deploy after the owner explicitly requests it. The current Arena follow-up branch has not been deployed; do not reset the LXC to it as part of development/testing.
+
 ```bash
-# Deploy latest changes (overwrites any local ad-hoc edits in /opt/econ)
+# Deploy latest merged changes only when explicitly requested (overwrites local edits in /opt/econ)
 cd /opt/econ
 git fetch --all
-git reset --hard origin/main    # run after the owner merges the follow-up PR
+git reset --hard origin/main    # only after explicit deployment approval
 ./install.sh
 
 # Test upstream data sources directly from the LXC
@@ -127,9 +130,10 @@ Preview (no network needed): `ECON_DEMO=1 python3 dashboard/app.py` → sample d
 
 ## 6. Current status
 
-- [ ] **Short-term Stocks tab (v1.0, this session, on `arena/a6249866-econ`; not deployed):** `/stocks` and `/api/stocks`, up to three US-listed candidates below $50, with explicit price/liquidity/trend screens and observed Low/Medium/High risk buckets. Tencent K-line → Yahoo batch → Stooq. Offline tests and demo page pass; real Tencent US K-line symbols/provider response still need live LXC verification.
-- [x] **Summary tab, Gold read, and recession meter are present in this checkout.** No fresh live LXC output was supplied for this session.
-- [x] **Stock screen tests:** 63 standard-library tests pass; demo server rendered `/stocks` and `/api/stocks` successfully. Demo quote data is synthetic and is not evidence of live picks.
+- [x] **Stocks baseline is merged in `cddd673` and owner-reported live on the LXC:** as of 2026-10-13, the page reports 32/32 tickers with usable history, latest daily bar 2026-10-12, Tencent K-line, seven screen-passers and at most three displayed. This is owner-provided status, not independently queried from this sandbox.
+- [ ] **Stocks follow-up on `arena/a5e9894b-econ` is not deployed:** explicit MYT/U.S. Eastern clocks, optional fresh-reference MYR equivalents, Moomoo Malaysia availability/fee links and limitations, minimum-history-based coverage, and clearer partial-provider diagnostics. No broker integration or order automation.
+- [x] **Summary tab, Gold read, and recession meter are present in this checkout.**
+- [x] **Tests:** merged Stocks baseline passed 63 tests; this follow-up passes 70/70 standard-library tests and `py_compile`. Demo quote data is synthetic and is not evidence of live picks.
 - [x] **Tencent/Sina index fallback (v0.7) deployed on `192.168.0.149` at `5fd45e6`.**
   Doctor `2026-10-08T02:09:21+00:00` §[8/8] **5/5 passed**: Shanghai `tencent:sh000001`
   3852.02 @ 2026-10-08, Hang Seng `tencent:hkHSI` 24069.56 @ 2026-10-08, FTSE
@@ -175,7 +179,8 @@ Preview (no network needed): `ECON_DEMO=1 python3 dashboard/app.py` → sample d
 ## 7. Known risks / watch-list
 
 - **Stocks screen is not investment advice or a forecast:** it uses daily-price momentum and trailing liquidity/volatility/drawdown only. It does not screen valuation, earnings, balance-sheet strength, news, or upcoming catalysts. Price below $50 is not a valuation signal; user should verify quote/earnings/news before any trade.
-- **New Tencent US-stock K-line integration is unverified on the LXC:** Tencent index quotes were live on 2026-10-08, but the separate `web.ifzq.gtimg.cn/appstock/app/fqkline/get` path, US exchange suffixes (`.N`/`.OQ`), adjusted-bar schema, and volume units have not been tested from the owner’s server. If Tencent K-lines fail, current recorded Yahoo 429 + Stooq timeout may leave the screen unavailable. The page must show no picks rather than stale/synthetic claims.
+- **Moomoo per-symbol availability is not programmatically verified:** the official Malaysia guide says fractional trading is limited to selected U.S. securities and the in-app list can change. The static watchlist must remain editable; users need to confirm a ticker and any fractional eligibility in the app. Do not imply broker support or live orderability.
+- **Stock history providers can still fail:** owner reports Tencent covered all 32 configured names on 2026-10-13, but Yahoo/Stooq remain fallbacks and this sandbox cannot query the LXC or market providers. The page must show partial coverage/errors and suppress stale picks, never substitute demo data.
 - **Yahoo = IP-level HTTP 429 (settled 01:13 UTC):** `crumb handshake` itself returns 429 in
   0.23 s, so the LXC's IP is rate-limited at Yahoo's edge — no cookie/crumb/pacing tweak on this
   IP will fix it. Yahoo stays in the cascade (breaker-cooled, ~0 ms cost) in case the limit lifts,
@@ -201,25 +206,22 @@ Preview (no network needed): `ECON_DEMO=1 python3 dashboard/app.py` → sample d
 - **Sandbox has no egress to data hosts:** only GitHub/PyPI are reachable from this environment.
   All local tests use faked transports; live provider behavior must be verified on `root@econ`.
 
-## 8. Next steps (live verification of the new stock data path)
+## 8. Next steps (follow-up branch; no deployment requested)
 
-1. **After this branch is merged, deploy the update to the LXC** using the established main deploy:
-   `cd /opt/econ && git fetch --all && git reset --hard origin/main && ./install.sh`.
-2. **Check the screen/API and provider health:**
-   ```bash
-   curl -s localhost:8080/api/stocks | python3 -m json.tool
-   curl -s localhost:8080/api/summary | python3 -c "import json,sys; s=json.load(sys.stdin); print('screen:',s['stock_screen']['status'],s['stock_screen']['source'],s['stock_screen']['data_date']); print('providers:',[(p['provider'],p['state'],p['retry_in']) for p in s['providers']])"
-   journalctl -u econ-dashboard -n 40 --no-pager
-   ```
-   Expect no more than 3 names, each under $50, with a close date no more than 5 days old and a risk label. If the provider is blocked or symbols return no K-lines, the page/API should say unavailable or no candidates instead of substituting demo data.
-3. **Confirm the new Tencent path from `root@econ`** if stock coverage is zero; the sandbox cannot query these providers. An individual probe is:
-   ```bash
-   curl -4 -sS --max-time 10 'https://web.ifzq.gtimg.cn/appstock/app/fqkline/get?param=usPFE.N%2Cday%2C%2C%2C130%2Cqfq' | head -c 1200
-   ```
-   Paste the response (and `/api/stocks` `fetch_error`) if parsing or exchange suffixes need adjustment. Yahoo HTTP 429 and Stooq timeouts were already observed on the LXC, so Tencent K-lines are the critical new provider to verify.
+1. **Do not deploy this follow-up to the LXC unless the owner explicitly asks.** The Stocks baseline is already reported live; these local changes have not been deployed.
+2. Run the offline suite and inspect `/stocks`, `/api/stocks`, and `/api/summary.stock_screen` locally/demo-only. Demo stock and FX inputs must remain visibly synthetic; demo conversions are suppressed.
+3. If the owner later requests deployment, first confirm the current live LXC/API state, then use the established deploy process. Afterward verify that all existing price/liquidity/history/freshness/trend thresholds and the three-total cap remain unchanged, plus the new timezone, FX provenance, Moomoo caveats, and failure diagnostics.
 4. The earlier CNBC/Yahoo/Stooq index investigations are historical. Tencent/Sina restored 9/9 index coverage in the 2026-10-08 LXC doctor run; revisit those only if coverage regresses.
 
 ## 9. Session log
+
+### 2026-10-13 — Session 12: Moomoo Malaysia usability, timestamps, and feed diagnostics
+
+- **Ask:** continue the merged/deployed Stocks tab without changing its U.S.-listed under-$50 scope, gates, ranking, or three-total cap; check official Moomoo MY documentation; keep it read-only and do not deploy.
+- **Moomoo docs checked:** [U.S. fractional-share guide](https://www.moomoo.com/my/support/topic9_193) says only certain U.S. stocks/ETFs are eligible and the app's list can change; [U.S. fee schedule](https://www.moomoo.com/my/support/topic9_136) lists broker, settlement/regulatory, and Malaysia stamp-duty items. No per-symbol Moomoo availability was inferred or claimed.
+- **Implementation:** Stocks page now displays Kuala Lumpur (MYT) and U.S. Eastern timestamps; daily-bar dates are labelled as U.S. market session dates. It links the Moomoo guides, explains that availability is not queried, and shows a non-executable MYR share-price estimate only while the existing ECB/Frankfurter USD/MYR reference is fresh (reference date + fetch time). Fees, spreads, stamp duty and FX conversion charges are explicitly excluded. Synthetic demo FX conversions are suppressed.
+- **Freshness/diagnostics:** coverage now counts histories with the minimum 61-session metrics available. Partial unresolved-ticker errors and relevant provider breaker states appear on `/stocks` and in `stock_screen`; existing stale-pick suppression remains. No changes to ticker universe, price, dollar-volume, freshness, trend, risk/ranking rules, providers, or trading integration.
+- **Verification:** `python3 -m py_compile dashboard/*.py tests/*.py` passed; `python3 -m unittest discover -s tests -v` passed **70/70 tests**. No LXC deployment; owner-reported live baseline remains 32/32 history, Tencent K-line, seven passing, up to three displayed.
 
 ### 2026-10-13 — Session 11: Short-term stock watchlist tab
 

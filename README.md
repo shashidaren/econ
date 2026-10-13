@@ -45,11 +45,19 @@ Preview without a server (sample data): `ECON_DEMO=1 python3 dashboard/app.py`
   targets, intraday prices, or trade execution. A share price under $50 does not
   mean the stock is cheap; this is a research shortlist, not a buy signal.
 - History sources: Tencent adjusted daily K-lines (primary), one batched Yahoo
-  Finance spark request (fallback), then Stooq. Tencent's US-stock K-line path
-  and exchange suffixes still need live verification on the target LXC; if all
-  providers fail, the screen shows unavailable/no candidates rather than guessed
-  or synthetic live picks. DEMO mode is synthetic and must not be used for
-  investment decisions.
+  Finance spark request (fallback), then Stooq. The page labels Kuala Lumpur and
+  U.S. Eastern timestamps, identifies daily-bar dates as U.S. market session
+  dates, and shows incomplete history/provider errors rather than concealing
+  them. If all providers fail, it shows unavailable/no candidates rather than
+  guessed or synthetic live picks. DEMO mode is synthetic and must not be used
+  for investment decisions.
+- For Moomoo Malaysia users, the 32-symbol universe remains editable but is not
+  validated against Moomoo's live symbol/trading-eligibility list. Confirm the
+  ticker in the app. The optional MYR amount uses the dashboard's fresh ECB
+  reference rate via Frankfurter, is not an executable conversion or all-in
+  price, and excludes applicable fees, stamp duty, spreads, and FX conversion
+  charges. See the [Moomoo Malaysia fractional-share guide](https://www.moomoo.com/my/support/topic9_193)
+  and [current U.S. fee schedule](https://www.moomoo.com/my/support/topic9_136).
 
 Test live upstream sources directly on the server:
 

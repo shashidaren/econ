@@ -4,11 +4,12 @@ import json
 import os
 import sys
 import unittest
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from unittest import mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "dashboard"))
 
+import app  # noqa: E402
 import render  # noqa: E402
 import sources  # noqa: E402
 import stocks  # noqa: E402
@@ -88,6 +89,28 @@ class StockScreenTests(unittest.TestCase):
         self.assertEqual(result["candidates"], [])
         self.assertIn("feed blocked", result["fetch_error"])
 
+    def test_unavailable_page_shows_fetch_failure_and_no_candidates(self):
+        screen = stocks.build_screen(
+            [_spec("MISSING")], {}, fetch_error="Tencent timeout; Yahoo HTTP 429")
+        page = render.build_stocks_page(screen, demo=False)
+        self.assertEqual(screen["status"], "unavailable")
+        self.assertEqual(screen["candidates"], [])
+        self.assertIn("Fresh stock history is unavailable", page)
+        self.assertIn("History fetch detail", page)
+        self.assertIn("Tencent timeout; Yahoo HTTP 429", page)
+        self.assertEqual(page.count('class="stock-card"'), 0)
+
+    def test_usable_history_coverage_requires_minimum_sessions(self):
+        universe = [_spec("FULL"), _spec("SHORT")]
+        data = {
+            "FULL": {"rows": _history(days=80), "source": "test"},
+            "SHORT": {"rows": _history(days=20), "source": "test"},
+        }
+        result = stocks.build_screen(universe, data)
+        self.assertEqual(result["history_count"], 2)
+        self.assertEqual(result["usable_history_count"], 1)
+        self.assertEqual(result["exclusions"]["insufficient_history"], 1)
+
     def test_stocks_page_caps_display_at_three_and_escapes_text(self):
         cards = []
         for i in range(5):
@@ -111,6 +134,103 @@ class StockScreenTests(unittest.TestCase):
         self.assertIn("Stocks", page)
         self.assertNotIn("<script>", page)
         self.assertIn("DEMO MODE — synthetic stock history", page)
+        self.assertNotIn("RM 20.00", page)
+        self.assertIn("MYR conversion is disabled for synthetic demo data", page)
+
+    def test_stocks_page_surfaces_partial_history_and_provider_failures(self):
+        page = render.build_stocks_page({
+            "status": "ok", "message": "1 eligible", "universe_size": 2,
+            "quote_count": 1, "usable_history_count": 1, "history_count": 1,
+            "candidates": [], "data_date": "2026-10-12", "source": "Tencent K-line",
+            "history_errors": {"count": 1, "samples": {
+                "MISS": "Tencent: unavailable; Yahoo: empty; Stooq: timeout",
+            }},
+            "provider_issues": [{
+                "provider": "tencent_kline", "state": "cooling", "retry_in": 120,
+                "reason": "connection timeout",
+            }],
+        }, demo=False)
+        self.assertIn("1/2 tickers with usable history", page)
+        self.assertIn("MISS", page)
+        self.assertIn("tencent_kline: cooling down", page)
+        self.assertIn("retry in about 2 min", page)
+        self.assertIn("connection timeout", page)
+
+    def test_stocks_page_shows_dual_market_times_and_caveated_myr(self):
+        now = datetime(2026, 10, 13, 12, 30, tzinfo=timezone.utc)
+        page = render.build_stocks_page({
+            "status": "ok", "message": "1 eligible", "universe_size": 1,
+            "quote_count": 1, "usable_history_count": 1, "history_count": 1,
+            "candidates": [{
+                "symbol": "TEST", "name": "Test Corp", "sector": "Technology",
+                "close": 20.0, "close_myr_indicative": 90.0, "risk": "Low",
+                "ret5_pct": 1.0, "ret20_pct": 2.0, "ret60_pct": 5.0,
+                "vol20_annual_pct": 20.0, "drawdown60_pct": -4.0,
+                "avg_dollar_volume20": 10_000_000, "rank_score": 2.5,
+                "as_of": "2026-10-12", "source": "test", "quote_age_days": 1,
+                "reasons": [],
+            }],
+            "data_date": "2026-10-12", "source": "test",
+            "generated_at": "2026-10-13T12:00:00Z",
+            "filters": {"price_min": 5, "price_max_exclusive": 50,
+                        "min_avg_dollar_volume": 5_000_000, "minimum_sessions": 61},
+            "currency_reference": {
+                "available": True, "pair": "USD/MYR", "rate": 4.5,
+                "source": "ECB reference rate via Frankfurter",
+                "rate_date": "2026-10-12", "fetched_at_utc": "2026-10-13T12:00:00Z",
+            },
+        }, demo=False, generated_at=now)
+        self.assertIn("Kuala Lumpur: 2026-10-13 20:30 MYT", page)
+        self.assertIn("U.S. Eastern: 2026-10-13 08:30 EDT", page)
+        self.assertIn("U.S. market session date, Eastern Time", page)
+        self.assertIn("RM 90.00", page)
+        self.assertIn("ECB reference rate via Frankfurter", page)
+        self.assertIn("reference date 2026-10-12", page)
+        self.assertIn("2026-10-13 20:00 MYT", page)
+        self.assertIn("Not an executable or all-in price", page)
+        self.assertIn("stamp-duty, spread and FX conversion costs are excluded", page)
+        self.assertIn("https://www.moomoo.com/my/support/topic9_136", page)
+        self.assertIn("https://www.moomoo.com/my/support/topic9_193", page)
+
+
+class StockCurrencyTests(unittest.TestCase):
+    def test_fresh_ecb_reference_adds_only_an_indicative_myr_value(self):
+        now = datetime(2026, 10, 13, 12, 0, tzinfo=timezone.utc)
+        screen = {"candidates": [{"symbol": "TEST", "close": 20.0}]}
+        fx_entry = {
+            "data": [{"name": "Malaysian Ringgit (MYR)", "close": 4.5,
+                      "date": "2026-10-12", "source": "ECB"}],
+            "at": now.timestamp() - 60,
+            "ttl": app.config.TTL["fx"],
+            "err": None,
+        }
+        result = app._with_indicative_myr(screen, fx_entry, now=now)
+        self.assertTrue(result["currency_reference"]["available"])
+        self.assertEqual(result["currency_reference"]["pair"], "USD/MYR")
+        self.assertEqual(result["currency_reference"]["source"],
+                         "ECB reference rate via Frankfurter")
+        self.assertEqual(result["candidates"][0]["close_myr_indicative"], 90.0)
+        self.assertNotIn("close_myr_indicative", screen["candidates"][0])
+
+    def test_stale_or_demo_fx_is_omitted(self):
+        now = datetime(2026, 10, 13, 12, 0, tzinfo=timezone.utc)
+        fx_entry = {
+            "data": [{"name": "Malaysian Ringgit (MYR)", "close": 4.5,
+                      "date": "2026-10-07", "source": "ECB"}],
+            "at": now.timestamp() - 60,
+            "err": None,
+        }
+        stale = app._with_indicative_myr(
+            {"candidates": [{"close": 20.0}]}, fx_entry, now=now)
+        self.assertFalse(stale["currency_reference"]["available"])
+        self.assertIsNone(stale["candidates"][0]["close_myr_indicative"])
+        self.assertIn("6 days old", stale["currency_reference"]["reason"])
+
+        demo = app._with_indicative_myr(
+            {"candidates": [{"close": 20.0}]}, fx_entry, demo=True, now=now)
+        self.assertFalse(demo["currency_reference"]["available"])
+        self.assertIn("synthetic demo data", demo["currency_reference"]["reason"])
+        self.assertIsNone(demo["candidates"][0]["close_myr_indicative"])
 
 
 class StockDataAdapterTests(unittest.TestCase):
@@ -162,6 +282,32 @@ class StockDataAdapterTests(unittest.TestCase):
         self.assertEqual(out["BBB"]["source"], "Yahoo Finance")
         yahoo.assert_called_once_with(["BBB"], days=70, include_volume=True)
         stooq.assert_not_called()
+
+    def test_partial_provider_failures_are_reported_for_unresolved_tickers(self):
+        rows = _history(days=70)
+
+        def fake_tencent(code, days=130):
+            if code == "usGOOD.OQ":
+                return rows
+            raise RuntimeError("Tencent symbol unavailable")
+
+        with mock.patch.object(sources, "_tencent_us_stock_history", side_effect=fake_tencent), \
+                mock.patch.object(sources, "provider_available", return_value=True), \
+                mock.patch.object(sources, "_yahoo_spark_batch", return_value={}), \
+                mock.patch.object(sources, "_stooq_us_stock_history",
+                                  side_effect=RuntimeError("Stooq offline")):
+            out = sources.stock_history_batch(
+                ["GOOD", "MISS"],
+                {"GOOD": "usGOOD.OQ", "MISS": "usMISS.OQ"}, days=70)
+
+        diagnostics = out["_meta"]["history_errors"]
+        self.assertEqual(diagnostics["count"], 1)
+        self.assertIn("MISS", diagnostics["samples"])
+        self.assertIn("Tencent K-line", diagnostics["samples"]["MISS"])
+        self.assertIn("Yahoo Finance", diagnostics["samples"]["MISS"])
+        self.assertIn("Stooq", diagnostics["samples"]["MISS"])
+        screen = stocks.build_screen([_spec("GOOD"), _spec("MISS")], out)
+        self.assertEqual(screen["history_errors"]["count"], 1)
 
 
 if __name__ == "__main__":
