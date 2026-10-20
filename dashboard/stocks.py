@@ -12,7 +12,8 @@ import math
 import statistics
 
 
-MAX_RESULTS = 3
+MAX_RESULTS = 7                  # default: show every passer, up to seven
+MAX_RESULTS_CEILING = 32         # hard safety cap (the configured universe size)
 MIN_HISTORY = 61                 # enough for 60-session momentum/drawdown
 MAX_QUOTE_AGE_DAYS = 5           # weekends/holidays included
 
@@ -124,7 +125,7 @@ def build_screen(
     generated_at=None,
     fetch_error=None,
 ):
-    """Build up to three ranked candidates from daily histories.
+    """Build every ranked candidate that passes the screen, up to `limit`.
 
     Eligibility requires: a fresh quote, $5 <= price < $50, at least $5m average
     daily dollar volume, positive 20-session momentum, and price above its
@@ -132,9 +133,18 @@ def build_screen(
     realized-volatility/drawdown penalties. All thresholds are intentionally
     visible on the page; this is a technical screen, not a value/fundamental
     screen or a prediction.
+
+    `limit` defaults to MAX_RESULTS (7) and is clamped to MAX_RESULTS_CEILING so
+    a misconfigured override cannot dump the whole universe onto the tab. The
+    full eligible count is always reported even when the display is capped.
     """
     universe = list(universe or [])
     market_data = market_data or {}
+    try:
+        requested_limit = int(limit)
+    except (TypeError, ValueError):
+        requested_limit = MAX_RESULTS
+    limit = max(0, min(requested_limit, MAX_RESULTS_CEILING))
     as_of = as_of or date.today()
     if isinstance(as_of, str):
         as_of = date.fromisoformat(as_of[:10])
@@ -238,14 +248,20 @@ def build_screen(
         reverse=True,
     )
     eligible_count = len(candidates)
-    candidates = candidates[:max(0, min(MAX_RESULTS, int(limit)))]
+    candidates = candidates[:limit]
     data_date = max(data_dates) if data_dates else None
     if candidates:
         status = "ok"
-        message = (
-            f"{eligible_count} stock(s) passed the screen; showing up to "
-            f"{len(candidates)} ranked candidates."
-        )
+        if eligible_count > len(candidates):
+            message = (
+                f"{eligible_count} stock(s) passed the screen; showing the top "
+                f"{len(candidates)} by rank score (display cap {limit})."
+            )
+        else:
+            message = (
+                f"Showing all {eligible_count} stock(s) that passed the screen "
+                f"(display cap {limit})."
+            )
     elif history_count:
         status = "no_candidates"
         message = "No stocks passed all of today’s history, price, liquidity, freshness, and trend filters."
@@ -270,7 +286,7 @@ def build_screen(
         "data_date_timezone": "America/New_York",
         "data_date_kind": "daily U.S. market session date; no intraday timestamp",
         "eligible_count": eligible_count,
-        "max_candidates": MAX_RESULTS,
+        "max_candidates": limit,
         "candidates": candidates,
         "exclusions": exclusions,
         "filters": {

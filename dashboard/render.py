@@ -559,13 +559,39 @@ def build_stocks_page(screen, *, demo=False, generated_at=None, refresh=300):
     data_date = esc(screen.get("data_date") or "—")
     data_source = esc(screen.get("source") or "not yet available")
     generated_screen = _dual_market_time(screen.get("generated_at"))
-    candidates = list(screen.get("candidates") or [])[:3]
+    display_cap = screen.get("max_candidates")
+    try:
+        display_cap = max(0, int(display_cap))
+    except (TypeError, ValueError):
+        display_cap = 7
+    candidates = list(screen.get("candidates") or [])[:display_cap]
     currency_reference = screen.get("currency_reference") or {}
     if demo:
         currency_reference = {
             "available": False,
             "reason": "MYR conversion is disabled for synthetic demo data.",
         }
+
+    # How often this screen actually re-checks its providers, so an unchanged
+    # board is explainable: the feed is daily, not intraday.
+    cadence_bits = []
+    try:
+        interval_min = round(int(screen.get("refresh_interval_seconds")) / 60)
+    except (TypeError, ValueError):
+        interval_min = 0
+    if interval_min > 0:
+        cadence_bits.append(f"providers re-checked at most every {interval_min} min")
+    next_check = screen.get("next_check_in_seconds")
+    if isinstance(next_check, (int, float)) and next_check >= 0:
+        cadence_bits.append(
+            "next re-check due now" if next_check < 60
+            else f"next re-check in about {round(next_check / 60)} min")
+    if cadence_bits:
+        cadence_bits.append(
+            "the underlying daily bars only change after the U.S. close, so this "
+            "list is not intraday")
+    cadence_html = (f'<div class="stock-currency-note">Refresh cadence: '
+                    f'{esc(" · ".join(cadence_bits))}.</div>') if cadence_bits else ""
 
     def pct(value):
         try:
@@ -710,8 +736,8 @@ def build_stocks_page(screen, *, demo=False, generated_at=None, refresh=300):
 </header>
 {tabs("stocks")}
 <section class="stock-intro">
-  <h2>Short-term stock watchlist <span class="src">· U.S.-listed · maximum 3 names</span></h2>
-  <p>Daily closing-price screen of a configured ticker universe. It looks for recent positive momentum and liquidity, then labels recent realized volatility/drawdown risk. This is not a forecast, trade signal, or order recommendation.</p>
+  <h2>Short-term stock watchlist <span class="src">· U.S.-listed · every passer, up to {display_cap} names</span></h2>
+  <p>Daily closing-price screen of a configured ticker universe. It looks for recent positive momentum and liquidity, then labels recent realized volatility/drawdown risk. Every ticker that clears all filters is listed, ranked by relative score. This is not a forecast, trade signal, or order recommendation.</p>
   <p class="stock-verification">This editable universe is not checked against Moomoo Malaysia’s live symbol availability or order eligibility. Verify each ticker in the app before relying on it; fractional-share eligibility is limited to selected U.S. securities and the list can change. See <a href="https://www.moomoo.com/my/support/topic9_193" target="_blank" rel="noopener noreferrer">Moomoo Malaysia’s fractional-share guide</a>.</p>
 </section>
 <div class="stock-status {state_class}"><b>{message}</b><br>
@@ -719,6 +745,7 @@ def build_stocks_page(screen, *, demo=False, generated_at=None, refresh=300):
   screen generated {generated_screen}
   {diagnostics_html}
 </div>
+{cadence_html}
 {currency_note}
 {cards_html}
 <details class="stock-method">
@@ -730,7 +757,8 @@ def build_stocks_page(screen, *, demo=False, generated_at=None, refresh=300):
     <li>Liquidity: at least ${fmt_num((screen.get("filters") or {}).get("min_avg_dollar_volume", 5_000_000) / 1_000_000, 1)}M average daily dollar volume over the last 20 sessions.</li>
     <li>Trend screen: positive 20-session return and latest close above its 20-day average. {esc(screen.get("method") or "The relative score is not a probability or expected return.")}</li>
     <li>Risk buckets: {esc(screen.get("risk_method") or "Not available.")}</li>
-    <li>Excluded counts: {excluded_html}. Universe size: {universe_size} tickers. The displayed list is always capped at three.</li>
+    <li>Display: every passing ticker is shown, ranked highest score first, up to {display_cap} names. Ranking is relative within this universe, so a longer list is a wider watchlist, not a stronger signal.</li>
+    <li>Excluded counts: {excluded_html}. Universe size: {universe_size} tickers.</li>
   </ul>
   <p>{esc(screen.get("limitations") or "Technical data only; verify the quote and research the company before investing.")}</p>
   {error_html}

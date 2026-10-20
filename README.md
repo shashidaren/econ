@@ -5,8 +5,9 @@ Self-hosted, glanceable **global macro dashboard** for a Debian LXC container
 
 A dark-mode wall-board for world indices, commodities, currencies, inflation,
 central-bank rates, and the US yield curve — plus a separate **Stocks** tab that
-screens a fixed US watchlist and shows at most three short-term technical
-candidates under $50 with backward-looking low/medium/high risk labels. Served
+screens a fixed US watchlist and lists every short-term technical candidate
+under $50 that passes (up to seven, ranked) with backward-looking
+low/medium/high risk labels. Served
 by a **Python-stdlib-only app** (no pip, no venv, no Docker, no CDN, no API keys).
 
 **Start here → [`handoff.md`](handoff.md)** — project state, decisions, ops runbook,
@@ -27,18 +28,59 @@ Deploy updates any time (resets any local ad-hoc edits on the server):
 cd /opt/econ && git fetch --all && git reset --hard origin/main && ./install.sh
 ```
 
+## Automatic updates (cron)
+
+`install.sh` also drops a cron entry, so merged work reaches the LXC hands-free:
+
+| Item | Default |
+|---|---|
+| Cron file | `/etc/cron.d/econ-update` (written by `install.sh`, safe to edit) |
+| Schedule | every 30 min — override with `ECON_UPDATE_SCHEDULE='0 * * * *' ./install.sh` |
+| Script | `/opt/econ/tools/auto_update.sh` (tracks `origin/main`) |
+| Log | `/var/log/econ-update.log` — `tail -f /var/log/econ-update.log` |
+
+```bash
+sudo /opt/econ/tools/auto_update.sh                    # run it now
+ECON_UPDATE_DRY_RUN=1 sudo /opt/econ/tools/auto_update.sh   # report only, change nothing
+sudo rm -f /etc/cron.d/econ-update                     # stop unattended updates
+```
+
+How it behaves:
+
+- **Only `main` is tracked.** Anything merged to `main` goes live on the next run
+  (up to 30 min later); feature branches and open PRs are ignored until merged.
+- **It restarts the service only when the commit actually changed**, so an idle
+  run never disturbs the dashboard.
+- **It runs `git reset --hard origin/main`, exactly like the manual deploy above,
+  so every hand edit inside `/opt/econ` is discarded.** Edit in git, never on
+  the server — the next run will overwrite it.
+- Runs are serialised with `flock`; an overlapping run skips instead of queueing.
+- If the checkout is on some other branch, the job refuses rather than merging
+  `main` into it.
+- The only gate before restart is `install.sh`'s import smoke test. A commit that
+  breaks the Python imports therefore leaves the **running** service on the old
+  code and logs an error. There is no test-suite gate and no automatic rollback —
+  if you want one, add it in `tools/auto_update.sh`.
+
 Preview without a server (sample data): `ECON_DEMO=1 python3 dashboard/app.py`
 
 ## Stocks watchlist
 
-- `/stocks` — top three technical candidates from the editable universe in
-  `dashboard/config.py`; `/api/stocks` returns the same screen as JSON and
-  `/api/summary` includes it as `stock_screen`.
+- `/stocks` — every passing name from the editable universe in
+  `dashboard/config.py`, ranked, up to **seven** (override with
+  `ECON_STOCK_MAX_RESULTS=10`, hard-capped at 32); `/api/stocks` returns the
+  same screen as JSON and `/api/summary` includes it as `stock_screen`.
 - US-listed names only; last daily close must be **$5 to under $50**, average
   20-session dollar volume at least **$5 million**, quote no more than five
   calendar days old, positive 20-session return, and price above its 20-day
   average. The screen ranks 5/20/60-session momentum after small volatility and
-  drawdown penalties. Results refresh hourly.
+  drawdown penalties. Every passer is listed; the page shows the eligible count
+  even when the display is capped.
+- **Update cadence:** the screen re-checks its providers at most once an hour
+  (`TTL["stocks"]`) on the dashboard's 5-minute cycle, and the page shows when
+  the next check is due. The underlying data is **daily closes**, so the list
+  itself only changes after the U.S. close (~04:00–05:00 Malaysia time) — it is
+  not intraday, and an unchanged list between closes is expected.
 - Risk labels use 20-session annualized realized volatility and 60-session
   drawdown only. They are backward-looking, not a measure of total or future
   risk. The screen has no fundamentals, news, earnings calendar, analyst

@@ -148,7 +148,9 @@ STOCK_MIN_PRICE = float(os.environ.get("ECON_STOCK_MIN_PRICE", "5"))
 STOCK_MAX_PRICE = float(os.environ.get("ECON_STOCK_MAX_PRICE", "50"))
 STOCK_MIN_AVG_DOLLAR_VOLUME = float(
     os.environ.get("ECON_STOCK_MIN_DOLLAR_VOLUME", "5000000"))
-STOCK_MAX_RESULTS = 3
+# Show every ticker that passes the screen, up to this many (7 by default).
+# Override with ECON_STOCK_MAX_RESULTS=10; the screener clamps it at 32.
+STOCK_MAX_RESULTS = int(os.environ.get("ECON_STOCK_MAX_RESULTS", "7"))
 
 # Cache daily-history screens for an hour; historical closes do not justify
 # hammering keyless providers every five-minute dashboard refresh.
