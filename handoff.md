@@ -119,11 +119,11 @@ uninstall.sh
 
 ## 5. Ops runbook (on the server)
 
-**Deployment is now automatic (D21).** Once `install.sh` has been re-run on the LXC,
-`/etc/cron.d/econ-update` runs `tools/auto_update.sh` every 30 min and deploys whatever is on
-`origin/main` — no approval step per change. The second caveat still stands: the current Arena
-follow-up branch is **not** on `main`, so nothing from it reaches the box until the PR is merged;
-do not point the cron branch at a session branch during development.
+**Deployment is automatic (D21).** The LXC's `/etc/cron.d/econ-update` runs
+`tools/auto_update.sh` every 30 min and deploys `origin/main`. Merging PR #12 is the production
+deployment for these changes; this feature branch is not deployed until that merge. Do not merge
+until the owner approves after the pre-merge host probes (§8), and never point cron at a session
+branch during development.
 
 ```bash
 # Automatic path (what cron does): fetch -> compare -> reset --hard -> install.sh, on change only
@@ -189,7 +189,7 @@ Preview (no network needed): `ECON_DEMO=1 python3 dashboard/app.py` → sample d
 
 - [x] **Session 15 / D22 implemented in this branch, not deployed.** Runtime tries `ifzq.gtimg.cn` then `web.ifzq.gtimg.cn`; the proxy.finance route is probed by `--doctor` but stays disabled until the owner confirms it on the LXC. HTTP 5xx now has an explicit blocked reason and 60 min cooldown; the 32-name Tencent fan-out uses 2 workers plus `ECON_STOCK_PACE` (default 0.25 s). No stock filters, ranking, risk buckets, parser, timeout, or watchlist changed.
 - [ ] **LXC validation still required:** before merge, run the three direct `usPFE.N` curl probes in §5 (they do not require this branch). After owner-approved deployment, run the new `--doctor` probes and restart/API check for usable history 32/32. The sandbox cannot reach market hosts; no live result is claimed here. Do not enable the proxy fallback unless its direct probe returns valid K-lines.
-- [x] **Unattended auto-update added (D21), activation on the LXC remains owner-dependent:** `tools/auto_update.sh` + `install.sh` write `/etc/cron.d/econ-update` (default `*/30 * * * *`, log `/var/log/econ-update.log`) and track **`origin/main` only**. If not already done, the owner must run `./install.sh` once on `192.168.0.149` to create the cron entry. Merging PR #12 will then deploy it automatically.
+- [x] **Unattended auto-update (D21) is active per the owner's deployment note:** `/etc/cron.d/econ-update` tracks **`origin/main` only** every 30 min (log `/var/log/econ-update.log`). PR #12 is not deployed yet; merging it is what pushes D22 to the LXC.
 - [x] **Stocks display cap raised 3 → 7 (PR #11 merged into `main`).** `/stocks`, `/api/stocks`, and `/api/summary.stock_screen` list every ticker that passes, ranked, up to `ECON_STOCK_MAX_RESULTS` (default 7, hard-clamped to 32). Filters, ranking, risk buckets, and the universe are unchanged; `eligible_count` remains the full count. LXC deployment of this change depends on the auto-updater being installed.
 - [x] **Update-frequency question answered (D20).** The screen re-checks providers at most every 60 min (`TTL["stocks"]`) on the 5-min board cycle; a failed refresh is skipped until it is 1 h old. Daily bars change after the U.S. close (~04:00–05:00 MYT), so the 1 h TTL and visible cadence metadata (`refresh_interval_seconds`, `checked_at_utc`, `next_check_in_seconds`) remain appropriate.
 - [x] **Stocks baseline is merged in `cddd673`; owner-reported LXC coverage was 32/32 on 2026-10-13.** That historical report predates the current Tencent WAF incident; current live coverage has not been independently measured in this sandbox.
@@ -277,7 +277,7 @@ Preview (no network needed): `ECON_DEMO=1 python3 dashboard/app.py` → sample d
 1. **Pre-merge owner check:** from `192.168.0.149`, run the three direct `usPFE.N` curl probes in §5. These verify host/path behavior without deploying this branch. Bare `ifzq` and `web.ifzq` must return HTTP 200 with non-empty bars. The proxy result is informational and stays disabled in runtime unless its probe succeeds.
 2. **After explicit owner approval and deployment:** run `python3 /opt/econ/dashboard/sources.py --doctor` (the updated version independently reports all three hosts), restart the service, then run the §5 `/api/stocks` poll until it reports **32/32 usable histories**. Inspect `journalctl -u econ-dashboard -n 30 --no-pager` and `/api/summary.providers` for `tencent_kline` status. PR #12 is not cleared for production merge until the pre-merge curl results and explicit owner approval; merging auto-deploys via D21.
 3. The PR has been checked offline with `python3 -m py_compile dashboard/*.py tests/*.py`, the Python unittest suite, and `bash tests/test_auto_update.sh`. Demo stock/FX data remains synthetic and is not evidence of live prices or coverage.
-4. If the D21 cron entry is active, merging deploys the approved `main` update within ~30 min; otherwise the owner needs to run `cd /opt/econ && ./install.sh` once to install/refresh that cron entry. Confirm `tail -20 /var/log/econ-update.log` and `/stocks` after deployment. Recovery for a bad update remains `rm -f /etc/cron.d/econ-update && cd /opt/econ && git reset --hard <last-good-sha> && ./install.sh`.
+4. Merging PR #12 deploys the approved `main` update to the LXC through the active D21 cron within ~30 min. Confirm `tail -20 /var/log/econ-update.log` and `/stocks` after deployment. Recovery for a bad update remains `rm -f /etc/cron.d/econ-update && cd /opt/econ && git reset --hard <last-good-sha> && ./install.sh`.
 5. Keep the existing screen TTL (1 h), price/liquidity/history/freshness/trend gates, rank/risk method, 32-name universe, Moomoo caveats, MYR reference and stale-pick suppression unchanged. Any future work on genuine intraday tracking would need a separate keyless source and would multiply provider load.
 6. The earlier CNBC/Yahoo/Stooq index investigations are historical. Tencent/Sina restored 9/9 index coverage in the 2026-10-08 LXC doctor run; revisit only if current index cards regress.
 
