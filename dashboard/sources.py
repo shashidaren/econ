@@ -15,7 +15,8 @@ Why multi-source + curl -4 transport?
 Sources & Fallbacks:
   * Market quotes   Yahoo Finance (v7 spark batch / v8 chart) -> FRED CSV ->
                     CNBC / Tencent-Sina indices -> Stooq -> CoinGecko metals
-  * US stocks       Tencent adjusted daily K-lines -> Yahoo spark batch -> Stooq .us
+  * US stocks       Tencent adjusted daily K-lines (ifzq -> web host fallback)
+                    -> Yahoo spark batch -> Stooq .us
   * FX rates        Frankfurter ECB (api.frankfurter.app / api.frankfurter.dev)
   * Macro annual    World Bank (api.worldbank.org)
   * Policy & curve  FRED fredgraph.csv (with &cosd= date window) ->
@@ -25,10 +26,10 @@ Sources & Fallbacks:
 Provider circuit breakers
 -------------------------
 Every upstream is wrapped in a breaker (`provider_available` / `note_provider_*`).
-A host that 429s or times out is skipped for a cooldown window instead of being
-retried by all 15 quote fetchers, which turns a 45 s dead provider into ~0 ms
-and stops us hammering Yahoo into a deeper rate-limit. `provider_status()`
-reports the current state so the board footer can explain empty panels.
+A host that 429s, returns HTTP 5xx or times out is skipped for a cooldown window
+instead of being retried by every caller. HTTP 5xx gets the explicit `blocked`
+reason/category and a longer cooldown. `provider_status()` reports the current
+state so the board footer can explain empty panels.
 
 Diagnostics:
   python3 dashboard/sources.py            short self-test (one check per panel)
@@ -41,6 +42,7 @@ import io
 import json
 import math
 import os
+import re
 import shutil
 import socket
 import subprocess
@@ -75,6 +77,20 @@ FRED_DEAD_TTL = 24 * 60 * 60
 YAHOO_MIN_INTERVAL = float(os.environ.get("ECON_YAHOO_PACE", "1.5"))
 # Grab a session cookie from fc.yahoo.com before quoting (reduces 429s).
 YAHOO_USE_COOKIE = os.environ.get("ECON_YAHOO_COOKIE", "1") not in ("0", "false", "no")
+
+# Tencent US daily-bar pacing. The global lock makes this a minimum interval
+# between *all* K-line requests, even when the watchlist fetch runs in parallel.
+# A 0.25 s default keeps a 32-name refresh under ~8 s of pacing overhead.
+try:
+    TENCENT_STOCK_PACE = max(0.0, float(os.environ.get("ECON_STOCK_PACE", "0.25")))
+except (TypeError, ValueError):
+    TENCENT_STOCK_PACE = 0.25
+try:
+    TENCENT_STOCK_WORKERS = max(1, int(os.environ.get("ECON_STOCK_WORKERS", "2")))
+except (TypeError, ValueError):
+    TENCENT_STOCK_WORKERS = 2
+_TENCENT_STOCK_PACE_LOCK = threading.Lock()
+_TENCENT_STOCK_LAST_AT = 0.0
 
 # Symbol mappings for market quote fallbacks
 YAHOO_MAP = {
@@ -132,6 +148,15 @@ STOOQ_ENDPOINTS = (
     ("http", "stooq.com", ":80"),
 )
 
+# (label, K-line endpoint base URL, enabled in the live fallback chain).
+# Owner-confirmed order: bare ifzq first, then web.ifzq, then the proxy route.
+TENCENT_US_KLINE_HOSTS = (
+    ("ifzq.gtimg.cn", "https://ifzq.gtimg.cn/appstock/app/fqkline/get", True),
+    ("web.ifzq.gtimg.cn", "https://web.ifzq.gtimg.cn/appstock/app/fqkline/get", True),
+    ("proxy.finance.qq.com/ifzqgtimg",
+     "https://proxy.finance.qq.com/ifzqgtimg/appstock/app/fqkline/get", True),
+)
+
 # CoinGecko tokenised-metal fallbacks (1 token ~= 1 troy oz). Both mappings
 # were confirmed by the live LXC doctor run on 2026-10-08.
 COINGECKO_MAP = {
@@ -187,19 +212,38 @@ _FRED_DEAD_LOCK = threading.Lock()
 BREAKER_THRESHOLD = 2            # consecutive failures before a cooldown starts
 BREAKER_COOLDOWN = 30 * 60       # seconds to skip a failing provider
 BREAKER_RATE_COOLDOWN = 15 * 60  # seconds to back off after an HTTP 429
+BREAKER_BLOCKED_COOLDOWN = 60 * 60  # longer backoff after an upstream HTTP 5xx
 
 _BREAKERS: dict[str, dict] = {}
 _BREAKER_LOCK = threading.Lock()
 
+_HTTP_STATUS_RE = re.compile(
+    r"\bHTTP(?:/\d+(?:\.\d+)?)?(?:\s+Error)?\s+(\d{3})\b", re.IGNORECASE)
+_CURL_STATUS_RE = re.compile(r"\breturned error:\s*(\d{3})\b", re.IGNORECASE)
 
-def _classify(err) -> tuple[bool, bool]:
-    """Return (unreachable, rate_limited) from a transport error message."""
+
+def _http_status_code(err) -> int | None:
+    """Extract an HTTP status from curl and urllib exception strings."""
+    message = str(err)
+    match = _HTTP_STATUS_RE.search(message) or _CURL_STATUS_RE.search(message)
+    return int(match.group(1)) if match else None
+
+
+def _classify(err) -> tuple[bool, bool, int | None]:
+    """Return (unreachable, rate_limited, blocked_status) for an upstream error.
+
+    HTTP 5xx is an explicit upstream-block/failure category rather than a
+    generic soft failure. Its status is returned so the breaker can expose a
+    precise reason and use a longer cooldown.
+    """
     s = str(err)
-    unreachable = any(t in s for t in (
+    status = _http_status_code(err)
+    blocked_status = status if status is not None and 500 <= status <= 599 else None
+    unreachable = not blocked_status and any(t in s for t in (
         "Timeout was reached", "Failed to connect", "Connection timeout",
         "timed out", "SSL_ERROR_SYSCALL", "(28)", "(7)", "(35)", "(6)",
     ))
-    return unreachable, "429" in s
+    return unreachable, status == 429 or "429" in s, blocked_status
 
 
 def provider_available(name: str) -> bool:
@@ -216,22 +260,35 @@ def note_provider_ok(name: str) -> None:
 
 
 def note_provider_failure(name: str, err, *, unreachable=False,
-                          rate_limited=False, cooldown=None) -> None:
-    """Record a failure; start a cooldown for hard failures / rate limits."""
+                          rate_limited=False, blocked_status=None, cooldown=None) -> None:
+    """Record a failure; 5xx responses get a distinct, longer cooldown."""
+    if blocked_status is None:
+        status = _http_status_code(err)
+        if status is not None and 500 <= status <= 599:
+            blocked_status = status
     if cooldown is None:
-        if rate_limited:
+        if blocked_status is not None:
+            cooldown = BREAKER_BLOCKED_COOLDOWN
+        elif rate_limited:
             cooldown = BREAKER_RATE_COOLDOWN
         elif unreachable:
             cooldown = BREAKER_COOLDOWN
+    now = time.time()
     with _BREAKER_LOCK:
         b = _BREAKERS.setdefault(name, {"fails": 0, "until": 0.0, "reason": "", "last": 0.0})
         b["fails"] += 1
-        b["reason"] = str(err)[:200]
-        b["last"] = time.time()
+        b["last"] = now
+        active_block = b.get("blocked_status") and b.get("until", 0.0) > now
+        if blocked_status is not None:
+            b["blocked_status"] = int(blocked_status)
+            b["reason"] = f"blocked by upstream (HTTP {int(blocked_status)})"
+        elif not active_block:
+            b.pop("blocked_status", None)
+            b["reason"] = str(err)[:200]
         if cooldown is not None:
-            b["until"] = time.time() + cooldown
+            b["until"] = max(b.get("until", 0.0), now + cooldown)
         elif b["fails"] >= BREAKER_THRESHOLD:
-            b["until"] = time.time() + BREAKER_COOLDOWN
+            b["until"] = max(b.get("until", 0.0), now + BREAKER_COOLDOWN)
 
 
 def provider_status() -> list[dict]:
@@ -244,10 +301,13 @@ def provider_status() -> list[dict]:
         left = b.get("until", 0.0) - now
         out.append({
             "provider": name,
-            "state": "cooling" if left > 0 else "degraded",
+            "state": ("blocked" if left > 0 and b.get("blocked_status") else
+                      "cooling" if left > 0 else "degraded"),
             "fails": b.get("fails", 0),
             "reason": b.get("reason", ""),
             "retry_in": int(max(0, left)),
+            **({"blocked_status": b["blocked_status"]}
+               if b.get("blocked_status") is not None else {}),
         })
     out.sort(key=lambda x: (-x["retry_in"], x["provider"]))
     return out
@@ -608,12 +668,14 @@ def _yahoo_history(symbol: str, days: int = 150):
             last_err = last_err or RuntimeError("empty response")
         except Exception as exc:
             last_err = exc
-            unreachable, limited = _classify(exc)
+            unreachable, limited, blocked_status = _classify(exc)
             if limited:
                 # 429 is per-IP: back off on the whole provider, skip host 2.
-                note_provider_failure("yahoo", exc, rate_limited=True)
+                note_provider_failure("yahoo", exc, rate_limited=True,
+                                      blocked_status=blocked_status)
                 break
-            note_provider_failure(hkey, exc, unreachable=unreachable)
+            note_provider_failure(hkey, exc, unreachable=unreachable,
+                                  blocked_status=blocked_status)
     if last_err is None:
         last_err = RuntimeError(f"all yahoo hosts cooling down ({tried} tried)")
     raise RuntimeError(f"yahoo({ysym}): {last_err}")
@@ -645,8 +707,9 @@ def _yahoo_spark_batch(symbols, days: int = 150, *, include_volume: bool = False
     try:
         j = _get_json(url, timeout=15, headers=_yahoo_headers())
     except Exception as exc:
-        unreachable, limited = _classify(exc)
-        note_provider_failure("yahoo", exc, rate_limited=limited, unreachable=unreachable)
+        unreachable, limited, blocked_status = _classify(exc)
+        note_provider_failure("yahoo", exc, rate_limited=limited, unreachable=unreachable,
+                              blocked_status=blocked_status)
         raise RuntimeError(f"yahoo-spark: {exc}")
 
     by_yahoo: dict[str, list] = {}
@@ -721,10 +784,15 @@ def _probe_stooq_endpoint(scheme, domain, port_tag, probe_timeout):
         _get(url, timeout=probe_timeout, connect_timeout=probe_timeout)
         note_provider_ok(key)
     except Exception as exc:  # noqa: BLE001 — a probe must never break warming
-        unreachable, limited = _classify(exc)
-        note_provider_failure(key, exc, unreachable=unreachable, rate_limited=limited)
-        print(f"[sources] {key} unreachable — skipping it for "
-              f"{BREAKER_COOLDOWN // 60} min", flush=True)
+        unreachable, limited, blocked_status = _classify(exc)
+        note_provider_failure(key, exc, unreachable=unreachable, rate_limited=limited,
+                              blocked_status=blocked_status)
+        cooldown = (BREAKER_BLOCKED_COOLDOWN if blocked_status is not None else
+                    BREAKER_RATE_COOLDOWN if limited else
+                    BREAKER_COOLDOWN if unreachable else 0)
+        if cooldown:
+            print(f"[sources] {key} probe failed — skipping it for "
+                  f"{cooldown // 60} min", flush=True)
 
 
 def warm_providers(probe_timeout: int = 3) -> None:
@@ -812,8 +880,9 @@ def _stooq_raw_history(symbol: str, days: int = 150):
                 last_err = last_err or RuntimeError("empty CSV")
             except Exception as exc:
                 last_err = exc
-                unreachable, limited = _classify(exc)
-                note_provider_failure(key, exc, unreachable=unreachable, rate_limited=limited)
+                unreachable, limited, blocked_status = _classify(exc)
+                note_provider_failure(key, exc, unreachable=unreachable, rate_limited=limited,
+                                      blocked_status=blocked_status)
     if last_err is None:
         last_err = RuntimeError(f"all stooq hosts cooling down ({tried} tried)")
     raise RuntimeError(f"stooq({symbol}): {last_err}")
@@ -866,8 +935,9 @@ def _coingecko_history(symbol: str, days: int = 90):
     try:
         j = _get_json(url, timeout=10)
     except Exception as exc:
-        unreachable, limited = _classify(exc)
-        note_provider_failure("coingecko", exc, unreachable=unreachable, rate_limited=limited)
+        unreachable, limited, blocked_status = _classify(exc)
+        note_provider_failure("coingecko", exc, unreachable=unreachable, rate_limited=limited,
+                              blocked_status=blocked_status)
         raise RuntimeError(f"coingecko({coin}): {exc}")
     dedup = {}
     for item in (j.get("prices") or []):
@@ -994,8 +1064,9 @@ def _cnbc_batch(symbols: list[str]) -> dict[str, list[tuple[str, float]]]:
             return out
         raise RuntimeError(f"cnbc: no quote returned for {csyms}")
     except Exception as exc:
-        unreachable, limited = _classify(exc)
-        note_provider_failure("cnbc", exc, unreachable=unreachable, rate_limited=limited)
+        unreachable, limited, blocked_status = _classify(exc)
+        note_provider_failure("cnbc", exc, unreachable=unreachable, rate_limited=limited,
+                              blocked_status=blocked_status)
         raise RuntimeError(f"cnbc-batch: {exc}")
 
 
@@ -1275,30 +1346,81 @@ def _parse_tencent_kline_payload(payload, code: str):
     return [out[d] for d in sorted(out)]
 
 
+def _tencent_us_kline_url(base_url: str, code: str, days: int) -> str:
+    """Build the same daily adjusted-K-line request for runtime and doctor probes."""
+    params = urllib.parse.urlencode({"param": f"{code},day,,,{int(days)},qfq"})
+    return f"{base_url}?{params}"
+
+
+def _tencent_stock_pace() -> None:
+    """Keep all Tencent stock-history HTTP requests at least N seconds apart."""
+    global _TENCENT_STOCK_LAST_AT
+    if TENCENT_STOCK_PACE <= 0:
+        return
+    with _TENCENT_STOCK_PACE_LOCK:
+        now = time.monotonic()
+        wait = TENCENT_STOCK_PACE - (now - _TENCENT_STOCK_LAST_AT)
+        if wait > 0:
+            time.sleep(wait)
+        _TENCENT_STOCK_LAST_AT = time.monotonic()
+
+
 def _tencent_us_stock_history(code: str, days: int = 130):
-    """Fetch Tencent's adjusted daily K-lines for one US ticker."""
+    """Fetch Tencent's adjusted daily K-lines, falling back across known hosts.
+
+    Transport/HTTP failures (except a symbol-level 404) advance to the next
+    endpoint. An HTTP 200 with an empty/malformed symbol result is a per-symbol
+    miss and stops the host chain; Yahoo/Stooq remain the data-provider fallbacks.
+    """
     if not provider_available("tencent_kline"):
         raise RuntimeError("tencent K-line provider cooling down")
-    params = urllib.parse.urlencode({"param": f"{code},day,,,{int(days)},qfq"})
-    url = f"https://web.ifzq.gtimg.cn/appstock/app/fqkline/get?{params}"
-    try:
-        text = _get(url, timeout=10, headers={"Referer": "https://gu.qq.com/"})
+
+    errors = []
+    enabled_hosts = [entry for entry in TENCENT_US_KLINE_HOSTS if entry[2]]
+    for label, base_url, _enabled in enabled_hosts:
+        _tencent_stock_pace()
+        url = _tencent_us_kline_url(base_url, code, days)
+        try:
+            text = _get(url, timeout=10, headers={"Referer": "https://gu.qq.com/"})
+        except Exception as exc:
+            status = _http_status_code(exc)
+            if status == 404:
+                # A per-symbol 404 is a mapping miss, not evidence that the
+                # current host is unavailable. Do not try another host.
+                note_provider_ok("tencent_kline")
+                raise RuntimeError(
+                    f"tencent-kline({code}): no daily K-lines for {code} "
+                    f"(HTTP 404 from {label})") from exc
+            # Defer the shared breaker update until every enabled host fails.
+            # Otherwise the short pause before the next host could make another
+            # worker incorrectly skip a healthy fallback endpoint.
+            errors.append((label, exc))
+            continue
+
+        # A successful HTTP exchange proves that this endpoint is reachable,
+        # even when Tencent has no rows for this particular symbol.
+        note_provider_ok("tencent_kline")
         rows = _parse_tencent_kline_payload(text, code)
         if not rows:
-            # Some Tencent responses include a callback wrapper; the parser also
-            # accepts that form, so an empty result is treated as a symbol miss.
-            raise RuntimeError(f"no daily K-lines for {code}")
-        note_provider_ok("tencent_kline")
+            raise RuntimeError(
+                f"tencent-kline({code}): no daily K-lines for {code} "
+                f"({label} returned an empty result)")
         return rows[-days:]
-    except Exception as exc:
-        message = str(exc)
-        # A per-symbol 404 is a mapping miss, not evidence that the shared host
-        # is unavailable; keep trying the next configured US ticker/fallback.
-        if "no daily K-lines" not in message and "HTTP 404" not in message:
-            unreachable, limited = _classify(exc)
-            note_provider_failure(
-                "tencent_kline", exc, unreachable=unreachable, rate_limited=limited)
-        raise RuntimeError(f"tencent-kline({code}): {exc}")
+
+    if errors:
+        detail = " | ".join(f"{label}: {exc}" for label, exc in errors)
+        failure = RuntimeError(
+            f"tencent-kline({code}): all enabled Tencent endpoints failed ({detail})")
+        classifications = [_classify(exc) for _label, exc in errors]
+        unreachable = any(item[0] for item in classifications)
+        limited = any(item[1] for item in classifications)
+        blocked_status = next(
+            (item[2] for item in classifications if item[2] is not None), None)
+        note_provider_failure(
+            "tencent_kline", failure, unreachable=unreachable,
+            rate_limited=limited, blocked_status=blocked_status)
+        raise failure
+    raise RuntimeError(f"tencent-kline({code}): no Tencent K-line hosts are enabled")
 
 
 def _stooq_us_stock_history(symbol: str, days: int = 130):
@@ -1321,8 +1443,9 @@ def _stooq_us_stock_history(symbol: str, days: int = 130):
             last_err = RuntimeError("empty stock CSV")
         except Exception as exc:
             last_err = exc
-            unreachable, limited = _classify(exc)
-            note_provider_failure(key, exc, unreachable=unreachable, rate_limited=limited)
+            unreachable, limited, blocked_status = _classify(exc)
+            note_provider_failure(key, exc, unreachable=unreachable, rate_limited=limited,
+                                  blocked_status=blocked_status)
     if last_err is None:
         last_err = RuntimeError("all Stooq hosts are cooling down")
     raise RuntimeError(f"stooq({symbol}.us): {last_err}")
@@ -1365,7 +1488,8 @@ def stock_history_batch(symbols, vendor_symbols=None, days: int = 130):
             raise RuntimeError(f"Tencent history/volume too short for {symbol}")
         return symbol, rows
 
-    with ThreadPoolExecutor(max_workers=4, thread_name_prefix="stocks-tencent") as pool:
+    with ThreadPoolExecutor(max_workers=TENCENT_STOCK_WORKERS,
+                            thread_name_prefix="stocks-tencent") as pool:
         futures = {pool.submit(fetch_tencent, symbol): symbol for symbol in symbols}
         for future, symbol in ((f, s) for f, s in futures.items()):
             try:
@@ -1620,9 +1744,10 @@ def _fred_csv_series(series_id: str, years: int | None = None,
     try:
         text = _get(url_for(eff_window), timeout=FRED_TIMEOUT)
     except Exception as exc:
-        unreachable, limited = _classify(exc)
-        if unreachable or limited:
-            note_provider_failure("fred", exc, unreachable=unreachable, rate_limited=limited)
+        unreachable, limited, blocked_status = _classify(exc)
+        if unreachable or limited or blocked_status is not None:
+            note_provider_failure("fred", exc, unreachable=unreachable, rate_limited=limited,
+                                  blocked_status=blocked_status)
         if not _is_http_404(exc):
             raise
 
@@ -1895,8 +2020,28 @@ def _doctor_cnbc(run_checks):
     ], width=28)
 
 
+def _doctor_tencent_us_kline(run_checks):
+    """Probe every declared Tencent US K-line host independently for usPFE.N."""
+    checks = []
+    for label, base_url, enabled in TENCENT_US_KLINE_HOSTS:
+        def _probe(host_label=label, endpoint=base_url, runtime_enabled=enabled):
+            _tencent_stock_pace()
+            text = _get(
+                _tencent_us_kline_url(endpoint, "usPFE.N", 130),
+                timeout=10,
+                headers={"Referer": "https://gu.qq.com/"},
+            )
+            rows = _parse_tencent_kline_payload(text, "usPFE.N")
+            if not rows:
+                raise RuntimeError(f"no daily K-lines for usPFE.N from {host_label}")
+            mode = "enabled in runtime chain" if runtime_enabled else "probe only; not enabled at runtime"
+            return f"{len(rows)} rows, last {rows[-1][0]} = {rows[-1][1]} ({mode})"
+        checks.append((f"Tencent US {label}", _probe))
+    run_checks(checks, width=40)
+
 
 if __name__ == "__main__":
+
     # CLI diagnostics for the server:
     #   python3 /opt/econ/dashboard/sources.py            one check per panel
     #   python3 /opt/econ/dashboard/sources.py --doctor   exhaustive provider probe
@@ -1965,9 +2110,11 @@ if __name__ == "__main__":
         now = datetime.now(timezone.utc).astimezone()
         print(f"econ source doctor — {now.isoformat(timespec='seconds')}")
         print(f"curl: {CURL_BIN or 'NOT FOUND (urllib only)'} | yahoo pace "
-              f"{YAHOO_MIN_INTERVAL}s | yahoo cookie {'on' if YAHOO_USE_COOKIE else 'off'}")
+              f"{YAHOO_MIN_INTERVAL}s | stock pace {TENCENT_STOCK_PACE}s / "
+              f"{TENCENT_STOCK_WORKERS} workers | yahoo cookie "
+              f"{'on' if YAHOO_USE_COOKIE else 'off'}")
 
-        print("\n[1/7] FX & macro")
+        print("\n[1/9] FX & macro")
         _run_checks([
             ("frankfurter.app", lambda: _get_json(
                 "https://api.frankfurter.app/latest?from=USD&to=EUR,JPY")["date"]),
@@ -1977,7 +2124,7 @@ if __name__ == "__main__":
             ("worldbank GDP", lambda: worldbank_indicator(["US"], "NY.GDP.MKTP.KD.ZG")[0]["value"]),
         ], width=24)
 
-        print("\n[2/7] Rates, curve & their official fallbacks")
+        print("\n[2/9] Rates, curve & their official fallbacks")
         _run_checks([
             ("fred DFF", lambda: fred_series("DFF", years=1)[-1]),
             ("fred ECBDFR", lambda: fred_series("ECBDFR", years=1)[-1]),
@@ -1989,7 +2136,7 @@ if __name__ == "__main__":
             ("ustreasury breakeven", lambda: _ustreasury_breakeven_series(years=1)[-1]),
         ], width=24)
 
-        print("\n[3/7] FRED quote series (mapped to board cards, including fallbacks)")
+        print("\n[3/9] FRED quote series (mapped to board cards, including fallbacks)")
         mapped_fred = {sid for sid, _age in FRED_QUOTE_MAP.values()}
         mapped_fred.update(
             sid for fallbacks in FRED_QUOTE_FALLBACKS.values()
@@ -2000,7 +2147,7 @@ if __name__ == "__main__":
             for sid in sorted(mapped_fred)
         ], width=24)
 
-        print("\n[4/7] FRED candidate series (not wired in yet)")
+        print("\n[4/9] FRED candidate series (not wired in yet)")
         if FRED_PROBE_CANDIDATES:
             _run_checks([
                 (f"fred {sid}", lambda s=sid: _fred_probe(s, monthly=s.endswith("USDM")))
@@ -2009,13 +2156,13 @@ if __name__ == "__main__":
         else:
             print("  (no unverified candidates)")
 
-        print("\n[5/7] Yahoo Finance (cookie + crumb handshake, charts, spark batch)")
+        print("\n[5/9] Yahoo Finance (cookie + crumb handshake, charts, spark batch)")
         _doctor_yahoo(_run_checks)
 
-        print("\n[6/7] CNBC quote candidates (international indices)")
+        print("\n[6/9] CNBC quote candidates (international indices)")
         _doctor_cnbc(_run_checks)
 
-        print("\n[7/8] Stooq & CoinGecko")
+        print("\n[7/9] Stooq & CoinGecko")
         checks = []
         for scheme, domain, tag in (("https", "stooq.com", ""),
                                     ("https", "stooq.pl", ""),
@@ -2027,7 +2174,7 @@ if __name__ == "__main__":
                            lambda c=coin, s=sym: _coingecko_history(s, days=30)[-1]))
         _run_checks(checks, width=24)
 
-        print("\n[8/8] Tencent / Sina (indices FRED does not publish)")
+        print("\n[8/9] Tencent / Sina (indices FRED does not publish)")
         reset_breakers("tencent")
         reset_breakers("sina")
         clear_asia_cache()
@@ -2042,6 +2189,10 @@ if __name__ == "__main__":
             ("dax ^dax", lambda: _asia_probe("^dax")),
             ("euro stoxx ^stx", lambda: _asia_probe("^stx")),
         ], width=24)
+
+        print("\n[9/9] Tencent US stock K-line hosts")
+        reset_breakers("tencent_kline")
+        _doctor_tencent_us_kline(_run_checks)
 
         print("\nProvider breakers after the probe:")
         _print_breakers()

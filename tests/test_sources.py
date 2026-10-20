@@ -133,13 +133,19 @@ class TestCurlStatusMarker(TransportCase):
         self.assertAlmostEqual(urllib_get.call_args.kwargs["timeout"], 3.5)
 
     def test_classify(self):
-        unreachable, limited = sources._classify(
+        unreachable, limited, blocked_status = sources._classify(
             "curl: (22) The requested URL returned error: 429 HTTP 429")
         self.assertTrue(limited)
-        unreachable, limited = sources._classify(
+        self.assertIsNone(blocked_status)
+        unreachable, limited, blocked_status = sources._classify(
             "curl: (28) Failed to connect to stooq.pl port 443 after 5000 ms")
         self.assertTrue(unreachable)
         self.assertFalse(limited)
+        self.assertIsNone(blocked_status)
+        self.assertEqual(sources._classify("curl: (22) error: 501 HTTP 501"),
+                         (False, False, 501))
+        self.assertEqual(sources._classify("HTTP Error 503: Service Unavailable"),
+                         (False, False, 503))
 
 
 class TestBreakers(TransportCase):
@@ -162,6 +168,17 @@ class TestBreakers(TransportCase):
         self.assertTrue(sources.provider_available("fred"))
         sources.note_provider_failure("fred", "no data")
         self.assertFalse(sources.provider_available("fred"))
+
+    def test_http_5xx_uses_blocked_reason_and_longer_cooldown(self):
+        sources.note_provider_failure(
+            "tencent_kline", "curl: (22) error: 501 HTTP 501",
+            blocked_status=501)
+        status = sources.provider_status()[0]
+        self.assertEqual(status["state"], "blocked")
+        self.assertEqual(status["reason"], "blocked by upstream (HTTP 501)")
+        self.assertEqual(status["blocked_status"], 501)
+        self.assertGreater(status["retry_in"], sources.BREAKER_COOLDOWN)
+        self.assertFalse(sources.provider_available("tencent_kline"))
 
     def test_reset_one_provider_keeps_other_breakers(self):
         sources.note_provider_failure("fred", "HTTP 429", rate_limited=True)

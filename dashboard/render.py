@@ -261,9 +261,15 @@ def provider_html(providers, limit=5):
         mins = int(round((p.get("retry_in") or 0) / 60.0))
         reason = (p.get("reason") or "").strip()
         reason = reason.split(" | ")[0][:70]
-        state = "retry in %dm" % mins if p.get("state") == "cooling" and mins else "degraded"
-        bits.append(f"{esc(p.get('provider'))}: {state}"
-                    + (f" — {esc(reason)}" if reason else "")
+        blocked = reason.startswith("blocked by upstream") or p.get("state") == "blocked"
+        if blocked:
+            state = reason or "blocked by upstream"
+            if mins:
+                state += f", retry in {mins}m"
+        else:
+            state = "retry in %dm" % mins if p.get("state") == "cooling" and mins else "degraded"
+        bits.append(f"{esc(p.get('provider'))}: {esc(state)}"
+                    + (f" — {esc(reason)}" if reason and not blocked else "")
                     + (f" ({p.get('fails')} fails)" if p.get("fails") else ""))
     more = f" · +{len(providers) - limit} more" if len(providers) > limit else ""
     return ("<br><span class='warn-inline'>⧗ upstream health: "
@@ -712,11 +718,16 @@ def build_stocks_page(screen, *, demo=False, generated_at=None, refresh=300):
     provider_issues = list(screen.get("provider_issues") or [])
     for issue in provider_issues[:4]:
         name = str(issue.get("provider") or "stock data provider")
-        state = "cooling down" if issue.get("state") == "cooling" else "degraded"
         retry = int(issue.get("retry_in") or 0)
         detail = (str(issue.get("reason") or "").split(" | ")[0])[:120]
+        blocked = detail.startswith("blocked by upstream") or issue.get("state") == "blocked"
+        if blocked:
+            state = detail or "blocked by upstream"
+            reason_text = ""
+        else:
+            state = "cooling down" if issue.get("state") == "cooling" else "degraded"
+            reason_text = f" — {detail}" if detail else ""
         retry_text = f"; retry in about {max(1, round(retry / 60))} min" if retry > 0 else ""
-        reason_text = f" — {detail}" if detail else ""
         diagnostics.append(f"{name}: {state}{retry_text}{reason_text}")
     diagnostics_html = (
         '<div class="stock-diagnostics"><b>Data notes:</b> '

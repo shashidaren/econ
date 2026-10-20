@@ -5,6 +5,7 @@ import os
 import sys
 import time
 import unittest
+import urllib.parse
 from datetime import date, datetime, timedelta, timezone
 from unittest import mock
 
@@ -326,6 +327,26 @@ class StockCurrencyTests(unittest.TestCase):
 
 
 class StockDataAdapterTests(unittest.TestCase):
+    def setUp(self):
+        sources.reset_breakers()
+        self._stock_pace = sources.TENCENT_STOCK_PACE
+        self._last_paced_at = sources._TENCENT_STOCK_LAST_AT
+        sources.TENCENT_STOCK_PACE = 0.0
+        sources._TENCENT_STOCK_LAST_AT = 0.0
+
+    def tearDown(self):
+        sources.TENCENT_STOCK_PACE = self._stock_pace
+        sources._TENCENT_STOCK_LAST_AT = self._last_paced_at
+        sources.reset_breakers()
+
+    @staticmethod
+    def _tencent_payload(code, days=70):
+        rows = _history(days=days)
+        return json.dumps({"data": {code: {"qfqday": [
+            [day, str(close), str(close), str(close), str(close), str(volume)]
+            for day, close, volume in rows
+        ]}}})
+
     def test_tencent_kline_parser_reads_daily_close_and_volume(self):
         payload = {
             "code": 0,
@@ -344,6 +365,145 @@ class StockDataAdapterTests(unittest.TestCase):
         body = 'kline_dayqfq({"data":{"usTEST.N":{"day":[["2026-10-09","1","2","2","1",""]]}}});'
         rows = sources._parse_tencent_kline_payload(body, "usTEST.N")
         self.assertEqual(rows, [("2026-10-09", 2.0, None)])
+
+    def test_tencent_us_history_falls_back_from_bare_host_to_web_host(self):
+        calls = []
+        payload = self._tencent_payload("usPFE.N")
+
+        def fake_get(url, timeout=None, headers=None, **kwargs):
+            calls.append((url, timeout, headers))
+            if url.startswith("https://ifzq.gtimg.cn/"):
+                raise RuntimeError("curl: (22) returned error: 501 HTTP 501")
+            return payload
+
+        with mock.patch.object(sources, "_get", side_effect=fake_get):
+            rows = sources._tencent_us_stock_history("usPFE.N", days=70)
+
+        self.assertEqual(len(rows), 70)
+        self.assertEqual(len(calls), 2)
+        self.assertTrue(calls[0][0].startswith(
+            "https://ifzq.gtimg.cn/appstock/app/fqkline/get?"))
+        self.assertTrue(calls[1][0].startswith(
+            "https://web.ifzq.gtimg.cn/appstock/app/fqkline/get?"))
+        self.assertEqual([call[1] for call in calls], [10, 10])
+        self.assertTrue(all(call[2] == {"Referer": "https://gu.qq.com/"}
+                            for call in calls))
+        self.assertEqual(sources.provider_status(), [],
+                         "web-host success clears the primary-host 501 breaker")
+
+    def test_tencent_proxy_fallback_is_used_after_both_ifzq_hosts_fail(self):
+        calls = []
+        payload = self._tencent_payload("usPFE.N")
+
+        def fake_get(url, **kwargs):
+            calls.append(url)
+            if url.startswith(("https://ifzq.gtimg.cn/", "https://web.ifzq.gtimg.cn/")):
+                raise RuntimeError("curl: (22) returned error: 501 HTTP 501")
+            self.assertTrue(sources.provider_available("tencent_kline"),
+                            "do not trip the shared breaker before proxy fallback")
+            return payload
+
+        with mock.patch.object(sources, "_get", side_effect=fake_get):
+            rows = sources._tencent_us_stock_history("usPFE.N", days=70)
+
+        self.assertEqual(len(rows), 70)
+        self.assertEqual(len(calls), 3)
+        self.assertTrue(calls[0].startswith("https://ifzq.gtimg.cn/"))
+        self.assertTrue(calls[1].startswith("https://web.ifzq.gtimg.cn/"))
+        self.assertTrue(calls[2].startswith("https://proxy.finance.qq.com/ifzqgtimg/"))
+        self.assertEqual(sources.provider_status(), [])
+
+    def test_tencent_data_misses_do_not_advance_to_another_host(self):
+        for response in (
+            RuntimeError("curl: (22) returned error: 404 HTTP 404"),
+            json.dumps({"data": {}}),
+        ):
+            with self.subTest(response=str(response)[:25]):
+                sources.reset_breakers()
+                calls = []
+
+                def fake_get(url, **kwargs):
+                    calls.append(url)
+                    if isinstance(response, Exception):
+                        raise response
+                    return response
+
+                with mock.patch.object(sources, "_get", side_effect=fake_get):
+                    with self.assertRaisesRegex(RuntimeError, "no daily K-lines"):
+                        sources._tencent_us_stock_history("usPFE.N", days=70)
+                self.assertEqual(len(calls), 1)
+                self.assertTrue(sources.provider_available("tencent_kline"))
+
+    def test_tencent_501_is_reported_as_blocked_with_a_longer_cooldown(self):
+        calls = []
+
+        def blocked(url, **kwargs):
+            calls.append(url)
+            raise RuntimeError("curl: (22) returned error: 501 HTTP 501")
+
+        with mock.patch.object(sources, "_get", side_effect=blocked):
+            with self.assertRaises(RuntimeError):
+                sources._tencent_us_stock_history("usPFE.N", days=70)
+
+        self.assertEqual(len(calls), sum(1 for _label, _url, enabled
+                                         in sources.TENCENT_US_KLINE_HOSTS if enabled))
+        issue = next(p for p in sources.provider_status()
+                     if p["provider"] == "tencent_kline")
+        self.assertEqual(issue["state"], "blocked")
+        self.assertEqual(issue["reason"], "blocked by upstream (HTTP 501)")
+        self.assertGreater(issue["retry_in"], sources.BREAKER_COOLDOWN)
+        with mock.patch.object(app, "backend", sources):
+            summary = app.summary()
+        api_issue = next(p for p in summary["providers"]
+                         if p["provider"] == "tencent_kline")
+        self.assertEqual(api_issue["reason"], "blocked by upstream (HTTP 501)")
+        screen = stocks.build_screen([_spec("PFE")], {}, fetch_error="Tencent HTTP 501")
+        screen["provider_issues"] = app._stock_provider_issues(
+            sources.provider_status(), screen)
+        page = render.build_stocks_page(screen, demo=False)
+        self.assertIn("tencent_kline: blocked by upstream (HTTP 501)", page)
+
+    def test_tencent_doctor_probes_all_runtime_hosts(self):
+        calls = []
+        results = {}
+
+        def fake_get(url, **kwargs):
+            calls.append(url)
+            return self._tencent_payload("usPFE.N")
+
+        def runner(checks, width=18):
+            for label, fn in checks:
+                results[label] = fn()
+
+        with mock.patch.object(sources, "_get", side_effect=fake_get):
+            sources._doctor_tencent_us_kline(runner)
+
+        self.assertEqual(len(calls), len(sources.TENCENT_US_KLINE_HOSTS))
+        for _label, base_url, _enabled in sources.TENCENT_US_KLINE_HOSTS:
+            self.assertTrue(any(url.startswith(base_url + "?") for url in calls))
+        self.assertTrue(all("enabled in runtime chain" in value
+                            for value in results.values()))
+
+    def test_tencent_stock_fanout_respects_inter_request_pacing(self):
+        sources.TENCENT_STOCK_PACE = 0.05
+        sources._TENCENT_STOCK_LAST_AT = 0.0
+        calls = []
+
+        def fake_get(url, **kwargs):
+            calls.append(time.monotonic())
+            code = urllib.parse.parse_qs(urllib.parse.urlsplit(url).query)["param"][0].split(",")[0]
+            return self._tencent_payload(code)
+
+        symbols = ["AAA", "BBB", "CCC"]
+        vendor_symbols = {symbol: f"us{symbol}.OQ" for symbol in symbols}
+        with mock.patch.object(sources, "_get", side_effect=fake_get):
+            out = sources.stock_history_batch(symbols, vendor_symbols, days=70)
+
+        self.assertEqual(set(out) - {"_meta"}, set(symbols))
+        ordered_calls = sorted(calls)
+        self.assertEqual(len(ordered_calls), 3)
+        self.assertTrue(all(later - earlier >= 0.04
+                            for earlier, later in zip(ordered_calls, ordered_calls[1:])))
 
     def test_yahoo_chart_parser_keeps_volume_for_screener(self):
         result = {
@@ -464,7 +624,7 @@ class StockProviderScopeTests(unittest.TestCase):
         rows = _history(days=70)
 
         def fake_get(url, timeout=None, **kwargs):
-            if "web.ifzq.gtimg.cn" in url:
+            if "ifzq.gtimg.cn" in url:
                 if "usGOOD.OQ" in url:
                     payload = {"data": {"usGOOD.OQ": {"qfqday": [
                         [d, str(c), str(c), str(c), str(c), str(v)]
