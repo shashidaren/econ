@@ -28,6 +28,40 @@ Deploy updates any time (resets any local ad-hoc edits on the server):
 cd /opt/econ && git fetch --all && git reset --hard origin/main && ./install.sh
 ```
 
+## Automatic updates (cron)
+
+`install.sh` also drops a cron entry, so merged work reaches the LXC hands-free:
+
+| Item | Default |
+|---|---|
+| Cron file | `/etc/cron.d/econ-update` (written by `install.sh`, safe to edit) |
+| Schedule | every 30 min — override with `ECON_UPDATE_SCHEDULE='0 * * * *' ./install.sh` |
+| Script | `/opt/econ/tools/auto_update.sh` (tracks `origin/main`) |
+| Log | `/var/log/econ-update.log` — `tail -f /var/log/econ-update.log` |
+
+```bash
+sudo /opt/econ/tools/auto_update.sh                    # run it now
+ECON_UPDATE_DRY_RUN=1 sudo /opt/econ/tools/auto_update.sh   # report only, change nothing
+sudo rm -f /etc/cron.d/econ-update                     # stop unattended updates
+```
+
+How it behaves:
+
+- **Only `main` is tracked.** Anything merged to `main` goes live on the next run
+  (up to 30 min later); feature branches and open PRs are ignored until merged.
+- **It restarts the service only when the commit actually changed**, so an idle
+  run never disturbs the dashboard.
+- **It runs `git reset --hard origin/main`, exactly like the manual deploy above,
+  so every hand edit inside `/opt/econ` is discarded.** Edit in git, never on
+  the server — the next run will overwrite it.
+- Runs are serialised with `flock`; an overlapping run skips instead of queueing.
+- If the checkout is on some other branch, the job refuses rather than merging
+  `main` into it.
+- The only gate before restart is `install.sh`'s import smoke test. A commit that
+  breaks the Python imports therefore leaves the **running** service on the old
+  code and logs an error. There is no test-suite gate and no automatic rollback —
+  if you want one, add it in `tools/auto_update.sh`.
+
 Preview without a server (sample data): `ECON_DEMO=1 python3 dashboard/app.py`
 
 ## Stocks watchlist
