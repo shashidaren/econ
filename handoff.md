@@ -55,7 +55,7 @@ central-bank policy rates, and the US yield curve (recession indicator).
 | D19 | Moomoo Malaysia use | **Read-only, no broker integration; preserve the editable U.S. universe and existing limits** | Moomoo MY's official help center says fractional availability is limited to selected U.S. securities and its in-app eligibility list may change. This app cannot validate live per-symbol tradability. Show an optional fresh ECB/Frankfurter USD/MYR reference with source/date/fetch time and prominent non-executable/no-fees caveats; link the official fee schedule rather than calculating charges |
 | D20 | Stocks-tab update cadence (verified 2026-10-20) | **Keep the 1 h screen TTL (daily-close data does not justify more); make the cadence visible on the page and in the API** | Owner asked whether the screen updates often enough. Measured in code: board cycle 300 s, `TTL["stocks"]` 3600 s, and a failed refresh is skipped until it is 1 h old; the inputs are *daily* bars that only change after the U.S. close (~04:00–05:00 MYT). So the list legitimately sits still between closes. Instead of hammering keyless providers 12× more often for no new information, `/stocks` now prints "Refresh cadence: providers re-checked at most every 60 min · next re-check in about N min · the underlying daily bars only change after the U.S. close, so this list is not intraday". `/api/stocks` and `/api/summary.stock_screen` expose `refresh_interval_seconds`, `checked_at_utc`, and `next_check_in_seconds`. Intraday movement would need a new keyless intraday source, which does not exist in this pipeline (owner call) |
 | D21 | Unattended updates (2026-10-21) | **cron → `tools/auto_update.sh`, tracking `origin/main` only; pull + restart, no test gate; `install.sh` always installs `/etc/cron.d/econ-update`** | Owner wants zero manual deploy management. Behaviour chosen explicitly: main only (merged/reviewed work only), `git reset --hard origin/main` (same convergence rule as the manual deploy, so hand edits in `/opt/econ` are discarded), restart **only** when the commit actually changed, `flock` serialisation, dry-run mode. The owner declined the verify-then-rollback option, so the only gate before restart is `install.sh`'s import smoke test: a commit that breaks Python imports leaves the running service on the old code and logs an error. Trade-off accepted: whatever lands on GitHub `main` deploys itself to the box as root within ~30 min (§7) |
-| D22 | Tencent US K-line WAF resilience (2026-10-20) | **Try `ifzq.gtimg.cn` → `web.ifzq.gtimg.cn`; keep `proxy.finance.qq.com/ifzqgtimg` doctor-only until the owner confirms it** | Owner-supplied evidence says the 501 is transient/host-path-specific and the bare host serves the same adjusted daily bars. Per-symbol HTTP 404 and empty data remain misses (no host retry); other transport/HTTP failures advance. HTTP 5xx gets the explicit reason `blocked by upstream (HTTP N)` and a 60 min breaker cooldown. Stock fan-out is reduced to 2 workers and paced by `ECON_STOCK_PACE` (default 0.25 s); `--doctor` probes all three candidate URLs for `usPFE.N`. Filters, ranking, risk buckets, ticker universe, parser, and 10 s timeout are unchanged. Live behavior still requires owner-side LXC verification. |
+| D22 | Tencent US K-line WAF resilience (2026-10-20) | **Runtime chain: `ifzq.gtimg.cn` → `web.ifzq.gtimg.cn` → owner-confirmed `proxy.finance.qq.com/ifzqgtimg`** | Owner's LXC probes: bare ifzq HTTP 200 and proxy HTTP 200 (131 bars each for `usPFE.N`, latest 2026-10-20); web.ifzq HTTP 501. The proxy is now enabled as the third fallback; its success is independent evidence that the Tencent path, not the whole provider/IP, is blocked at web.ifzq. Per-symbol HTTP 404 and HTTP-200 empty data remain misses (no host retry); other transport/HTTP failures advance. HTTP 5xx gets `blocked by upstream (HTTP N)` and a 60 min breaker cooldown only if every runtime host fails. Stock fan-out is 2 workers paced by `ECON_STOCK_PACE` (default 0.25 s); `--doctor` probes all three URLs for `usPFE.N`. Filters, ranking, risk buckets, ticker universe, parser and 10 s timeout are unchanged. Full `/api/stocks` coverage after deploying this chain is still unverified. |
 
 Data-source rules: free, no signups; every source fails independently (panel shows
 "awaiting data"/stale badge, board never breaks); polite fetch cadence via cache TTLs.
@@ -68,9 +68,9 @@ dashboard/
                 + pre-flight step: warm_providers() then prefetch_yahoo() before the fan-out
   config.py     panels/symbols/TTLs plus the 32-symbol US stock watchlist and filters
   sources.py    quote/rates cascades + transport/breakers + Tencent US daily K-lines
-                (bare ifzq → web fallback; proxy route doctor-only pending LXC proof),
+                (bare ifzq → web.ifzq → owner-confirmed proxy.finance fallback),
                 volume-aware Yahoo batch and Stooq .us fallback; CLI `--doctor` probes
-                all three candidate Tencent K-line hosts
+                all three Tencent K-line hosts
   demo.py       same backend signatures with synthetic data (ECON_DEMO=1); stock bars
                 are explicitly demo-only and must never be treated as live picks
   charts.py     server-side SVG: sparkline(), line_chart()
@@ -86,8 +86,8 @@ dashboard/
                 (`_with_stock_refresh_meta`: interval, last check, next check)
 tests/test_sources.py    48 stdlib unittests — cascade, breakers (including HTTP 5xx), FRED,
                          transport, Yahoo cookie+crumb, CNBC, Treasury, and rendering
-tests/test_stock_screen.py 31 stdlib unittests — filters, rank cap, freshness, Tencent host chain,
-                           HTTP 501 diagnostics, host doctor probes, and request pacing
+tests/test_stock_screen.py 32 stdlib unittests — filters, rank cap, freshness, Tencent host chain,
+                           HTTP 501 diagnostics, proxy fallback, host doctor probes, and pacing
 tests/test_briefing.py   4 stdlib unittests — defensive/constructive/empty posture + page strip
 tests/test_asia_quotes.py 2 stdlib unittests — Tencent/Sina parsers and cascade preference
 tests/test_auto_update.sh 17 bash assertions — offline, throwaway git repos: up-to-date
@@ -107,10 +107,10 @@ uninstall.sh
 - `/` board · `/summary` macro summary · `/stocks` ranked watchlist (every passer, up to 7) ·
   `/api/summary` JSON (includes `stock_screen`) · `/api/stocks` screen JSON · `/healthz` probe
 - Stock screen cache TTL: 1 h (page shows cadence and next check time); US daily K-lines use
-  a two-worker Tencent fan-out paced at `ECON_STOCK_PACE` (default 0.25 s), with `ifzq` then
-  `web.ifzq` runtime fallback (`proxy.finance.qq.com/ifzqgtimg` remains doctor-only pending
-  owner confirmation). Yahoo is batched and Stooq is per-symbol fallback. Eligibility rules are
-  unchanged; only current, sufficiently liquid names passing configured filters are returned.
+  a two-worker Tencent fan-out paced at `ECON_STOCK_PACE` (default 0.25 s), with runtime order
+  `ifzq` → `web.ifzq` → owner-confirmed `proxy.finance.qq.com/ifzqgtimg`. Yahoo is batched and
+  Stooq is per-symbol fallback. Eligibility rules are unchanged; only current, sufficiently
+  liquid names passing configured filters are returned.
 - Each refresh cycle: **pre-flight** (probe stooq hosts 3 s, one batched Yahoo spark request for
   stale Yahoo-mapped symbols) → 4-worker fan-out over fast macro sources first, then market quotes
 - Disk cache (`/var/tmp/econ-dashboard-cache.json`) keeps last good data across `systemctl restart`
@@ -151,12 +151,12 @@ python3 /opt/econ/dashboard/sources.py --doctor    # exhaustive provider + host 
 # Environment=ECON_STOCK_WORKERS=2, then run:
 sudo systemctl daemon-reload && sudo systemctl restart econ-dashboard
 
-# Pre-merge: these direct probes work with the current LXC install and do not
-# require deploying the candidate branch. curl -f rejects HTTP 4xx/5xx, and the
-# Python check confirms HTTP 200 plus a non-empty daily-bar field for usPFE.N.
+# These direct probes need no candidate-code deployment. The owner observed
+# bare ifzq=200, web.ifzq=501, and proxy=200; web's 501 is an expected fallback case.
+# curl -f rejects HTTP 4xx/5xx; the Python check confirms HTTP 200 and non-empty rows on working hosts.
 curl -4 -fSs -w '\nHTTP %{http_code}\n' -H 'Referer: https://gu.qq.com/' 'https://ifzq.gtimg.cn/appstock/app/fqkline/get?param=usPFE.N%2Cday%2C%2C%2C130%2Cqfq' | python3 -c 'import json,sys; body,status=sys.stdin.read().rsplit("\nHTTP ",1); assert status.strip()=="200",status; x=json.loads(body)["data"]["usPFE.N"]; r=x.get("qfqday") or x.get("day") or x.get("dayqfq") or []; assert r,"empty usPFE.N K-lines"; print("ifzq.gtimg.cn: HTTP 200,",len(r),"bars; latest:",r[-1])'
 curl -4 -fSs -w '\nHTTP %{http_code}\n' -H 'Referer: https://gu.qq.com/' 'https://web.ifzq.gtimg.cn/appstock/app/fqkline/get?param=usPFE.N%2Cday%2C%2C%2C130%2Cqfq' | python3 -c 'import json,sys; body,status=sys.stdin.read().rsplit("\nHTTP ",1); assert status.strip()=="200",status; x=json.loads(body)["data"]["usPFE.N"]; r=x.get("qfqday") or x.get("day") or x.get("dayqfq") or []; assert r,"empty usPFE.N K-lines"; print("web.ifzq.gtimg.cn: HTTP 200,",len(r),"bars; latest:",r[-1])'
-# This third route is currently diagnostic only; do not enable it in production unless it passes here.
+# Owner confirmed this third route returns HTTP 200; it is now enabled after web.ifzq.
 curl -4 -fSs -w '\nHTTP %{http_code}\n' -H 'Referer: https://gu.qq.com/' 'https://proxy.finance.qq.com/ifzqgtimg/appstock/app/fqkline/get?param=usPFE.N%2Cday%2C%2C%2C130%2Cqfq' | python3 -c 'import json,sys; body,status=sys.stdin.read().rsplit("\nHTTP ",1); assert status.strip()=="200",status; x=json.loads(body)["data"]["usPFE.N"]; r=x.get("qfqday") or x.get("day") or x.get("dayqfq") or []; assert r,"empty usPFE.N K-lines"; print("proxy.finance.qq.com: HTTP 200,",len(r),"bars; latest:",r[-1])'
 
 # Offline tests (no network needed; faked transport)
@@ -187,14 +187,14 @@ Preview (no network needed): `ECON_DEMO=1 python3 dashboard/app.py` → sample d
 
 ## 6. Current status
 
-- [x] **Session 15 / D22 implemented in this branch, not deployed.** Runtime tries `ifzq.gtimg.cn` then `web.ifzq.gtimg.cn`; the proxy.finance route is probed by `--doctor` but stays disabled until the owner confirms it on the LXC. HTTP 5xx now has an explicit blocked reason and 60 min cooldown; the 32-name Tencent fan-out uses 2 workers plus `ECON_STOCK_PACE` (default 0.25 s). No stock filters, ranking, risk buckets, parser, timeout, or watchlist changed.
-- [ ] **LXC validation still required:** before merge, run the three direct `usPFE.N` curl probes in §5 (they do not require this branch). After owner-approved deployment, run the new `--doctor` probes and restart/API check for usable history 32/32. The sandbox cannot reach market hosts; no live result is claimed here. Do not enable the proxy fallback unless its direct probe returns valid K-lines.
+- [x] **Session 15 / D22 updated from owner LXC probes, not yet deployed.** Owner reports bare `ifzq` HTTP 200 and proxy HTTP 200 with 131 `usPFE.N` bars (latest 2026-10-20), while `web.ifzq` returns HTTP 501. Runtime order is now `ifzq` → `web.ifzq` → confirmed proxy; a failure on one host no longer trips the shared breaker before the later fallback is attempted. The 60 min blocked cooldown applies only when all configured Tencent hosts fail. Fan-out uses 2 workers plus `ECON_STOCK_PACE` (default 0.25 s). No stock filters, ranking, risk buckets, parser, timeout, or watchlist changed.
+- [ ] **Post-deploy LXC validation still required:** after owner-approved merge, run the updated `--doctor`, restart, and confirm `/api/stocks` reports usable history 32/32. The sandbox cannot reach market hosts and did not measure the live API; the 32/32 result after this code is not yet known.
 - [x] **Unattended auto-update (D21) is active per the owner's deployment note:** `/etc/cron.d/econ-update` tracks **`origin/main` only** every 30 min (log `/var/log/econ-update.log`). PR #12 is not deployed yet; merging it is what pushes D22 to the LXC.
 - [x] **Stocks display cap raised 3 → 7 (PR #11 merged into `main`).** `/stocks`, `/api/stocks`, and `/api/summary.stock_screen` list every ticker that passes, ranked, up to `ECON_STOCK_MAX_RESULTS` (default 7, hard-clamped to 32). Filters, ranking, risk buckets, and the universe are unchanged; `eligible_count` remains the full count. LXC deployment of this change depends on the auto-updater being installed.
 - [x] **Update-frequency question answered (D20).** The screen re-checks providers at most every 60 min (`TTL["stocks"]`) on the 5-min board cycle; a failed refresh is skipped until it is 1 h old. Daily bars change after the U.S. close (~04:00–05:00 MYT), so the 1 h TTL and visible cadence metadata (`refresh_interval_seconds`, `checked_at_utc`, `next_check_in_seconds`) remain appropriate.
 - [x] **Stocks baseline is merged in `cddd673`; owner-reported LXC coverage was 32/32 on 2026-10-13.** That historical report predates the current Tencent WAF incident; current live coverage has not been independently measured in this sandbox.
 - [x] **Summary tab, Gold read, Moomoo caveats, MYR reference, and recession meter are present in this checkout.** No broker integration or order automation was added.
-- [x] **Tests:** `python3 -m py_compile dashboard/*.py tests/*.py` clean; `python3 -m unittest discover -s tests -v` **85/85** standard-library tests pass; `bash tests/test_auto_update.sh` **17/17** assertions pass. Demo quote data is synthetic and is not evidence of live picks.
+- [x] **Tests:** `python3 -m py_compile dashboard/*.py tests/*.py` clean; `python3 -m unittest discover -s tests -v` **86/86** standard-library tests pass; `bash tests/test_auto_update.sh` **17/17** assertions pass. Demo quote data is synthetic and is not evidence of live picks.
 - [x] **Tencent/Sina index fallback (v0.7) deployed on `192.168.0.149` at `5fd45e6`.**
   Doctor `2026-10-08T02:09:21+00:00` §[8/8] **5/5 passed**: Shanghai `tencent:sh000001`
   3852.02 @ 2026-10-08, Hang Seng `tencent:hkHSI` 24069.56 @ 2026-10-08, FTSE
@@ -243,7 +243,7 @@ Preview (no network needed): `ECON_DEMO=1 python3 dashboard/app.py` → sample d
 - **A longer list is a wider watchlist, not a stronger signal (new 2026-10-20):** the display cap moved 3 → 7, so every filter-passer is now visible. Ranking is *relative* to this 32-name universe and the filters were not loosened, so names at the bottom of the list clear the same gates by a smaller margin and need the same research. Rank #7 is not "seventh best in the market".
 - **The stocks list is daily, not intraday (D20):** daily closes only appear after the U.S. close (~04:00–05:00 MYT) and the screen re-checks providers hourly, so an unchanged list during a U.S. session is expected, not a stuck feed. Never read these numbers as live quotes; check price, spread, and news in the broker before acting.
 - **Moomoo per-symbol availability is not programmatically verified:** the official Malaysia guide says fractional trading is limited to selected U.S. securities and the in-app list can change. The static watchlist must remain editable; users need to confirm a ticker and any fractional eligibility in the app. Do not imply broker support or live orderability.
-- **Tencent US K-line availability is not live-verified from this sandbox (D22):** owner-provided evidence reports intermittent HTTP 501/WAF behavior on `web.ifzq.gtimg.cn` while the same path works on `ifzq.gtimg.cn`. The runtime chain now tries bare ifzq then web.ifzq, but a Tencent WAF may block both; HTTP 5xx opens a 60 min breaker, so automatic rechecks can be delayed. `proxy.finance.qq.com/ifzqgtimg` remains doctor-only until a successful owner-side probe. Yahoo/Stooq are known fallbacks but are reported unhealthy from this LXC. Keep partial-coverage diagnostics and stale-pick suppression; never substitute demo data for live history.
+- **Tencent US K-line coverage is only partially live-verified (D22):** owner-provided probes show bare `ifzq.gtimg.cn` HTTP 200, `web.ifzq.gtimg.cn` HTTP 501, and `proxy.finance.qq.com/ifzqgtimg` HTTP 200. Runtime order is now bare ifzq → web.ifzq → confirmed proxy, but `/api/stocks` coverage after deploying this code has not yet been measured. If all three return 5xx/transport failures, the 60 min breaker delays retries. Yahoo/Stooq are reported unhealthy from this LXC. Keep partial-coverage diagnostics and stale-pick suppression; never substitute demo data for live history.
 - **Yahoo = IP-level HTTP 429 (settled 01:13 UTC):** `crumb handshake` itself returns 429 in
   0.23 s, so the LXC's IP is rate-limited at Yahoo's edge — no cookie/crumb/pacing tweak on this
   IP will fix it. Yahoo stays in the cascade (breaker-cooled, ~0 ms cost) in case the limit lifts,
@@ -274,8 +274,8 @@ Preview (no network needed): `ECON_DEMO=1 python3 dashboard/app.py` → sample d
 
 ## 8. Next steps (PR #12 open; merging auto-deploys to the LXC)
 
-1. **Pre-merge owner check:** from `192.168.0.149`, run the three direct `usPFE.N` curl probes in §5. These verify host/path behavior without deploying this branch. Bare `ifzq` and `web.ifzq` must return HTTP 200 with non-empty bars. The proxy result is informational and stays disabled in runtime unless its probe succeeds.
-2. **After explicit owner approval and deployment:** run `python3 /opt/econ/dashboard/sources.py --doctor` (the updated version independently reports all three hosts), restart the service, then run the §5 `/api/stocks` poll until it reports **32/32 usable histories**. Inspect `journalctl -u econ-dashboard -n 30 --no-pager` and `/api/summary.providers` for `tencent_kline` status. PR #12 is not cleared for production merge until the pre-merge curl results and explicit owner approval; merging auto-deploys via D21.
+1. **Owner live probes received:** `ifzq.gtimg.cn` returned HTTP 200 with 131 bars for `usPFE.N`; `web.ifzq.gtimg.cn` returned HTTP 501; the confirmed `proxy.finance.qq.com/ifzqgtimg` route returned HTTP 200 with 131 bars. This is the expected host-specific WAF pattern; the runtime chain now uses proxy after web. The proxy is no longer doctor-only.
+2. **Post-deploy validation still needed:** after explicit owner approval and deployment, run `python3 /opt/econ/dashboard/sources.py --doctor` (the updated version independently reports all three hosts), restart the service, then run the §5 `/api/stocks` poll until it reports **32/32 usable histories**. Inspect `journalctl -u econ-dashboard -n 30 --no-pager` and `/api/summary.providers` for `tencent_kline` status. Do not merge without the owner's explicit approval; the 32/32 API result has not yet been measured with this code.
 3. The PR has been checked offline with `python3 -m py_compile dashboard/*.py tests/*.py`, the Python unittest suite, and `bash tests/test_auto_update.sh`. Demo stock/FX data remains synthetic and is not evidence of live prices or coverage.
 4. Merging PR #12 deploys the approved `main` update to the LXC through the active D21 cron within ~30 min. Confirm `tail -20 /var/log/econ-update.log` and `/stocks` after deployment. Recovery for a bad update remains `rm -f /etc/cron.d/econ-update && cd /opt/econ && git reset --hard <last-good-sha> && ./install.sh`.
 5. Keep the existing screen TTL (1 h), price/liquidity/history/freshness/trend gates, rank/risk method, 32-name universe, Moomoo caveats, MYR reference and stale-pick suppression unchanged. Any future work on genuine intraday tracking would need a separate keyless source and would multiply provider load.
@@ -285,12 +285,12 @@ Preview (no network needed): `ECON_DEMO=1 python3 dashboard/app.py` → sample d
 
 ### 2026-10-20 — Session 15: Tencent US K-line WAF fallback and pacing (D22)
 
-- **Problem:** the owner reported that Yahoo is still IP-level HTTP 429 and Stooq is unavailable from the LXC, while Tencent's `web.ifzq.gtimg.cn` K-line path intermittently returned HTTP 501. The owner later observed the same endpoint on bare `ifzq.gtimg.cn` return HTTP 200 for `usPFE.N`; no live request was made from this sandbox.
-- **Implementation:** US K-lines now try bare `ifzq.gtimg.cn` then `web.ifzq.gtimg.cn`, with the existing parser, Referer and 10 s timeout. An HTTP 404 or HTTP-200 empty result remains a symbol miss and does not advance hosts; other transport/HTTP failures do. `TENCENT_US_KLINE_HOSTS` is shared by runtime, tests and `--doctor`; the third `proxy.finance.qq.com/ifzqgtimg` candidate is included in doctor probes but disabled in runtime until owner confirmation.
-- **Breaker and pacing:** HTTP 5xx statuses (including 501) are classified as blocked, produce `blocked by upstream (HTTP N)`, and cool down for 60 min. Tencent stock fan-out is now 2 workers with a global inter-request pace defaulting to 0.25 s (`ECON_STOCK_PACE`, optional `ECON_STOCK_WORKERS`). Filters, rank/risk logic, watchlist, parser and Moomoo/MYR caveats are untouched.
-- **Doctor/runbook:** the updated `python3 /opt/econ/dashboard/sources.py --doctor` includes independent `usPFE.N` probes for all three host routes once this branch is installed. §5 contains pre-merge direct curl checks and a post-deployment restart/API poll that fails unless usable coverage is 32/32.
-- **Verification (offline only):** `python3 -m py_compile dashboard/*.py tests/*.py` clean; `python3 -m unittest discover -s tests -v` **85/85 passed**; `bash tests/test_auto_update.sh` **17/17 assertions passed**. Host fallback, 404/empty symbol misses, 501 breaker reason/cooldown, doctor host coverage and pacing are tested with faked transports. These results do not establish live LXC behavior.
-- **Not done / merge safety:** no live LXC probe or deployment. PR #12 is **not safe to merge yet**; keep it open until the owner runs §5 commands, confirms K-line host results and 32/32 coverage, and approves. Merging is a production deployment path via D21 cron.
+- **Problem and live owner evidence:** Yahoo remains IP-level HTTP 429 and Stooq is unavailable. The owner reports `ifzq.gtimg.cn` HTTP 200 and `proxy.finance.qq.com/ifzqgtimg` HTTP 200, each with 131 `usPFE.N` bars through 2026-10-20; `web.ifzq.gtimg.cn` returns HTTP 501. These are owner measurements, not sandbox measurements.
+- **Implementation:** US K-lines now try bare `ifzq.gtimg.cn` → `web.ifzq.gtimg.cn` → owner-confirmed proxy, preserving parser, Referer and 10 s timeout. HTTP 404 and HTTP-200 empty results stay symbol misses; other transport/HTTP failures advance. `TENCENT_US_KLINE_HOSTS` is shared by runtime, tests and `--doctor`.
+- **Breaker and pacing:** HTTP 5xx (including 501) produces `blocked by upstream (HTTP N)` and a 60 min cooldown only if all enabled Tencent hosts fail. Breaker updates are deferred until the host chain exhausts, preventing a transient web 501 from making concurrent workers skip the confirmed proxy. Fan-out is 2 workers with a 0.25 s global pace (`ECON_STOCK_PACE`; workers via `ECON_STOCK_WORKERS`). Filters, rank/risk logic, watchlist, parser and Moomoo/MYR caveats are untouched.
+- **Doctor/runbook:** after this branch is installed, `python3 /opt/econ/dashboard/sources.py --doctor` independently probes all three hosts for `usPFE.N`. §5 includes the direct curl probes and a post-deployment restart/API poll for 32/32.
+- **Verification:** `python3 -m py_compile dashboard/*.py tests/*.py` clean; `python3 -m unittest discover -s tests -v` **86/86 passed**; `bash tests/test_auto_update.sh` **17/17 assertions passed**. Host chain, proxy fallback, symbol misses, 501 diagnostics, doctor probes and pacing are tested offline with faked transports. No live API coverage result was measured after this code change.
+- **Not done / merge safety:** code is not deployed. PR #12 stays open pending explicit owner approval; merging is a production deployment via D21 cron. After deployment, confirm `/api/stocks` reports usable history 32/32.
 
 ### 2026-10-21 — Session 14: unattended cron auto-update (D21)
 

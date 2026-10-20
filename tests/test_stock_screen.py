@@ -391,6 +391,28 @@ class StockDataAdapterTests(unittest.TestCase):
         self.assertEqual(sources.provider_status(), [],
                          "web-host success clears the primary-host 501 breaker")
 
+    def test_tencent_proxy_fallback_is_used_after_both_ifzq_hosts_fail(self):
+        calls = []
+        payload = self._tencent_payload("usPFE.N")
+
+        def fake_get(url, **kwargs):
+            calls.append(url)
+            if url.startswith(("https://ifzq.gtimg.cn/", "https://web.ifzq.gtimg.cn/")):
+                raise RuntimeError("curl: (22) returned error: 501 HTTP 501")
+            self.assertTrue(sources.provider_available("tencent_kline"),
+                            "do not trip the shared breaker before proxy fallback")
+            return payload
+
+        with mock.patch.object(sources, "_get", side_effect=fake_get):
+            rows = sources._tencent_us_stock_history("usPFE.N", days=70)
+
+        self.assertEqual(len(rows), 70)
+        self.assertEqual(len(calls), 3)
+        self.assertTrue(calls[0].startswith("https://ifzq.gtimg.cn/"))
+        self.assertTrue(calls[1].startswith("https://web.ifzq.gtimg.cn/"))
+        self.assertTrue(calls[2].startswith("https://proxy.finance.qq.com/ifzqgtimg/"))
+        self.assertEqual(sources.provider_status(), [])
+
     def test_tencent_data_misses_do_not_advance_to_another_host(self):
         for response in (
             RuntimeError("curl: (22) returned error: 404 HTTP 404"),
@@ -423,7 +445,8 @@ class StockDataAdapterTests(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 sources._tencent_us_stock_history("usPFE.N", days=70)
 
-        self.assertEqual(len(calls), 2)
+        self.assertEqual(len(calls), sum(1 for _label, _url, enabled
+                                         in sources.TENCENT_US_KLINE_HOSTS if enabled))
         issue = next(p for p in sources.provider_status()
                      if p["provider"] == "tencent_kline")
         self.assertEqual(issue["state"], "blocked")
@@ -440,7 +463,7 @@ class StockDataAdapterTests(unittest.TestCase):
         page = render.build_stocks_page(screen, demo=False)
         self.assertIn("tencent_kline: blocked by upstream (HTTP 501)", page)
 
-    def test_tencent_doctor_probes_all_hosts_including_unverified_proxy(self):
+    def test_tencent_doctor_probes_all_runtime_hosts(self):
         calls = []
         results = {}
 
@@ -458,7 +481,7 @@ class StockDataAdapterTests(unittest.TestCase):
         self.assertEqual(len(calls), len(sources.TENCENT_US_KLINE_HOSTS))
         for _label, base_url, _enabled in sources.TENCENT_US_KLINE_HOSTS:
             self.assertTrue(any(url.startswith(base_url + "?") for url in calls))
-        self.assertTrue(any("probe only; not enabled at runtime" in value
+        self.assertTrue(all("enabled in runtime chain" in value
                             for value in results.values()))
 
     def test_tencent_stock_fanout_respects_inter_request_pacing(self):

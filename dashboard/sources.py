@@ -149,13 +149,12 @@ STOOQ_ENDPOINTS = (
 )
 
 # (label, K-line endpoint base URL, enabled in the live fallback chain).
-# The bare ifzq host is preferred; web.ifzq is the verified fallback.
-# proxy.finance.qq.com is doctor-only until the owner confirms it from the LXC.
+# Owner-confirmed order: bare ifzq first, then web.ifzq, then the proxy route.
 TENCENT_US_KLINE_HOSTS = (
     ("ifzq.gtimg.cn", "https://ifzq.gtimg.cn/appstock/app/fqkline/get", True),
     ("web.ifzq.gtimg.cn", "https://web.ifzq.gtimg.cn/appstock/app/fqkline/get", True),
     ("proxy.finance.qq.com/ifzqgtimg",
-     "https://proxy.finance.qq.com/ifzqgtimg/appstock/app/fqkline/get", False),
+     "https://proxy.finance.qq.com/ifzqgtimg/appstock/app/fqkline/get", True),
 )
 
 # CoinGecko tokenised-metal fallbacks (1 token ~= 1 troy oz). Both mappings
@@ -1392,11 +1391,10 @@ def _tencent_us_stock_history(code: str, days: int = 130):
                 raise RuntimeError(
                     f"tencent-kline({code}): no daily K-lines for {code} "
                     f"(HTTP 404 from {label})") from exc
-            unreachable, limited, blocked_status = _classify(exc)
-            note_provider_failure(
-                "tencent_kline", exc, unreachable=unreachable,
-                rate_limited=limited, blocked_status=blocked_status)
-            errors.append(f"{label}: {exc}")
+            # Defer the shared breaker update until every enabled host fails.
+            # Otherwise the short pause before the next host could make another
+            # worker incorrectly skip a healthy fallback endpoint.
+            errors.append((label, exc))
             continue
 
         # A successful HTTP exchange proves that this endpoint is reachable,
@@ -1410,9 +1408,18 @@ def _tencent_us_stock_history(code: str, days: int = 130):
         return rows[-days:]
 
     if errors:
-        raise RuntimeError(
-            f"tencent-kline({code}): all enabled Tencent endpoints failed "
-            f"({' | '.join(errors)})")
+        detail = " | ".join(f"{label}: {exc}" for label, exc in errors)
+        failure = RuntimeError(
+            f"tencent-kline({code}): all enabled Tencent endpoints failed ({detail})")
+        classifications = [_classify(exc) for _label, exc in errors]
+        unreachable = any(item[0] for item in classifications)
+        limited = any(item[1] for item in classifications)
+        blocked_status = next(
+            (item[2] for item in classifications if item[2] is not None), None)
+        note_provider_failure(
+            "tencent_kline", failure, unreachable=unreachable,
+            rate_limited=limited, blocked_status=blocked_status)
+        raise failure
     raise RuntimeError(f"tencent-kline({code}): no Tencent K-line hosts are enabled")
 
 
