@@ -3,6 +3,7 @@
 import json
 import os
 import sys
+import time
 import unittest
 from datetime import date, datetime, timedelta, timezone
 from unittest import mock
@@ -32,20 +33,44 @@ def _spec(symbol, sector="Technology"):
 
 
 class StockScreenTests(unittest.TestCase):
-    def test_ranks_at_most_three_and_reports_risk(self):
+    def test_ranks_every_passer_and_reports_risk(self):
         universe = [_spec(f"T{i}", sector=f"Sector {i}") for i in range(5)]
         data = {
             spec[0]: {"rows": _history(start=15 + i, growth=0.003 + i * 0.001),
                       "source": "test"}
             for i, spec in enumerate(universe)
         }
-        result = stocks.build_screen(universe, data, limit=20)
+        result = stocks.build_screen(universe, data)
         self.assertEqual(result["status"], "ok")
         self.assertEqual(result["eligible_count"], 5)
-        self.assertEqual(len(result["candidates"]), 3)
+        self.assertEqual(len(result["candidates"]), 5)
+        self.assertEqual(result["max_candidates"], 7)
+        self.assertIn("Showing all 5 stock(s)", result["message"])
         self.assertTrue(all(c["risk"] in ("Low", "Medium", "High")
                             for c in result["candidates"]))
         self.assertEqual(result["candidates"][0]["symbol"], "T4")
+
+    def test_display_cap_is_seven_and_eligible_count_is_still_reported(self):
+        universe = [_spec(f"T{i}", sector=f"Sector {i}") for i in range(9)]
+        data = {
+            spec[0]: {"rows": _history(start=15 + i, growth=0.004 + i * 0.0005),
+                      "source": "test"}
+            for i, spec in enumerate(universe)
+        }
+        result = stocks.build_screen(universe, data)
+        self.assertEqual(result["eligible_count"], 9)
+        self.assertEqual(len(result["candidates"]), 7)
+        self.assertEqual(result["max_candidates"], 7)
+        self.assertIn("9 stock(s) passed", result["message"])
+        self.assertIn("top 7", result["message"])
+        # Best-ranked name still leads the wider list.
+        self.assertEqual(result["candidates"][0]["symbol"], "T8")
+        # An explicit smaller cap still applies; an absurd one is clamped so a
+        # bad override cannot dump the whole universe onto the tab.
+        self.assertEqual(len(stocks.build_screen(universe, data, limit=3)["candidates"]), 3)
+        self.assertEqual(len(stocks.build_screen(universe, data, limit=99)["candidates"]), 9)
+        self.assertEqual(stocks.build_screen(universe, data, limit=99)["max_candidates"],
+                         stocks.MAX_RESULTS_CEILING)
 
     def test_price_liquidity_freshness_and_trend_filters_are_applied(self):
         universe = [
@@ -111,7 +136,7 @@ class StockScreenTests(unittest.TestCase):
         self.assertEqual(result["usable_history_count"], 1)
         self.assertEqual(result["exclusions"]["insufficient_history"], 1)
 
-    def test_stocks_page_caps_display_at_three_and_escapes_text(self):
+    def test_stocks_page_shows_every_passer_and_escapes_text(self):
         cards = []
         for i in range(5):
             cards.append({
@@ -125,17 +150,48 @@ class StockScreenTests(unittest.TestCase):
         page = render.build_stocks_page({
             "status": "ok", "message": "5 eligible", "universe_size": 5,
             "quote_count": 5, "eligible_count": 5, "candidates": cards,
+            "max_candidates": 7,
             "data_date": date.today().isoformat(), "source": "test",
             "filters": {"price_min": 5, "price_max_exclusive": 50,
                         "min_avg_dollar_volume": 5_000_000},
             "exclusions": {},
         }, demo=True)
-        self.assertEqual(page.count('class="stock-card"'), 3)
+        self.assertEqual(page.count('class="stock-card"'), 5)
+        self.assertIn("up to 7 names", page)
         self.assertIn("Stocks", page)
         self.assertNotIn("<script>", page)
         self.assertIn("DEMO MODE — synthetic stock history", page)
         self.assertNotIn("RM 20.00", page)
         self.assertIn("MYR conversion is disabled for synthetic demo data", page)
+
+    def test_stocks_page_honours_the_display_cap_when_more_pass(self):
+        def card(i):
+            return {
+                "symbol": f"T{i}", "name": f"Company {i}", "sector": "Technology",
+                "close": 20 + i, "risk": "Medium", "ret5_pct": 1.0,
+                "ret20_pct": 2.0, "ret60_pct": 5.0, "vol20_annual_pct": 24.0,
+                "drawdown60_pct": -4.0, "avg_dollar_volume20": 10_000_000,
+                "rank_score": 2.5, "as_of": date.today().isoformat(),
+                "source": "test", "quote_age_days": 0, "reasons": [],
+            }
+        screen = {
+            "status": "ok", "message": "9 eligible", "universe_size": 32,
+            "quote_count": 32, "eligible_count": 9,
+            "candidates": [card(i) for i in range(9)], "max_candidates": 7,
+            "data_date": date.today().isoformat(), "source": "test",
+            "filters": {"price_min": 5, "price_max_exclusive": 50,
+                        "min_avg_dollar_volume": 5_000_000},
+            "exclusions": {},
+        }
+        page = render.build_stocks_page(screen, demo=False)
+        self.assertEqual(page.count('class="stock-card"'), 7)
+        self.assertIn("up to 7 names", page)
+        self.assertIn('class="stock-symbol">T6<', page)
+        self.assertNotIn('class="stock-symbol">T8<', page)
+        # Lowering the configured cap narrows the rendered list too.
+        screen["max_candidates"] = 3
+        self.assertEqual(
+            render.build_stocks_page(screen, demo=False).count('class="stock-card"'), 3)
 
     def test_stocks_page_surfaces_partial_history_and_provider_failures(self):
         page = render.build_stocks_page({
@@ -191,6 +247,42 @@ class StockScreenTests(unittest.TestCase):
         self.assertIn("stamp-duty, spread and FX conversion costs are excluded", page)
         self.assertIn("https://www.moomoo.com/my/support/topic9_136", page)
         self.assertIn("https://www.moomoo.com/my/support/topic9_193", page)
+
+
+class StockRefreshCadenceTests(unittest.TestCase):
+    """The screen is a daily-close list; the page must say how often it re-checks."""
+
+    def _screen(self, age_seconds, **extra):
+        now = time.time()
+        entry = {"data": {"candidates": []}, "at": now - age_seconds,
+                 "ttl": app.config.TTL["stocks"], "err": None}
+        screen = {"status": "ok", "message": "1 eligible", "candidates": [],
+                  "data_date": date.today().isoformat(), "source": "Tencent K-line"}
+        screen.update(extra)
+        return app._with_stock_refresh_meta(screen, entry, now=now)
+
+    def test_screen_reports_interval_and_next_check_time(self):
+        screen = self._screen(900)
+        self.assertEqual(screen["refresh_interval_seconds"], app.config.TTL["stocks"])
+        self.assertEqual(screen["refresh_interval_seconds"], 3600)
+        self.assertEqual(screen["next_check_in_seconds"], 2700)
+        self.assertTrue(screen["checked_at_utc"].endswith("+00:00"))
+        page = render.build_stocks_page(screen, demo=False)
+        self.assertIn("Refresh cadence", page)
+        self.assertIn("at most every 60 min", page)
+        self.assertIn("next re-check in about 45 min", page)
+        self.assertIn("not intraday", page)
+
+    def test_overdue_entry_reports_next_check_due_now(self):
+        screen = self._screen(7200)
+        self.assertEqual(screen["next_check_in_seconds"], 0)
+        self.assertIn("next re-check due now",
+                      render.build_stocks_page(screen, demo=False))
+
+    def test_page_without_cache_metadata_omits_the_cadence_line(self):
+        page = render.build_stocks_page(
+            {"status": "ok", "message": "1 eligible", "candidates": []}, demo=False)
+        self.assertNotIn("Refresh cadence", page)
 
 
 class StockCurrencyTests(unittest.TestCase):

@@ -306,6 +306,30 @@ def _stock_provider_issues(providers, screen=None):
     return stock_names
 
 
+def _with_stock_refresh_meta(screen, entry, *, now=None):
+    """Tell the page how often this screen re-checks providers, and when next.
+
+    The stock screen is a daily-close screen: its numbers legitimately stay
+    identical between U.S. closes. Exposing the cache cadence (TTL["stocks"],
+    one hour by default, and skipped entirely while a failed attempt is younger
+    than that) turns "has this frozen?" into a visible fact.
+    """
+    view = dict(screen or {})
+    interval = int(config.TTL.get("stocks") or 3600)
+    view["refresh_interval_seconds"] = interval
+    now = float(now or time.time())
+    at = (entry or {}).get("at")
+    try:
+        at = float(at)
+    except (TypeError, ValueError):
+        at = None
+    if at is not None:
+        view["checked_at_utc"] = datetime.fromtimestamp(
+            at, timezone.utc).isoformat(timespec="minutes")
+        view["next_check_in_seconds"] = max(0, int(at + interval - now))
+    return view
+
+
 def _with_indicative_myr(screen, fx_entry, *, demo=False, now=None):
     """Attach a clearly non-executable USD/MYR reference to stock prices.
 
@@ -408,6 +432,7 @@ def summary():
         if stock_error:
             stock_screen_data = dict(stock_screen_data)
             stock_screen_data["refresh_error"] = str(stock_error)[:240]
+    stock_screen_data = _with_stock_refresh_meta(stock_screen_data, stock_entry)
     stock_screen_data = _with_indicative_myr(
         stock_screen_data, fx_entry, demo=config.DEMO)
     stock_screen_data["provider_issues"] = _stock_provider_issues(

@@ -21,7 +21,7 @@ central-bank policy rates, and the US yield curve (recession indicator).
 | Server IP | `192.168.0.149` (LAN only) |
 | Access | root via SSH; web UI on LAN |
 | Repo | `shashidaren/econ` (this repo) |
-| Working branch | `arena/a5e9894b-econ` (Arena session branch; Stocks baseline is reported merged/deployed, follow-up UI changes here are not deployed) |
+| Working branch | `arena/83ffb2c7-econ` (Arena session branch; Stocks baseline is reported merged/deployed, follow-up UI changes here are not deployed) |
 | Deploy model | server does `git fetch --all && git reset --hard origin/main && ./install.sh` |
 | App dir on server | `/opt/econ` |
 | Port | **8080** (override: `ECON_PORT=xxxx ./install.sh`) |
@@ -50,13 +50,14 @@ central-bank policy rates, and the US yield curve (recession indicator).
 | D15 | Five missing indices | **Tencent then Sina, after CNBC, only for `^shc` `^hsi` `^ukx` `^dax` `^stx`** | 2026-10-08 probe: Tencent `sh000001` / `hkHSI` / `ukUKX` are live or previous close; Sina `b_DAX` / `b_SX5E` cover the two Tencent misses. Do not use Sina `int_dax`, `int_ftse` (stale 9284 vs 10458), or `int_fsx5e` (empty). Eastmoney was HTTP 502. GBK pages; parser keeps ASCII prices. Card source reads `tencent:…` or `sina:…` |
 | D16 | Gold inflation read | **FRED `DFII10` 10y real yield chart plus a briefing card** | Owner invests mostly in gold. Breakeven is expected inflation; the real yield is the opportunity cost. Card uses DFII10, else funds − breakeven. ≥1.5 headwind, 0.5–1.5 caution, negative is the classic tailwind. Not a price forecast |
 | D17 | Summary tab | **`/summary` page, same cache as `/`** | Second tab, not a new fetch. Posture, briefing lines, rates, and the loaded quotes/CPI/GDP in prose. Board tab links to it |
-| D18 | Short-term stock watchlist | **`/stocks` + `/api/stocks`, maximum 3 U.S.-listed names under $50** | Editable 32-symbol universe; $5 floor, $5M 20-session average dollar-volume floor, at least 61 sessions, daily close no more than 5 calendar days old, positive 20-session return and close above the 20-day average. Rank 5/20/60-session momentum with volatility/drawdown penalties. Low/Medium/High are backward-looking realized-risk buckets only. Tencent K-line → batched Yahoo → Stooq; no fundamentals, news, earnings calendar, analyst targets, or intraday data. Not a buy signal |
+| D18 | Short-term stock watchlist | **`/stocks` + `/api/stocks`, every passer up to 7 U.S.-listed names under $50** (was 3; raised 2026-10-20) | Editable 32-symbol universe; $5 floor, $5M 20-session average dollar-volume floor, at least 61 sessions, daily close no more than 5 calendar days old, positive 20-session return and close above the 20-day average. Rank 5/20/60-session momentum with volatility/drawdown penalties. Low/Medium/High are backward-looking realized-risk buckets only. Tencent K-line → batched Yahoo → Stooq; no fundamentals, news, earnings calendar, analyst targets, or intraday data. Not a buy signal. Display cap is `ECON_STOCK_MAX_RESULTS` (default 7, hard-clamped to 32); the full `eligible_count` is reported and printed on the page even when the list is capped |
 | D19 | Moomoo Malaysia use | **Read-only, no broker integration; preserve the editable U.S. universe and existing limits** | Moomoo MY's official help center says fractional availability is limited to selected U.S. securities and its in-app eligibility list may change. This app cannot validate live per-symbol tradability. Show an optional fresh ECB/Frankfurter USD/MYR reference with source/date/fetch time and prominent non-executable/no-fees caveats; link the official fee schedule rather than calculating charges |
+| D20 | Stocks-tab update cadence (verified 2026-10-20) | **Keep the 1 h screen TTL (daily-close data does not justify more); make the cadence visible on the page and in the API** | Owner asked whether the screen updates often enough. Measured in code: board cycle 300 s, `TTL["stocks"]` 3600 s, and a failed refresh is skipped until it is 1 h old; the inputs are *daily* bars that only change after the U.S. close (~04:00–05:00 MYT). So the list legitimately sits still between closes. Instead of hammering keyless providers 12× more often for no new information, `/stocks` now prints "Refresh cadence: providers re-checked at most every 60 min · next re-check in about N min · the underlying daily bars only change after the U.S. close, so this list is not intraday". `/api/stocks` and `/api/summary.stock_screen` expose `refresh_interval_seconds`, `checked_at_utc`, and `next_check_in_seconds`. Intraday movement would need a new keyless intraday source, which does not exist in this pipeline (owner call) |
 
 Data-source rules: free, no signups; every source fails independently (panel shows
 "awaiting data"/stale badge, board never breaks); polite fetch cadence via cache TTLs.
 
-## 4. Architecture (Stocks baseline merged; follow-up Moomoo-usability work on `arena/a5e9894b-econ`)
+## 4. Architecture (Stocks baseline merged; follow-up work — Moomoo usability, 7-passer list, cadence display — on `arena/83ffb2c7-econ`)
 
 ```
 dashboard/
@@ -75,11 +76,14 @@ dashboard/
   briefing.py   posture + signal cards from the summary dict already in memory
                 (curve, policy real-rate proxy, CPI, GDP, index breadth). No I/O
   stocks.py     technical watchlist scoring, $5-$50/volume/freshness/trend filters,
-                observed volatility/drawdown risk buckets, max-three output
+                observed volatility/drawdown risk buckets, every-passer output capped
+                at MAX_RESULTS=7 (ceiling 32)
+  app.py        also stamps the stock screen with its refresh cadence
+                (`_with_stock_refresh_meta`: interval, last check, next check)
 tests/test_sources.py    47 stdlib unittests — cascade, breakers, FRED gate/cache, transport,
                          Yahoo cookie+crumb, CNBC parsing & caching, Treasury headers, rendering
-tests/test_stock_screen.py 10 stdlib unittests — filters, rank cap, freshness, risk labels,
-                           Tencent/Yahoo parser and provider fallback
+tests/test_stock_screen.py 15 stdlib unittests — filters, rank cap (7/ceiling), freshness,
+                           risk labels, refresh cadence, Tencent/Yahoo parser, provider fallback
 tests/test_briefing.py   4 stdlib unittests — defensive/constructive/empty posture + page strip
 tests/test_asia_quotes.py 2 stdlib unittests — Tencent/Sina parsers and cascade preference
 tools/sim_lxc_network.py replays the LXC's measured latencies against the real cascade
@@ -90,9 +94,10 @@ uninstall.sh
 .env.example    optional overrides + reserved FRED key slot
 ```
 
-- `/` board · `/summary` macro summary · `/stocks` top-three watchlist · `/api/summary` JSON
-  (includes `stock_screen`) · `/api/stocks` screen JSON · `/healthz` probe
-- Stock screen cache TTL: 1 h; US daily K-lines are retrieved with four concurrent Tencent requests
+- `/` board · `/summary` macro summary · `/stocks` ranked watchlist (every passer, up to 7) ·
+  `/api/summary` JSON (includes `stock_screen`) · `/api/stocks` screen JSON · `/healthz` probe
+- Stock screen cache TTL: 1 h (page shows the cadence and next check time); US daily K-lines are
+  retrieved with four concurrent Tencent requests
   at a time, then Yahoo is batched and Stooq is per-symbol fallback. It only returns current,
   sufficiently liquid names passing the configured price/trend filters.
 - Each refresh cycle: **pre-flight** (probe stooq hosts 3 s, one batched Yahoo spark request for
@@ -120,7 +125,8 @@ python3 /opt/econ/dashboard/sources.py --doctor    # exhaustive: every provider 
 # Offline tests (no network needed; faked transport)
 cd /opt/econ && python3 -m unittest discover -s tests -v
 
-# Check API summary, top-three stock screen, and service logs
+# Check API summary, stock screen (up to 7 passers) and its refresh cadence, and service logs
+curl -s localhost:8080/api/stocks | python3 -c "import json,sys; s=json.load(sys.stdin); print(s['status'], '|', s['message']); print('data date', s['data_date'], '| source', s['source']); print('checked', s.get('checked_at_utc'), '| next check in', s.get('next_check_in_seconds'), 's | interval', s.get('refresh_interval_seconds'), 's')"
 curl -s localhost:8080/api/summary | python3 -c "import json,sys; s=json.load(sys.stdin); print('indices:',sum(q is not None for q in s['indices']),'/',len(s['indices']),'| commodities:',sum(q is not None for q in s['commodities']),'/',len(s['commodities']),'| fx:',len(s['fx']),'/',8,'| cpi:',len(s['cpi']),'| gdp:',len(s['gdp']),'| curve pts:',len(s['curve'])); print('stock screen:',s['stock_screen']['status'],s['stock_screen']['source'],s['stock_screen']['data_date']); print('errors:',s['errors']); print('providers:',[(p['provider'],p['state'],p['retry_in']) for p in s['providers']])"
 curl -s localhost:8080/api/stocks | python3 -m json.tool
 journalctl -u econ-dashboard -n 30 --no-pager
@@ -130,10 +136,12 @@ Preview (no network needed): `ECON_DEMO=1 python3 dashboard/app.py` → sample d
 
 ## 6. Current status
 
+- [x] **Stocks display cap raised 3 → 7 (this session, `arena/83ffb2c7-econ`), not deployed.** `/stocks`, `/api/stocks`, and `/api/summary.stock_screen` now list **every** ticker that passes, ranked, up to `ECON_STOCK_MAX_RESULTS` (default 7, hard-clamped to 32). Filters, ranking, risk buckets, and the universe are unchanged; `eligible_count` is still reported in full and printed on the page when the list is capped. Nothing else about the screen changed.
+- [x] **Update-frequency question answered (D20), not deployed.** The screen re-checks providers at most every 60 min (`TTL["stocks"]`) on the 5-min board cycle, and a failed refresh is skipped until it is 1 h old; its inputs are *daily* bars, so the numbers only change after the U.S. close (~04:00–05:00 MYT). Kept the 1 h TTL and instead surfaced the cadence in the UI and the API (`refresh_interval_seconds`, `checked_at_utc`, `next_check_in_seconds`).
 - [x] **Stocks baseline is merged in `cddd673` and owner-reported live on the LXC:** as of 2026-10-13, the page reports 32/32 tickers with usable history, latest daily bar 2026-10-12, Tencent K-line, seven screen-passers and at most three displayed. This is owner-provided status, not independently queried from this sandbox.
-- [ ] **Stocks follow-up on `arena/a5e9894b-econ` is not deployed:** explicit MYT/U.S. Eastern clocks, optional fresh-reference MYR equivalents, Moomoo Malaysia availability/fee links and limitations, minimum-history-based coverage, and clearer partial-provider diagnostics. No broker integration or order automation.
+- [ ] **Earlier Stocks follow-ups on `arena/a5e9894b-econ` are not deployed:** explicit MYT/U.S. Eastern clocks, optional fresh-reference MYR equivalents, Moomoo Malaysia availability/fee links and limitations, minimum-history-based coverage, and clearer partial-provider diagnostics. No broker integration or order automation.
 - [x] **Summary tab, Gold read, and recession meter are present in this checkout.**
-- [x] **Tests:** merged Stocks baseline passed 63 tests; this follow-up passes 70/70 standard-library tests and `py_compile`. Demo quote data is synthetic and is not evidence of live picks.
+- [x] **Tests:** merged Stocks baseline passed 63 tests; the previous follow-up passed 70; **this checkout passes 79/79** standard-library tests plus `py_compile`. Demo quote data is synthetic and is not evidence of live picks.
 - [x] **Tencent/Sina index fallback (v0.7) deployed on `192.168.0.149` at `5fd45e6`.**
   Doctor `2026-10-08T02:09:21+00:00` §[8/8] **5/5 passed**: Shanghai `tencent:sh000001`
   3852.02 @ 2026-10-08, Hang Seng `tencent:hkHSI` 24069.56 @ 2026-10-08, FTSE
@@ -179,6 +187,8 @@ Preview (no network needed): `ECON_DEMO=1 python3 dashboard/app.py` → sample d
 ## 7. Known risks / watch-list
 
 - **Stocks screen is not investment advice or a forecast:** it uses daily-price momentum and trailing liquidity/volatility/drawdown only. It does not screen valuation, earnings, balance-sheet strength, news, or upcoming catalysts. Price below $50 is not a valuation signal; user should verify quote/earnings/news before any trade.
+- **A longer list is a wider watchlist, not a stronger signal (new 2026-10-20):** the display cap moved 3 → 7, so every filter-passer is now visible. Ranking is *relative* to this 32-name universe and the filters were not loosened, so names at the bottom of the list clear the same gates by a smaller margin and need the same research. Rank #7 is not "seventh best in the market".
+- **The stocks list is daily, not intraday (D20):** daily closes only appear after the U.S. close (~04:00–05:00 MYT) and the screen re-checks providers hourly, so an unchanged list during a U.S. session is expected, not a stuck feed. Never read these numbers as live quotes; check price, spread, and news in the broker before acting.
 - **Moomoo per-symbol availability is not programmatically verified:** the official Malaysia guide says fractional trading is limited to selected U.S. securities and the in-app list can change. The static watchlist must remain editable; users need to confirm a ticker and any fractional eligibility in the app. Do not imply broker support or live orderability.
 - **Stock history providers can still fail:** owner reports Tencent covered all 32 configured names on 2026-10-13, but Yahoo/Stooq remain fallbacks and this sandbox cannot query the LXC or market providers. The page must show partial coverage/errors and suppress stale picks, never substitute demo data.
 - **Yahoo = IP-level HTTP 429 (settled 01:13 UTC):** `crumb handshake` itself returns 429 in
@@ -210,10 +220,19 @@ Preview (no network needed): `ECON_DEMO=1 python3 dashboard/app.py` → sample d
 
 1. **Do not deploy this follow-up to the LXC unless the owner explicitly asks.** The Stocks baseline is already reported live; these local changes have not been deployed.
 2. Run the offline suite and inspect `/stocks`, `/api/stocks`, and `/api/summary.stock_screen` locally/demo-only. Demo stock and FX inputs must remain visibly synthetic; demo conversions are suppressed.
-3. If the owner later requests deployment, first confirm the current live LXC/API state, then use the established deploy process. Afterward verify that all existing price/liquidity/history/freshness/trend thresholds and the three-total cap remain unchanged, plus the new timezone, FX provenance, Moomoo caveats, and failure diagnostics.
-4. The earlier CNBC/Yahoo/Stooq index investigations are historical. Tencent/Sina restored 9/9 index coverage in the 2026-10-08 LXC doctor run; revisit those only if coverage regresses.
+3. If the owner later requests deployment, first confirm the current live LXC/API state, then use the established deploy process. Afterward verify that all existing price/liquidity/history/freshness/trend thresholds are unchanged, that `/stocks` lists every passer up to the 7-name cap (with the full eligible count in the status line), that the "Refresh cadence" line shows a sensible next-check time, plus the timezone, FX provenance, Moomoo caveats, and failure diagnostics.
+4. **Open, owner-side:** decide whether hourly re-checking is enough now that up to seven names are displayed. Daily closes are the hard ceiling for this pipeline; genuine intraday tracking would need a new keyless intraday source (none exists in the cascade) and would multiply provider load.
+5. The earlier CNBC/Yahoo/Stooq index investigations are historical. Tencent/Sina restored 9/9 index coverage in the 2026-10-08 LXC doctor run; revisit those only if coverage regresses.
 
 ## 9. Session log
+
+### 2026-10-20 — Session 13: full passer list (3 → 7) + screen update-cadence check
+
+- **Ask:** (a) stop limiting the Stocks tab to three names — show the full listing of the seven that passed the screen; (b) check whether this information is updated frequently enough; (c) update `handoff.md` and open a PR.
+- **(a) Cap 3 → 7, every passer shown.** `dashboard/stocks.py`: `MAX_RESULTS` 3 → 7 (default display cap) with a new `MAX_RESULTS_CEILING = 32` hard clamp so a bad override cannot dump the whole universe; `limit` is now coerced with `int()` and clamped instead of `min(MAX_RESULTS, limit)`. `max_candidates` reports the *effective* cap. Message text now distinguishes "Showing all N stock(s) that passed" from "N passed … showing the top 7 by rank score", and `eligible_count` is always the full count. `dashboard/config.py`: `STOCK_MAX_RESULTS` is now `ECON_STOCK_MAX_RESULTS` (default 7). `dashboard/render.py`: the page no longer hard-slices to 3 — it renders every candidate up to the screen's `max_candidates`; header reads "every passer, up to 7 names"; the method panel gained a "Display" bullet stating that a longer list is a wider watchlist, not a stronger signal. **No filter, threshold, ranking weight, risk bucket, provider, or universe change.**
+- **(b) Frequency — measured in this checkout, not assumed.** Board refresh cycle 300 s (`ECON_REFRESH`); the stock screen's own TTL is 3600 s (`TTL["stocks"]`), and `warm_all()` additionally skips the screen entirely while a *failed* refresh is younger than 1 h. Inputs are daily K-lines, so the values only change after the U.S. close (~04:00–05:00 MYT). Conclusion: the list is capped at one real update per trading day and re-checked hourly — polling keyless providers 12× more often would add load and no new information. Kept the 1 h TTL and made the cadence visible instead: `/stocks` prints "Refresh cadence: providers re-checked at most every 60 min · next re-check in about N min · the underlying daily bars only change after the U.S. close, so this list is not intraday", and `/api/stocks` + `/api/summary.stock_screen` expose `refresh_interval_seconds`, `checked_at_utc`, `next_check_in_seconds` (added by `app._with_stock_refresh_meta`). Recorded as **D20**.
+- **Verification (offline only — the sandbox has no egress to market providers):** `python3 -m py_compile dashboard/*.py tests/*.py` clean; `python3 -m unittest discover -s tests -v` **79/79 passed** (was 74; 5 added/updated: every-passer ranking, 9-passer cap + clamp, page renders 5/7 cards, cap honoured when lowered, and 3 cadence tests). Demo server on `:8091`: `/`, `/summary`, `/stocks`, `/api/summary`, `/api/stocks`, `/healthz` all 200. Demo screen reported **12 eligible → 7 shown** (`max_candidates` 7, message "12 stock(s) passed … top 7"), 7 `stock-card` elements rendered, cadence line present. Demo data is synthetic — it exercises layout/API shape only and is not evidence about live passers.
+- **Not done:** no LXC deploy (`git reset --hard origin/main` on `192.168.0.149` remains owner-gated, §5/§8), no live provider probe, no change to the 1 h TTL.
 
 ### 2026-10-13 — Session 12: Moomoo Malaysia usability, timestamps, and feed diagnostics
 
