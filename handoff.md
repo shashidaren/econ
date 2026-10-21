@@ -21,7 +21,7 @@ central-bank policy rates, and the US yield curve (recession indicator).
 | Server IP | `192.168.0.149` (LAN only) |
 | Access | root via SSH; web UI on LAN |
 | Repo | `shashidaren/econ` (this repo) |
-| Working branch | `arena/778fffe7-econ` (this session; branched from `main` at `1b44ab2`, i.e. after PR #11 merged). Everything here is **not deployed** until merged and the LXC's cron pulls `main` |
+| Working branch | `arena/a92bdd81-econ` (this session; branched from `main` at `b6b9977`, i.e. after PR #13 merged the Session 15 branch). Everything here is **not deployed** until merged and the LXC's cron pulls `main` |
 | Deploy model | server does `git fetch --all && git reset --hard origin/main && ./install.sh` — **now also automatic** (D21) |
 | Unattended updates | **`/etc/cron.d/econ-update`** → `root /opt/econ/tools/auto_update.sh` every **30 min** (schedule set at install time via `ECON_UPDATE_SCHEDULE='0 * * * *' ./install.sh`), log `/var/log/econ-update.log`, lock `/var/lock/econ-update.lock`. Installed by `install.sh` on every run; removed by `uninstall.sh` or `rm -f /etc/cron.d/econ-update` |
 | App dir on server | `/opt/econ` |
@@ -51,12 +51,13 @@ central-bank policy rates, and the US yield curve (recession indicator).
 | D15 | Five missing indices | **Tencent then Sina, after CNBC, only for `^shc` `^hsi` `^ukx` `^dax` `^stx`** | 2026-10-08 probe: Tencent `sh000001` / `hkHSI` / `ukUKX` are live or previous close; Sina `b_DAX` / `b_SX5E` cover the two Tencent misses. Do not use Sina `int_dax`, `int_ftse` (stale 9284 vs 10458), or `int_fsx5e` (empty). Eastmoney was HTTP 502. GBK pages; parser keeps ASCII prices. Card source reads `tencent:…` or `sina:…` |
 | D16 | Gold inflation read | **FRED `DFII10` 10y real yield chart plus a briefing card** | Owner invests mostly in gold. Breakeven is expected inflation; the real yield is the opportunity cost. Card uses DFII10, else funds − breakeven. ≥1.5 headwind, 0.5–1.5 caution, negative is the classic tailwind. Not a price forecast |
 | D17 | Summary tab | **`/summary` page, same cache as `/`** | Second tab, not a new fetch. Posture, briefing lines, rates, and the loaded quotes/CPI/GDP in prose. Board tab links to it |
-| D18 | Short-term stock watchlist | **`/stocks` + `/api/stocks`, every passer up to 7 U.S.-listed names under $50** (was 3; raised 2026-10-20) | Editable 32-symbol universe; $5 floor, $5M 20-session average dollar-volume floor, at least 61 sessions, daily close no more than 5 calendar days old, positive 20-session return and close above the 20-day average. Rank 5/20/60-session momentum with volatility/drawdown penalties. Low/Medium/High are backward-looking realized-risk buckets only. Tencent K-line → batched Yahoo → Stooq; no fundamentals, news, earnings calendar, analyst targets, or intraday data. Not a buy signal. Display cap is `ECON_STOCK_MAX_RESULTS` (default 7, hard-clamped to 32); the full `eligible_count` is reported and printed on the page even when the list is capped |
+| D18 | Short-term stock watchlist | **`/stocks` + `/api/stocks`, every passer up to 7 U.S.-listed names under $50** (was 3; raised 2026-10-20) | Editable 32-symbol universe; $5 floor, $5M 20-session average dollar-volume floor, at least 61 sessions, daily close no more than 5 calendar days old, positive 20-session return and close above the 20-day average. Rank 5/20/60-session momentum with volatility/drawdown penalties. Low/Medium/High are backward-looking realized-risk buckets only. Provider cascade superseded by D24 (was Tencent K-line → batched Yahoo → Stooq); no fundamentals, news, earnings calendar, analyst targets, or intraday data. Not a buy signal. Display cap is `ECON_STOCK_MAX_RESULTS` (default 7, hard-clamped to 32); the full `eligible_count` is reported and printed on the page even when the list is capped |
 | D19 | Moomoo Malaysia use | **Read-only, no broker integration; preserve the editable U.S. universe and existing limits** | Moomoo MY's official help center says fractional availability is limited to selected U.S. securities and its in-app eligibility list may change. This app cannot validate live per-symbol tradability. Show an optional fresh ECB/Frankfurter USD/MYR reference with source/date/fetch time and prominent non-executable/no-fees caveats; link the official fee schedule rather than calculating charges |
 | D20 | Stocks-tab update cadence (verified 2026-10-20) | **Keep the 1 h screen TTL (daily-close data does not justify more); make the cadence visible on the page and in the API** | Owner asked whether the screen updates often enough. Measured in code: board cycle 300 s, `TTL["stocks"]` 3600 s, and a failed refresh is skipped until it is 1 h old; the inputs are *daily* bars that only change after the U.S. close (~04:00–05:00 MYT). So the list legitimately sits still between closes. Instead of hammering keyless providers 12× more often for no new information, `/stocks` now prints "Refresh cadence: providers re-checked at most every 60 min · next re-check in about N min · the underlying daily bars only change after the U.S. close, so this list is not intraday". `/api/stocks` and `/api/summary.stock_screen` expose `refresh_interval_seconds`, `checked_at_utc`, and `next_check_in_seconds`. Intraday movement would need a new keyless intraday source, which does not exist in this pipeline (owner call) |
 | D21 | Unattended updates (2026-10-21) | **cron → `tools/auto_update.sh`, tracking `origin/main` only; pull + restart, no test gate; `install.sh` always installs `/etc/cron.d/econ-update`** | Owner wants zero manual deploy management. Behaviour chosen explicitly: main only (merged/reviewed work only), `git reset --hard origin/main` (same convergence rule as the manual deploy, so hand edits in `/opt/econ` are discarded), restart **only** when the commit actually changed, `flock` serialisation, dry-run mode. The owner declined the verify-then-rollback option, so the only gate before restart is `install.sh`'s import smoke test: a commit that breaks Python imports leaves the running service on the old code and logs an error. Trade-off accepted: whatever lands on GitHub `main` deploys itself to the box as root within ~30 min (§7) |
-| D22 | Stock headlines (2026-10-21) | **Key-less RSS per displayed ticker: Google News → Bing News → Yahoo Finance headline feed; context only, never scored; at most 3 items inside 7 days** | The owner asked for recent news on the stocks the dashboard selects. No new key or login: all three are public RSS, parsed with `xml.etree.ElementTree` (RSS 2.0 + Atom, namespace-tolerant). One request per displayed ticker per hourly screen refresh (≤7 small requests/h). Filters are deliberately conservative because there is no relevance oracle: keep only items whose publication date is inside the window (undated items dropped, never shown as "recent"), whose title mentions the ticker as a word or a distinctive part of the company name, deduplicated by normalised title; publisher suffix stripped only when the feed states the publisher. A failure is a visible per-symbol sentence, never a silent empty card, and news can never fail or change the screen. `--doctor` §[9/9] probes the three feeds. Toggle `ECON_STOCK_NEWS=0`, window `ECON_STOCK_NEWS_DAYS` (1–30), cap `ECON_STOCK_NEWS_PER_SYMBOL` (1–5) |
+| D22 | Stock headlines (2026-10-21) | **Key-less RSS per displayed ticker: Google News → Bing News → Yahoo Finance headline feed; context only, never scored; at most 3 items inside 7 days** | The owner asked for recent news on the stocks the dashboard selects. No new key or login: all three are public RSS, parsed with `xml.etree.ElementTree` (RSS 2.0 + Atom, namespace-tolerant). One request per displayed ticker per hourly screen refresh (≤7 small requests/h). Filters are deliberately conservative because there is no relevance oracle: keep only items whose publication date is inside the window (undated items dropped, never shown as "recent"), whose title mentions the ticker as a word or a distinctive part of the company name, deduplicated by normalised title; publisher suffix stripped only when the feed states the publisher. A failure is a visible per-symbol sentence, never a silent empty card, and news can never fail or change the screen. `--doctor` §[9/9] (renumbered §[10/10] in Session 16) probes the three feeds. Toggle `ECON_STOCK_NEWS=0`, window `ECON_STOCK_NEWS_DAYS` (1–30), cap `ECON_STOCK_NEWS_PER_SYMBOL` (1–5) |
 | D23 | Seven-day price movement (2026-10-21) | **Derived from the daily bars already fetched: `7 days` = last close at or before (latest bar − 7 calendar days) → latest close, plus a 12-session sparkline, 7-day high/low and a breadth strip over the displayed names** | The owner asked for price movement "within 7 days". No new upstream and no intraday claim: the window ends at the latest daily bar, so it normally spans five U.S. sessions and never includes days the pipeline does not have. Per-card `ret7_pct`, `week_start/end`, `week_high/low`, `recent_bars` and a screen-level `week` block ({average, up/down/flat, best, worst}) are in `/api/stocks` and `/api/summary.stock_screen`. Descriptive only — no forecast, no effect on filters or rank |
+| D24 | Stock-history pipeline rebuild after the Tencent WAF outage (2026-10-21, Session 16) | **Cascade is now Sina US daily K → Nasdaq historical → Tencent K-line (best effort) → Yahoo spark batch → Stooq; per-host breakers; WAF bodies captured; last-good screen served badged during outages** | Live on the LXC both Tencent K-line hosts answer HTTP 501 (HTML bounce to `waf.tencent.com`) for every request shape — encoding and window size ruled out — while `curl -f` swallowed the body and one shared `tencent_kline` breaker killed the cascade; `/stocks` showed "0/32 tickers". Sina (`US_MinKService.getDailyK` JSONP) and Nasdaq (`api.nasdaq.com` historical, browser UA) are the providers verified working from the LXC, so they lead. Rules: (1) breaker per HOST — `sina:stock.finance.sina.com.cn` (bare `sina` stays the hq.sinajs.cn index-quote key, so the two Sina services cannot disable each other; family is still `sina` for diagnostics), `nasdaq:api.nasdaq.com`, `tencent_kline:<host>`; (2) the stock path drops `curl -f` (`capture_error_body` → `HttpStatusError`) and any `<!DOCTYPE`/`<html`/`waf.tencent.com` body is a HOST BLOCK: 30-min cooldown for that host only, "blocked by WAF" in per-ticker diagnostics; (3) ≤4 concurrent fetches, 0.3 s+jitter per-host pacing (`ECON_STOCK_PACE`), 128-request budget per refresh (`ECON_STOCK_REQUEST_BUDGET`) so 32 symbols can't trip a WAF again; (4) row contract `[(date, close, volume)]` unchanged, so `stocks.py` math is untouched; (5) while refreshes fail, `app.py` serves the persisted last-good screen past the 5-day freshness gate (`current_view(keep_stale=True)`, status `cached`, `served_from_cache`/`sources_blocked` in the API, `cached · sources blocked · data as of <date>` badge) — an outage degrades, never blanks; (6) `--doctor` §[9/10] probes Sina/Nasdaq/both Tencent hosts printing status + first 120 body bytes. Eastmoney is **not** used (empty replies); there is no quote-only fallback (`qt.gtimg.cn` has no US symbols). Supersedes the provider order in D18 |
 
 Data-source rules: free, no signups; every source fails independently (panel shows
 "awaiting data"/stale badge, board never breaks); polite fetch cadence via cache TTLs.
@@ -68,9 +69,11 @@ dashboard/
   app.py        HTTP server (ThreadingHTTPServer) + disk-backed cache + 4-worker refresher
                 + pre-flight step: warm_providers() then prefetch_yahoo() before the fan-out
   config.py     panels/symbols/TTLs plus the 32-symbol US stock watchlist and filters
-  sources.py    quote/rates cascades + transport/breakers + Tencent US daily K-lines,
-                volume-aware Yahoo batch and Stooq .us fallback for the stock screen;
-                CLI diagnostics (`python3 sources.py` / `--doctor`)
+  sources.py    quote/rates cascades + transport/breakers + US stock-history cascade
+                (Sina daily K -> Nasdaq historical -> Tencent K-line per host ->
+                volume-aware Yahoo batch -> Stooq .us) with per-host breakers,
+                WAF body capture, pacing + request budget for the stock screen;
+                CLI diagnostics (`python3 sources.py` / `--doctor`, 10 sections)
   demo.py       same backend signatures with synthetic data (ECON_DEMO=1); stock bars
                 are explicitly demo-only and must never be treated as live picks
   charts.py     server-side SVG: sparkline(), line_chart()
@@ -91,10 +94,13 @@ dashboard/
                 a screen-level `week` breadth summary
   app.py        also stamps the stock screen with its refresh cadence
                 (`_with_stock_refresh_meta`: interval, last check, next check)
-tests/test_sources.py    47 stdlib unittests — cascade, breakers, FRED gate/cache, transport,
-                         Yahoo cookie+crumb, CNBC parsing & caching, Treasury headers, rendering
-tests/test_stock_screen.py 26 stdlib unittests — filters, rank cap (7/ceiling), freshness,
-                           risk labels, refresh cadence, Tencent/Yahoo parser, provider fallback
+tests/test_sources.py    51 stdlib unittests — cascade, breakers, FRED gate/cache, transport
+                         (incl. error-body capture), Yahoo cookie+crumb, CNBC parsing &
+                         caching, Treasury headers, stock-history doctor probes, rendering
+tests/test_stock_screen.py 43 stdlib unittests — filters, rank cap (7/ceiling), freshness,
+                           risk labels, refresh cadence, Sina/Nasdaq/Tencent/Yahoo parsers,
+                           5-stage provider cascade, WAF detection + per-host breaker
+                           isolation, pacing/budget, cached-screen degrade + badge
 tests/test_stock_news.py  27 stdlib unittests — RSS/Atom parsing, window/relevance/dedup,
                           fallback cascade + breakers, unsafe links, 7-day metrics and
                           breadth, page rendering and escaping; no network
@@ -117,10 +123,12 @@ uninstall.sh
 - `/` board · `/summary` macro summary · `/stocks` ranked watchlist (every passer, up to 7,
   with 7-day movement and recent headlines) · `/api/summary` JSON (includes `stock_screen`) ·
   `/api/stocks` screen JSON (`week`, `news`) · `/healthz` probe
-- Stock screen cache TTL: 1 h (page shows the cadence and next check time); US daily K-lines are
-  retrieved with four concurrent Tencent requests
-  at a time, then Yahoo is batched and Stooq is per-symbol fallback. It only returns current,
-  sufficiently liquid names passing the configured price/trend filters.
+- Stock screen cache TTL: 1 h (page shows the cadence and next check time); US daily bars are
+  retrieved Sina → Nasdaq → Tencent (per host) → one batched Yahoo request → Stooq, at most
+  four concurrent fetches, per-host pacing with jitter and a 128-request budget per refresh.
+  It only returns current, sufficiently liquid names passing the configured price/trend
+  filters; during a total source outage the persisted last-good screen is served with a
+  `cached · sources blocked · data as of <date>` badge instead of blanking.
 - Each refresh cycle: **pre-flight** (probe stooq hosts 3 s, one batched Yahoo spark request for
   stale Yahoo-mapped symbols) → 4-worker fan-out over fast macro sources first, then market quotes
 - Disk cache (`/var/tmp/econ-dashboard-cache.json`) keeps last good data across `systemctl restart`
@@ -152,10 +160,12 @@ git reset --hard origin/main
 sudo ECON_UPDATE_SCHEDULE='0 * * * *' /opt/econ/install.sh   # hourly instead of every 30 min
 
 # Test upstream data sources directly from the LXC
-python3 /opt/econ/dashboard/sources.py             # quick: one check per panel
+python3 /opt/econ/dashboard/sources.py             # quick: one check per panel (incl. stock:PFE)
 python3 /opt/econ/dashboard/sources.py --doctor    # exhaustive: every provider and mapped
                                                    # FRED series/fallback + breaker report;
-                                                   # §[9/9] probes the three stock headline feeds
+                                                   # §[9/10] probes Sina/Nasdaq/both Tencent
+                                                   # stock-history hosts (status + body head);
+                                                   # §[10/10] probes the three headline feeds
 
 # Offline tests (no network needed; faked transport)
 cd /opt/econ && python3 -m unittest discover -s tests -v
@@ -172,7 +182,27 @@ Preview (no network needed): `ECON_DEMO=1 python3 dashboard/app.py` → sample d
 
 ## 6. Current status
 
-- [x] **Recent headlines + 7-day price movement added (this session, `arena/778fffe7-econ`), not deployed.**
+- [ ] **Stocks tab is DOWN live; fix built this session (`arena/a92bdd81-econ`), not deployed.**
+  Owner-reported/accessed 2026-10-21 ~00:20 UTC from `root@econ`: `/stocks` shows "0/32 tickers
+  with usable history … Fresh stock history is unavailable"; board/macro panels unaffected.
+  Root cause measured on the LXC: **both Tencent K-line hosts (`web.ifzq.gtimg.cn`,
+  `proxy.finance.qq.com`) answer HTTP 501 with an HTML bounce to `waf.tencent.com`** for every
+  request shape (percent-encoded and literal commas, 5-bar and 130-bar windows), `curl -f`
+  discarded the body so logs only showed "curl: (22) … HTTP 501", and the single shared
+  `tencent_kline` breaker took the cascade down. Yahoo still 429 (since 2026-10-08), Stooq still
+  TCP-dead, Eastmoney empty-reply (do not use), `qt.gtimg.cn` has no US symbols
+  (`v_pv_none_match`). **Working from the LXC: Sina US daily K and Nasdaq historical** — D24
+  rebuilds the cascade around them with per-host breakers, WAF body capture, pacing + request
+  budget, a never-blank cached-screen degrade, and `--doctor` §[9/10]. **The agent sandbox has
+  no egress to any market host** (Sina/Nasdaq/Tencent all die at the TLS handshake from here),
+  so none of this is live-verified: the first evidence must come from `--doctor` on `root@econ`
+  after merge (§8). PR to be opened from this branch; not deployed by this session.
+- [x] **Tests: 127/127** stdlib unittests pass in this checkout (106 before; 21 new, 5 rewritten
+  for the new cascade), plus `py_compile` and the `ECON_DEMO=1` six-endpoint check. Verification
+  also caught (and fixed) a pre-existing `render.py` bug from Session 15: the headlines block
+  shadowed the `coverage` status string, printing a dict repr instead of "N/32 tickers with
+  usable history" whenever headlines were active.
+- [x] **Recent headlines + 7-day price movement added (Session 15), merged into `main` as `b6b9977` via PR #13.**
   `/stocks` now shows a 7-day movement strip (average, up/down/flat, strongest/weakest over the
   displayed names), a per-card 12-session sparkline, `1 day`/`7 days`/`20 sessions`/`60 sessions`
   stats, the 7-day high/low range, and up to three recent headlines per ticker. New
@@ -193,7 +223,7 @@ Preview (no network needed): `ECON_DEMO=1 python3 dashboard/app.py` → sample d
 - [x] **Stocks baseline is merged in `cddd673` and owner-reported live on the LXC:** as of 2026-10-13, the page reports 32/32 tickers with usable history, latest daily bar 2026-10-12, Tencent K-line, seven screen-passers and at most three displayed. This is owner-provided status, not independently queried from this sandbox.
 - [ ] **Earlier Stocks follow-ups on `arena/a5e9894b-econ` are not deployed:** explicit MYT/U.S. Eastern clocks, optional fresh-reference MYR equivalents, Moomoo Malaysia availability/fee links and limitations, minimum-history-based coverage, and clearer partial-provider diagnostics. No broker integration or order automation.
 - [x] **Summary tab, Gold read, and recession meter are present in this checkout.**
-- [x] **Tests:** merged Stocks baseline passed 63 tests; the previous follow-up passed 70; **this checkout passes 106/106** standard-library tests plus `py_compile`. Demo quote and headline data are synthetic and are not evidence of live picks or live news.
+- [x] **Tests (history):** merged Stocks baseline passed 63 tests; the follow-up passed 70; Session 15 reached 106/106; **this checkout passes 127/127** standard-library tests plus `py_compile`. Demo quote and headline data are synthetic and are not evidence of live picks or live news.
 - [x] **Tencent/Sina index fallback (v0.7) deployed on `192.168.0.149` at `5fd45e6`.**
   Doctor `2026-10-08T02:09:21+00:00` §[8/8] **5/5 passed**: Shanghai `tencent:sh000001`
   3852.02 @ 2026-10-08, Hang Seng `tencent:hkHSI` 24069.56 @ 2026-10-08, FTSE
@@ -240,7 +270,7 @@ Preview (no network needed): `ECON_DEMO=1 python3 dashboard/app.py` → sample d
 
 - **Stocks screen is not investment advice or a forecast:** it uses daily-price momentum and trailing liquidity/volatility/drawdown only. It does not screen valuation, earnings, balance-sheet strength, news, or upcoming catalysts. Price below $50 is not a valuation signal; user should verify quote/earnings/news before any trade.
 - **Headlines are context, not a signal (new, D22):** the RSS feeds are third-party and unverified; titles can be syndicated, delayed, clickbait, or about a similarly named company. The relevance filter (ticker as a word, company name, or distinctive token) is a string heuristic, not a semantic one; Google's trailing " - Publisher" is stripped, but Bing/Yahoo titles can keep that suffix because those feeds do not expose the publisher. The screen never reads headlines back, so a wrong headline cannot change which tickers pass — but it can mislead a human. Always open the article before acting, and treat a missing headline list as "nothing found", not "nothing happened".
-- **Headline feeds are unverified live from this sandbox:** all three hosts (`news.google.com`, `www.bing.com`, `feeds.finance.yahoo.com`) are unreachable from the agent environment (TLS handshake failure), so the parsers, cascade and UI are covered only by faked-transport tests. First live evidence must come from `python3 /opt/econ/dashboard/sources.py --doctor` §[9/9] on the LXC. If all three are blocked there, the page says "Headlines unavailable" and the rest of the tab is unaffected — do not paper over it with scraped/undocumented endpoints (see D15's history with CNBC 500s).
+- **Headline feeds are unverified live from this sandbox:** all three hosts (`news.google.com`, `www.bing.com`, `feeds.finance.yahoo.com`) are unreachable from the agent environment (TLS handshake failure), so the parsers, cascade and UI are covered only by faked-transport tests. First live evidence must come from `python3 /opt/econ/dashboard/sources.py --doctor` §[10/10] on the LXC (renumbered in Session 16; §[9/10] is now US stock history). If all three are blocked there, the page says "Headlines unavailable" and the rest of the tab is unaffected — do not paper over it with scraped/undocumented endpoints (see D15's history with CNBC 500s).
 - **Seven-day movement is derived from daily bars, not intraday:** it compares the latest close with the last close at or before seven calendar days earlier (~5 U.S. sessions). A holiday, a missed session, or a stale-but-allowed quote shifts the window; the page prints the exact start/end dates so the reader can see it. It says nothing about the current bid/ask or today's move.
 - **A longer list is a wider watchlist, not a stronger signal (new 2026-10-20):** the display cap moved 3 → 7, so every filter-passer is now visible. Ranking is *relative* to this 32-name universe and the filters were not loosened, so names at the bottom of the list clear the same gates by a smaller margin and need the same research. Rank #7 is not "seventh best in the market".
 - **The stocks list is daily, not intraday (D20):** daily closes only appear after the U.S. close (~04:00–05:00 MYT) and the screen re-checks providers hourly, so an unchanged list during a U.S. session is expected, not a stuck feed. Never read these numbers as live quotes; check price, spread, and news in the broker before acting.
@@ -272,36 +302,117 @@ Preview (no network needed): `ECON_DEMO=1 python3 dashboard/app.py` → sample d
 - **A bad commit on `main` can take the dashboard down until someone intervenes:** there is no test-suite gate and no rollback (owner's choice, D21). The updater logs the failure and `journalctl -u econ-dashboard` shows why; recovery is `cd /opt/econ && git reset --hard <last-good-sha> && ./install.sh`, with the cron entry removed first so it does not re-apply the bad commit. If unattended safety later matters more than immediacy, add a `python3 -m unittest discover -s tests` + `py_compile` gate and `git reset --hard <previous>` on failure inside `tools/auto_update.sh`.
 - **Hand edits inside `/opt/econ` are now destroyed automatically:** each run does `git reset --hard origin/main`, so any local patch or ad-hoc experiment on the server is wiped within 30 min. Edit in git and push, or stop the cron job while experimenting.
 - **Sandbox has no egress to data hosts:** only GitHub/PyPI are reachable from this environment.
-  Confirmed again this session: `news.google.com`, `feeds.finance.yahoo.com`, `proxy.finance.qq.com`
-  and even `qt.gtimg.cn` fail at the TLS handshake with `SSL_ERROR_SYSCALL` from the sandbox.
-  All local tests use faked transports; live provider behavior must be verified on `root@econ`.
+  Confirmed again this session (Session 16): `stock.finance.sina.com.cn`, `api.nasdaq.com` and
+  `web.ifzq.gtimg.cn` — like `news.google.com`, `feeds.finance.yahoo.com`, `proxy.finance.qq.com`
+  and `qt.gtimg.cn` before them — fail at the TLS handshake with `SSL_ERROR_SYSCALL` from the
+  sandbox. All local tests use faked transports; **live provider behavior must be verified on
+  `root@econ`** (`--doctor` §[9/10] for the stock cascade).
 
-## 8. Next steps (open a PR from `arena/778fffe7-econ`; PR #11 already merged into `main` as `1b44ab2`)
+## 8. Next steps (open a PR from `arena/a92bdd81-econ`; PR #13 merged into `main` as `b6b9977`)
 
-1. **Open the PR** from this branch into `main`. If the owner has run `./install.sh` once on
-   `192.168.0.149`, `/etc/cron.d/econ-update` will deploy the merge automatically within ~30 min
-   (D21); otherwise pull manually (`cd /opt/econ && git fetch --all && git reset --hard origin/main && ./install.sh`).
-2. **First live check of the headline feeds:** `python3 /opt/econ/dashboard/sources.py --doctor`,
-   section **[9/9] Stock headline feeds**. Expect Google News to answer; Bing/Yahoo are fallbacks.
-   A blocked provider cools down for 30 min and is skipped. Do this before judging the page — the
-   sandbox has no egress to any of the three hosts, so the only evidence so far is faked-transport tests.
-3. **Check `/stocks` after the refresh:** the 7-day strip should show an average and up/down counts,
-   each card should have a sparkline, `7 days` stat, 7-day range, and up to three linked headlines
-   with publisher + age. Confirm a feed failure shows "Headlines unavailable" / per-ticker detail
-   **without** blanking the cards, and that `/api/stocks` exposes `week` and `news`.
-4. **Owner tuning (env only, no code):** `ECON_STOCK_NEWS=0` disables headlines;
-   `ECON_STOCK_NEWS_DAYS=14` widens the window; `ECON_STOCK_NEWS_PER_SYMBOL=2` shortens each card.
-   All require a service restart (`systemctl restart econ-dashboard`).
-5. **Inspect the first real headline list** (fourth live dimension). If Google/Bing return off-topic
-   items, tighten `news.is_relevant` (the stoplist / distinctive-token rule) rather than adding
-   another source. If Yahoo headline RSS is 429 on this IP, it can be dropped from `_URL_BUILDERS`
-   without touching the screen.
-6. The earlier CNBC/Yahoo/Stooq index investigations remain historical. Tencent/Sina restored 9/9
+1. **Open the PR** from this branch into `main` (Session 16 opens it; merge is the owner's call —
+   this session does not deploy). If the owner has run `./install.sh` once on `192.168.0.149`,
+   `/etc/cron.d/econ-update` will deploy the merge automatically within ~30 min (D21); otherwise
+   pull manually (`cd /opt/econ && git fetch --all && git reset --hard origin/main && ./install.sh`).
+2. **First live check of the rebuilt stock cascade (the point of this PR):**
+   `python3 /opt/econ/dashboard/sources.py --doctor`, section **[9/10] US stock history**.
+   Expect: `sina daily K PFE` and `nasdaq historical PFE` → `HTTP 200, N rows`; both
+   `tencent …` probes → `[FAIL] … HTTP 501 body[:120]='<!DOCTYPE html>…waf.tencent.com…'` (the
+   known block, now *visible* instead of a bare curl error); `cascade PFE (batch)` → served by
+   `Sina daily K` or `Nasdaq`. **The sandbox has no egress to any market host, so this run on
+   `root@econ` is the first real evidence** — if Sina/Nasdaq shapes differ live, the printed
+   `body[:120]` is what to bring back.
+3. **Check `/stocks` after the next hourly refresh:** coverage should read 32/32 (or close)
+   with source(s) `Sina daily K`/`Nasdaq`, `/api/stocks` `history_providers` starting with
+   `["sina", …]`, and Data notes naming any blocked host ("blocked by WAF"). If a refresh ever
+   fails completely, the tab must show the `cached · sources blocked · data as of <date>` badge
+   over the last good cards, never "0/32 tickers" (a box that has never succeeded is the only
+   exception). The 7-day strip, sparklines and headlines (Session 15) should still render;
+   confirm `/api/stocks` exposes `week` and `news`.
+4. **First live check of the headline feeds (still pending from Session 15):** `--doctor`
+   section **[10/10] Stock headline feeds**. Expect Google News to answer; Bing/Yahoo are
+   fallbacks. A blocked provider cools down for 30 min and is skipped.
+5. **Owner tuning (env only, no code):** `ECON_STOCK_PACE=0.6` slows the per-host stock sweep
+   if Sina/Nasdaq start complaining; `ECON_STOCK_REQUEST_BUDGET` caps requests per refresh.
+   `ECON_STOCK_NEWS=0` disables headlines; `ECON_STOCK_NEWS_DAYS=14` widens the window;
+   `ECON_STOCK_NEWS_PER_SYMBOL=2` shortens each card. All require a service restart
+   (`systemctl restart econ-dashboard`).
+6. **Inspect the first real headline list.** If Google/Bing return off-topic items, tighten
+   `news.is_relevant` (the stoplist / distinctive-token rule) rather than adding another source.
+   If Yahoo headline RSS is 429 on this IP, it can be dropped from `_URL_BUILDERS` without
+   touching the screen.
+7. The earlier CNBC/Yahoo/Stooq index investigations remain historical. Tencent/Sina restored 9/9
    index coverage in the 2026-10-08 LXC doctor run; revisit those only if coverage regresses.
-7. Recovery if a commit breaks the dashboard:
+   (The Tencent *index-quote* host `qt.gtimg.cn` is unaffected by the K-line WAF block.)
+8. Recovery if a commit breaks the dashboard:
    `rm -f /etc/cron.d/econ-update && cd /opt/econ && git reset --hard <last-good-sha> && ./install.sh`.
 
 ## 9. Session log
+
+### 2026-10-21 — Session 16: fix the dead US stock-history pipeline (D24)
+
+- **Ask:** fix the Stocks tab, which shows "0/32 tickers with usable history … Fresh stock history
+  is unavailable" live on the LXC while board/macro panels are fine. Open a PR; do not deploy.
+  Branch `arena/a92bdd81-econ` from `main` at `b6b9977` (PR #13 / Session 15 merged).
+- **Live evidence supplied (root@econ 192.168.0.149, 2026-10-21 ~00:20 UTC):** Tencent K-line is
+  WAF-blocked on **both** hosts (`web.ifzq.gtimg.cn`, `proxy.finance.qq.com`) — HTTP 501, body
+  `<!DOCTYPE html>…window.location.href=https://waf.tencent.com/501page.html?…` — for
+  percent-encoded and literal commas and for 5-bar and 130-bar windows (encoding/window ruled
+  out). `curl -fsSL` discarded the body, so the app only logged "curl: (22) … HTTP 501".
+  `qt.gtimg.cn/q=usPFE.N` → 200 but `v_pv_none_match` (no US symbols there). Eastmoney
+  `push2his` → HTTP 000 empty reply (do not use). Yahoo 429 (IP-level since 2026-10-08), Stooq
+  connect-timeouts. **Working:** Sina US daily K
+  (`stock.finance.sina.com.cn/usstock/api/jsonp.php/var%20s=/US_MinKService.getDailyK`, JSONP
+  `var s=([{d,o,h,l,c,v}, …])`, history to 1982) and Nasdaq historical
+  (`api.nasdaq.com/api/quote/PFE/historical?…`, JSON `data.tradesTable.rows`, needs browser UA).
+- **New cascade (D24): Sina daily K → Nasdaq historical → Tencent K-line (best effort) → Yahoo
+  spark batch → Stooq**, same `[(date, close, volume)]` row contract, so `stocks.py` (7-day
+  window, risk buckets, filters) is untouched. New `_parse_sina_daily_k_payload` (strips the
+  `var s=(…)` wrapper, sorts, dedupes) and `_parse_nasdaq_historical_payload` (strips `$`/commas,
+  `N/A` volume → None, ascending order; URL spans ~235 calendar days at `limit≥200` for
+  `STOCK_HISTORY_SESSIONS=130`).
+- **Per-host breakers:** `sina:stock.finance.sina.com.cn`, `nasdaq:api.nasdaq.com`,
+  `tencent_kline:<host>` (both K-line hosts now tried independently). Bare `sina` remains the
+  hq.sinajs.cn index-quote breaker, deliberately distinct from the daily-K host so neither Sina
+  service can disable the other; `_stock_breaker_family` prefix-matches host-scoped keys to
+  families (`sina`, `nasdaq`, `tencent_kline`, `yahoo`, `stooq`) for the tab's scoped diagnostics.
+- **WAF detection + body capture:** transport gained `capture_error_body` (drops `curl -f` on
+  the stock path only; `HttpStatusError` carries status+body; never urllib-retried). A body
+  starting `<!DOCTYPE`/`<html` or containing `waf.tencent.com` is a HOST BLOCK → 30-min
+  cooldown for that host only and "blocked by WAF" in the per-ticker diagnostics. Symbol misses
+  (empty payload, HTTP 404) raise `_SymbolMiss` and never trip a breaker.
+- **Pacing/budget:** per-symbol stages keep ≤4 workers; `_pace_host` enforces 0.3 s + jitter
+  between requests to one host (`ECON_STOCK_PACE`); `_RequestBudget` caps one refresh at 128
+  HTTP requests (`ECON_STOCK_REQUEST_BUDGET`), reported as `_meta.history_requests`.
+- **Never blank the tab:** the last good screen was already persisted (memory + disk cache) but
+  `stocks.current_view` suppressed its picks after 5 days, so a long outage still emptied the
+  page. `current_view(keep_stale=…)` (passed by `app.py` while the refresh entry carries an
+  error) now keeps the picks with honest quote ages, status `cached`; the API carries
+  `served_from_cache` + `sources_blocked`; the page shows a
+  `cached · sources blocked · data as of <date>` badge (`.badge.cached`). Default (no refresh
+  error) freshness suppression is unchanged.
+- **Doctor:** new §[9/10] "US stock history" probes Sina, Nasdaq and both Tencent hosts for
+  PFE/usPFE.N printing HTTP status + first 120 body bytes (the absence of this is why the outage
+  looked like a blank tab), plus a real `stock_history_batch(["PFE"])` cascade probe; sections
+  renumbered to /10, headlines now §[10/10]. The short self-test gained a `stock:PFE` check.
+- **Drive-by fix found in verification (pre-existing, Session 15):** `render.build_stocks_page`
+  reassigned `coverage = news.get("coverage")`, so with headlines active the status line printed
+  a dict repr instead of "N/32 tickers with usable history". Renamed to `news_coverage` +
+  regression test.
+- **Verification (offline only — the sandbox has no egress to any market host; Sina/Nasdaq/
+  Tencent fail the TLS handshake here, so live verification must happen on `root@econ`):**
+  `python3 -m py_compile dashboard/*.py tests/*.py` clean; `python3 -m unittest discover -s
+  tests` **127/127 passed** (106 before; 21 new, 5 rewritten). New coverage: real-shape Sina
+  JSONP + Nasdaq payload fixtures, WAF 501 body (as HTTP error and as HTTP 200), Tencent
+  percent-encoding round-trip, per-host breaker isolation (host1 WAF → host2 serves; Sina/hq
+  untouched), "Sina down → Nasdaq serves" at the faked `sources._get` seam, request-budget cap,
+  pacing gap, transport `-f` drop + `HttpStatusError`, doctor probes, cached-badge rendering and
+  the `app.summary()` degrade path. `ECON_DEMO=1` server on :8099: `/`, `/summary`, `/stocks`,
+  `/api/stocks`, `/api/summary`, `/healthz` all 200; `/stocks` renders "32/32 tickers with usable
+  history" and 7 synthetic cards. Demo values are synthetic and say nothing about live picks.
+- **Not done:** no deploy, no live probe — Sina/Nasdaq availability and payload shapes from
+  `192.168.0.149` remain to be confirmed by `--doctor` §[9/10] after merge (§8). No new
+  dependencies, keys, or services; Eastmoney deliberately not used.
 
 ### 2026-10-21 — Session 15: recent stock headlines + 7-day price movement (D22, D23)
 
@@ -358,6 +469,7 @@ Preview (no network needed): `ECON_DEMO=1 python3 dashboard/app.py` → sample d
 - **Ask:** "can we also add a git pull to cron job, i will update crontab so i dont have to manage this manually in future".
 - **Owner's three choices (asked up front, since this restarts a service unattended):** track **`main` only**; **pull + restart with no test/compile gate** (the verify-then-rollback option was explicitly declined); **`install.sh` always installs the cron entry**.
 - **New `tools/auto_update.sh`** (chmod 755): fetch → compare `HEAD` with `origin/main` → `git reset --hard origin/main` → `./install.sh`, and **only when the commit actually changed**, so an idle run never disturbs the dashboard. Extras that come free with doing it sanely: `flock -n` serialisation (an overlapping run skips rather than queues), a branch guard that refuses to run unless the checkout is on the tracked branch (otherwise `git pull` could merge `main` into a feature branch), `ECON_UPDATE_DRY_RUN=1` reporting mode, and UTC-timestamped logging. `git reset --hard` matches the documented manual deploy, so hand edits in `/opt/econ` are discarded by design. Guard the main-guard: `install.sh` still runs its import smoke test before touching systemd, so a commit that breaks Python imports leaves the **running** service on the old code and logs `install.sh failed`.
+- **`install.sh`** now has 5 steps: step [4/5] writes `/etc/cron.d/econ-update` (`SHELL`, `PATH`, `*/30 * * * * root /opt/econ/tools/auto_update.sh >> /var/log/econ-update.log 2>&1`, file `644`), chmods the script `755`, and touches the log. `cron` was added to the apt line so the drop-in actually runs. Schedule overridable: `ECON_UPDATE_SCHEDULE='0 * * * *' ./install.sh`. **`uninstall.sh` removes the cron file too.** Cron filename has no dot (run-parts silently ignores dotted PDATE_DRY_RUN=1` reporting mode, and UTC-timestamped logging. `git reset --hard` matches the documented manual deploy, so hand edits in `/opt/econ` are discarded by design. Guard the main-guard: `install.sh` still runs its import smoke test before touching systemd, so a commit that breaks Python imports leaves the **running** service on the old code and logs `install.sh failed`.
 - **`install.sh`** now has 5 steps: step [4/5] writes `/etc/cron.d/econ-update` (`SHELL`, `PATH`, `*/30 * * * * root /opt/econ/tools/auto_update.sh >> /var/log/econ-update.log 2>&1`, file `644`), chmods the script `755`, and touches the log. `cron` was added to the apt line so the drop-in actually runs. Schedule overridable: `ECON_UPDATE_SCHEDULE='0 * * * *' ./install.sh`. **`uninstall.sh` removes the cron file too.** Cron filename has no dot (run-parts silently ignores dotted names).
 - **Verification:** `bash -n` clean on all four shell files. New `tests/test_auto_update.sh` — **17/17 assertions pass**, fully offline with throwaway local git repos (no network/root/systemd): up-to-date no-op, update applies and runs the stub installer, dry run changes nothing, wrong branch refuses, local edits discarded by `reset --hard`, lock contention skips cleanly. The real `install.sh` was exercised end-to-end in this sandbox with stub `apt-get`/`systemctl` under `sudo -n`: all 5 steps ran, the generated `/etc/cron.d/econ-update` was byte-checked (valid cron.d syntax with the user field), perms `644`/`755` confirmed; sandbox artefacts were removed afterwards. Python suite re-run: **79/79**.
 - **Not done / owner action:** nothing on `192.168.0.149` changed. The cron entry only appears after the owner runs `cd /opt/econ && git pull && ./install.sh` once. PR #11 (7-passer list + cadence) is tracked by `main`, so merging it is what pushes those changes out automatically ~30 min later.
@@ -497,7 +609,7 @@ Preview (no network needed): `ECON_DEMO=1 python3 dashboard/app.py` → sample d
     (2026-10-08, <0.5 s) — small upticks vs 00:52, proving daily quotes flow.
 - **Changes in this session (`arena/cda0bd47-econ`): docs-only, no code touched.**
   `handoff.md`: §2 branch → `arena/cda0bd47-econ`, §4 → v0.5-deployed, new D13 verdict row,
-  §6 rewritten with the 01:13 measurements + unchanged board coverage (indices still 4/9:
+  §6 rewritten with the 01:13 measurements + unchanged board coverage (indices es still 4/9:
   `^stx`/`^dax`/`^ukx`/`^shc`/`^hsi` empty; everything else 100%), §7 risks updated
   (Yahoo settled as IP ban; CNBC 500 suspects ordered; NY Fed/ECB flagged transient-or-redundant),
   §8 replaced with the owner decision (trim-to-4 / keep-9 / investigate-CNBC) + the two curl

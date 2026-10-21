@@ -42,6 +42,7 @@ header h1 span{color:var(--accent)}
 .badge{font-size:11px;padding:2px 8px;border-radius:10px;border:1px solid var(--line);
   color:var(--muted)}
 .badge.demo{color:var(--warn);border-color:var(--warn)}
+.badge.cached{color:var(--warn);border-color:var(--warn);font-weight:700}
 h2{font-size:13px;font-weight:600;letter-spacing:1.5px;text-transform:uppercase;
   color:var(--muted);margin:26px 0 10px;display:flex;align-items:center;gap:10px}
 h2 .src{font-weight:400;letter-spacing:0;text-transform:none;font-size:11px}
@@ -633,6 +634,13 @@ def build_stocks_page(screen, *, demo=False, generated_at=None, refresh=300):
     if screen.get("refresh_error"):
         state_class = "warn"
         message += " Last refresh failed; showing the last successful screen."
+    # A last-good screen served during a source outage must say so up front:
+    # degraded and dated, never silently presented as fresh (or blanked).
+    cached_badge = ""
+    if screen.get("served_from_cache"):
+        as_of_text = esc(screen.get("data_date") or "unknown date")
+        cached_badge = (f'<span class="badge cached">cached · sources blocked · '
+                        f'data as of {as_of_text}</span> ')
     quote_count = int(screen.get("usable_history_count", screen.get("quote_count")) or 0)
     history_count = int(screen.get("history_count") or quote_count)
     universe_size = int(screen.get("universe_size") or 0)
@@ -738,8 +746,11 @@ def build_stocks_page(screen, *, demo=False, generated_at=None, refresh=300):
                 f'{esc(news.get("message") or "no feed answered")} '
                 'Quotes and the stock screen are unaffected.</p>')
         else:
-            coverage = news.get("coverage") or {}
-            providers = ", ".join(str(p) for p in coverage.get("providers") or [])
+            # Named news_coverage: `coverage` above is the "N/32 tickers with
+            # usable history" status string, and shadowing it here printed a
+            # dict repr in the status line whenever headlines were active.
+            news_coverage = news.get("coverage") or {}
+            providers = ", ".join(str(p) for p in news_coverage.get("providers") or [])
             fetched = _myt_timestamp(news.get("fetched_at_utc"))
             news_note = (
                 f'<p class="stock-currency-note">Headlines: '
@@ -910,7 +921,7 @@ def build_stocks_page(screen, *, demo=False, generated_at=None, refresh=300):
   <p>Each card adds the last seven calendar days of price movement and recent third-party headlines. Both are context for your own research: neither is scored, and neither changes which tickers appear.</p>
   <p class="stock-verification">This editable universe is not checked against Moomoo Malaysia’s live symbol availability or order eligibility. Verify each ticker in the app before relying on it; fractional-share eligibility is limited to selected U.S. securities and the list can change. See <a href="https://www.moomoo.com/my/support/topic9_193" target="_blank" rel="noopener noreferrer">Moomoo Malaysia’s fractional-share guide</a>.</p>
 </section>
-<div class="stock-status {state_class}"><b>{message}</b><br>
+<div class="stock-status {state_class}">{cached_badge}<b>{message}</b><br>
   {esc(coverage)} · latest daily-bar date {data_date} (U.S. market session date, Eastern Time) · source(s): {data_source} ·
   screen generated {generated_screen}
   {diagnostics_html}

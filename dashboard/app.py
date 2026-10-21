@@ -297,8 +297,19 @@ def get_data(key):
 
 
 def _stock_breaker_family(name):
-    """Map a breaker key to the stock-history cascade stage that shares it."""
-    if name == "tencent_kline":
+    """Map a breaker key to the stock-history cascade stage that shares it.
+
+    Stock-history breakers are host-scoped (`sina:<host>`, `nasdaq:<host>`,
+    `tencent_kline:<host>`, `stooq:<host>`), so families are matched by
+    prefix. The bare `sina` key is the hq.sinajs.cn *index-quote* breaker,
+    not the daily-K host, and must not leak into Stocks-tab diagnostics —
+    hence the colon in the `sina:` prefix.
+    """
+    if name.startswith("sina:"):
+        return "sina"
+    if name.startswith("nasdaq"):
+        return "nasdaq"
+    if name.startswith("tencent_kline"):
         return "tencent_kline"
     if name == "yahoo":
         return "yahoo"
@@ -308,13 +319,14 @@ def _stock_breaker_family(name):
 
 
 def _stock_provider_issues(providers, screen=None):
-    """Keep stock-tab diagnostics scoped to its three history providers.
+    """Keep stock-tab diagnostics scoped to its history-provider families.
 
-    When `screen` records the providers its latest history refresh actually
-    needed (`history_providers`), only those are reported. The `yahoo` and
-    `stooq:*` breakers are shared with non-stock features (index quotes, spark
-    charts), so their outages must not degrade a fully covered refresh that
-    never touched them. Screens without that scope keep the wider view.
+    When `screen` records the provider families its latest history refresh
+    actually needed (`history_providers`), only those are reported. The
+    `yahoo` and `stooq:*` breakers are shared with non-stock features (index
+    quotes, spark charts), so their outages must not degrade a fully covered
+    refresh that never touched them. Screens without that scope keep the
+    wider view.
     """
     scope = (screen or {}).get("history_providers")
     scope = {str(name) for name in scope} if scope is not None else None
@@ -459,10 +471,17 @@ def summary():
             "window_days": config.STOCK_NEWS_WINDOW_DAYS,
         }
     else:
-        stock_screen_data = stock_screener.current_view(stock_screen_data)
+        # While fresh stock history is failing, serve the last good screen
+        # (memory or disk cache) instead of blanking the tab once its quotes
+        # age past the freshness gate; the page badges it as cached with the
+        # data-as-of date. A total source outage must degrade, not empty.
+        stock_screen_data = stock_screener.current_view(
+            stock_screen_data, keep_stale=bool(stock_error))
         if stock_error:
             stock_screen_data = dict(stock_screen_data)
             stock_screen_data["refresh_error"] = str(stock_error)[:240]
+            stock_screen_data["served_from_cache"] = True
+            stock_screen_data["sources_blocked"] = True
     stock_screen_data = _with_stock_refresh_meta(stock_screen_data, stock_entry)
     stock_screen_data = _with_indicative_myr(
         stock_screen_data, fx_entry, demo=config.DEMO)

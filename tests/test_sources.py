@@ -104,6 +104,48 @@ class TestCurlStatusMarker(TransportCase):
         with mock.patch.object(sources.subprocess, "run", return_value=fake):
             self.assertEqual(sources._curl_get("https://example.invalid/x"), "hello")
 
+    def test_capture_error_body_drops_dash_f_and_raises_with_the_body(self):
+        # The 2026-10-21 Tencent WAF outage: HTTP 501 with an HTML body that
+        # curl -f used to swallow. The capture path must keep both.
+        waf = (b"<!DOCTYPE html><html><body><script>window.location.href="
+               b"\"https://waf.tencent.com/501page.html\";</script></body></html>")
+        fake = types.SimpleNamespace(
+            returncode=0, stdout=waf + b"\n__HTTP__:501", stderr=b"")
+        calls = []
+
+        def fake_run(cmd, **kwargs):
+            calls.append(cmd)
+            return fake
+
+        with mock.patch.object(sources.subprocess, "run", side_effect=fake_run):
+            with self.assertRaises(sources.HttpStatusError) as ctx:
+                sources._curl_get("https://web.ifzq.gtimg.cn/x",
+                                  capture_error_body=True)
+        self.assertEqual(ctx.exception.status, 501)
+        self.assertIn("waf.tencent.com", ctx.exception.body)
+        self.assertIn("HTTP 501", str(ctx.exception))
+        self.assertIn("-sSL", calls[0])
+        self.assertNotIn("-fsSL", calls[0])
+
+    def test_capture_error_body_still_returns_success_bodies(self):
+        fake = types.SimpleNamespace(
+            returncode=0, stdout=b'{"data":{}}\n__HTTP__:200', stderr=b"")
+        with mock.patch.object(sources.subprocess, "run", return_value=fake):
+            self.assertEqual(
+                sources._curl_get("https://example.invalid/x",
+                                  capture_error_body=True),
+                '{"data":{}}')
+
+    def test_captured_http_error_is_not_retried_with_urllib(self):
+        err = sources.HttpStatusError(501, "<!DOCTYPE html>waf.tencent.com")
+        with mock.patch.object(sources, "CURL_BIN", "/usr/bin/curl"), \
+                mock.patch.object(sources, "_curl_get", side_effect=err), \
+                mock.patch.object(sources, "_urllib_get") as urllib_get:
+            with self.assertRaises(sources.HttpStatusError):
+                sources._get("https://web.ifzq.gtimg.cn/x", timeout=5,
+                             capture_error_body=True)
+        urllib_get.assert_not_called()
+
     def test_tcp_connect_failure_does_not_retry_with_urllib(self):
         curl_error = RuntimeError(
             "curl: (28) Failed to connect to stooq.com port 443: Timeout was reached")
@@ -678,6 +720,65 @@ class TestCNBC(TransportCase):
         self.assertEqual(len(cnbc_events), 5)
         batch_events = [e for e in events if e[0] == "batch"]
         self.assertEqual(len(batch_events), 1)
+
+
+class TestStockHistoryDoctor(TransportCase):
+    """--doctor must probe every stock-history host with the body visible."""
+
+    WAF = ("<!DOCTYPE html><html><body>window.location.href="
+           "\"https://waf.tencent.com/501page.html\";</body></html>")
+
+    def test_probes_print_status_and_body_head_pass_or_fail(self):
+        results = {}
+        resets = []
+        real_reset = sources.reset_breakers
+
+        def fake_get(url, timeout=None, **kwargs):
+            self.assertTrue(kwargs.get("capture_error_body"))
+            if "stock.finance.sina.com.cn" in url:
+                return ('var s=([{"d":"2026-10-20","c":"26.10","v":"100"},'
+                        '{"d":"2026-10-19","c":"25.99","v":"90"}]);')
+            if "api.nasdaq.com" in url:
+                return json.dumps({"data": {"tradesTable": {"rows": [
+                    {"date": "10/20/2026", "close": "$26.10", "volume": "100"}]}}})
+            if "web.ifzq.gtimg.cn" in url:
+                raise sources.HttpStatusError(501, self.WAF)
+            if "proxy.finance.qq.com" in url:
+                return json.dumps({"data": {"usPFE.N": {"qfqday": [
+                    ["2026-10-20", "26.0", "26.10", "26.2", "25.9", "100"]]}}})
+            raise AssertionError(f"unexpected URL {url}")
+
+        def runner(checks, width=18):
+            for label, fn in checks:
+                try:
+                    results[label] = ("ok", fn())
+                except Exception as exc:  # noqa: BLE001 — collect like _run_checks
+                    results[label] = ("fail", str(exc))
+
+        canned = {"PFE": {"rows": [("2026-10-20", 26.10, 100.0)],
+                          "source": "Sina daily K"}}
+        with mock.patch.object(sources, "_get", side_effect=fake_get), \
+                mock.patch.object(sources, "stock_history_batch", return_value=canned), \
+                mock.patch.object(sources, "reset_breakers",
+                                  side_effect=lambda p=None: (resets.append(p), real_reset(p))):
+            sources._doctor_stock_history(runner)
+
+        self.assertEqual(
+            sorted(results),
+            ["cascade PFE (batch)", "nasdaq historical PFE", "sina daily K PFE",
+             "tencent proxy.finance.qq.com", "tencent web.ifzq.gtimg.cn"])
+        self.assertEqual(results["sina daily K PFE"][0], "ok")
+        self.assertIn("HTTP 200", results["sina daily K PFE"][1])
+        self.assertIn("body[:120]=", results["sina daily K PFE"][1])
+        self.assertEqual(results["nasdaq historical PFE"][0], "ok")
+        # The whole point of the section: a WAF 501 names itself in the output.
+        self.assertEqual(results["tencent web.ifzq.gtimg.cn"][0], "fail")
+        self.assertIn("HTTP 501", results["tencent web.ifzq.gtimg.cn"][1])
+        self.assertIn("waf.tencent.com", results["tencent web.ifzq.gtimg.cn"][1])
+        self.assertEqual(results["tencent proxy.finance.qq.com"][0], "ok")
+        self.assertEqual(results["cascade PFE (batch)"][0], "ok")
+        for family in ("sina", "nasdaq", "tencent_kline"):
+            self.assertIn(family, resets)
 
 
 
