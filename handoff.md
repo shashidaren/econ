@@ -21,7 +21,7 @@ central-bank policy rates, and the US yield curve (recession indicator).
 | Server IP | `192.168.0.149` (LAN only) |
 | Access | root via SSH; web UI on LAN |
 | Repo | `shashidaren/econ` (this repo) |
-| Working branch | `arena/778fffe7-econ` (this session; branched from `main` at `1b44ab2`, i.e. after PR #11 merged). Everything here is **not deployed** until merged and the LXC's cron pulls `main` |
+| Working branch | `arena/778fffe7-econ` (this session; branched from `main` at `1b44ab2`). **PR #13 merged into `main` as `b6b9977` on 2026-10-21T00:07:36Z**; deployment is now up to the LXC's cron (D21) or a manual pull |
 | Deploy model | server does `git fetch --all && git reset --hard origin/main && ./install.sh` — **now also automatic** (D21) |
 | Unattended updates | **`/etc/cron.d/econ-update`** → `root /opt/econ/tools/auto_update.sh` every **30 min** (schedule set at install time via `ECON_UPDATE_SCHEDULE='0 * * * *' ./install.sh`), log `/var/log/econ-update.log`, lock `/var/lock/econ-update.lock`. Installed by `install.sh` on every run; removed by `uninstall.sh` or `rm -f /etc/cron.d/econ-update` |
 | App dir on server | `/opt/econ` |
@@ -172,7 +172,7 @@ Preview (no network needed): `ECON_DEMO=1 python3 dashboard/app.py` → sample d
 
 ## 6. Current status
 
-- [x] **Recent headlines + 7-day price movement added (this session, `arena/778fffe7-econ`), not deployed.**
+- [x] **Recent headlines + 7-day price movement added (this session), merged in PR #13 as `b6b9977` (2026-10-21T00:07:36Z).** Not yet confirmed on the LXC: the cron entry deploys `main` within ~30 min once `install.sh` has been run there; verify with `--doctor` §[9/9] and a `/stocks` load (§8).
   `/stocks` now shows a 7-day movement strip (average, up/down/flat, strongest/weakest over the
   displayed names), a per-card 12-session sparkline, `1 day`/`7 days`/`20 sessions`/`60 sessions`
   stats, the 7-day high/low range, and up to three recent headlines per ticker. New
@@ -276,11 +276,12 @@ Preview (no network needed): `ECON_DEMO=1 python3 dashboard/app.py` → sample d
   and even `qt.gtimg.cn` fail at the TLS handshake with `SSL_ERROR_SYSCALL` from the sandbox.
   All local tests use faked transports; live provider behavior must be verified on `root@econ`.
 
-## 8. Next steps (open a PR from `arena/778fffe7-econ`; PR #11 already merged into `main` as `1b44ab2`)
+## 8. Next steps (PR #13 merged as `b6b9977`; verify the automatic deploy on the LXC)
 
-1. **Open the PR** from this branch into `main`. If the owner has run `./install.sh` once on
-   `192.168.0.149`, `/etc/cron.d/econ-update` will deploy the merge automatically within ~30 min
-   (D21); otherwise pull manually (`cd /opt/econ && git fetch --all && git reset --hard origin/main && ./install.sh`).
+1. **Deploy:** if the owner has run `./install.sh` once on `192.168.0.149`,
+   `/etc/cron.d/econ-update` deploys the merge automatically within ~30 min (D21); check
+   `tail -20 /var/log/econ-update.log`. Otherwise pull manually
+   (`cd /opt/econ && git fetch --all && git reset --hard origin/main && ./install.sh`).
 2. **First live check of the headline feeds:** `python3 /opt/econ/dashboard/sources.py --doctor`,
    section **[9/9] Stock headline feeds**. Expect Google News to answer; Bing/Yahoo are fallbacks.
    A blocked provider cools down for 30 min and is skipped. Do this before judging the page — the
@@ -350,6 +351,7 @@ Preview (no network needed): `ECON_DEMO=1 python3 dashboard/app.py` → sample d
   `/`, `/summary`, `/stocks`, `/api/stocks`, `/api/summary`, `/healthz` all 200; `/stocks` rendered
   7 synthetic cards with the 7-day strip; `/api/stocks` reported `week` (avg +4.47%, 7 up / 0 down)
   and `news` (7/7 tickers, DEMO items). Demo values are synthetic and say nothing about live picks.
+- **Merged:** PR #13 (`arena/778fffe7-econ` → `main`) merged as `b6b9977` at 2026-10-21T00:07:36Z.
 - **Not done:** no LXC deploy or live feed probe; headline availability from `192.168.0.149`
   remains unverified until `--doctor` §[9/9] runs there. No new dependencies, keys, or services.
 
