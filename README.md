@@ -101,13 +101,21 @@ Preview without a server (sample data): `ECON_DEMO=1 python3 dashboard/app.py`
   intraday prices, or trade execution, and its ranking ignores headlines. A
   share price under $50 does not mean the stock is cheap; this is a research
   shortlist, not a buy signal.
-- History sources: Tencent adjusted daily K-lines (primary), one batched Yahoo
-  Finance spark request (fallback), then Stooq. The page labels Kuala Lumpur and
-  U.S. Eastern timestamps, identifies daily-bar dates as U.S. market session
-  dates, and shows incomplete history/provider errors rather than concealing
-  them. If all providers fail, it shows unavailable/no candidates rather than
-  guessed or synthetic live picks. DEMO mode is synthetic and must not be used
-  for investment decisions.
+- History sources: Sina US daily K, then Nasdaq's historical API, then Tencent
+  K-lines (both hosts — WAF-blocked from the LXC since 2026-10-21, kept as
+  best effort), one batched Yahoo Finance spark request, then Stooq. Every
+  host has its own circuit breaker, requests are paced with jitter under a
+  per-refresh request budget, and WAF/HTML block pages are recognised from
+  the captured response body ("blocked by WAF", 30-minute cooldown for that
+  host only). Tune with `ECON_STOCK_PACE` and `ECON_STOCK_REQUEST_BUDGET`.
+  The page labels Kuala Lumpur and U.S. Eastern timestamps, identifies
+  daily-bar dates as U.S. market session dates, and shows incomplete
+  history/provider errors rather than concealing them. If every provider
+  fails, the tab serves the last good screen (persisted on disk) with a
+  `cached · sources blocked · data as of <date>` badge instead of blanking;
+  only a box that has never completed a refresh shows unavailable/no
+  candidates. Guessed or synthetic live picks are never substituted. DEMO
+  mode is synthetic and must not be used for investment decisions.
 - For Moomoo Malaysia users, the 32-symbol universe remains editable but is not
   validated against Moomoo's live symbol/trading-eligibility list. Confirm the
   ticker in the app. The optional MYR amount uses the dashboard's fresh ECB
@@ -138,7 +146,7 @@ python3 -m unittest discover -s tests -v
 | Annual inflation & GDP growth | World Bank API (`api.worldbank.org`) | Cached last-good snapshot on disk |
 | Central-bank policy rates (`DFF`, `ECBDFR`) | FRED public CSV (`fredgraph.csv?cosd=...`) | NY Fed Markets API (`markets.newyorkfed.org`) for `DFF`; ECB Data Portal (`data-api.ecb.europa.eu`) for `ECBDFR` |
 | US 10Y–2Y yield curve & 10Y breakeven | FRED public CSV (`T10Y2Y`, `T10YIE`) | Official US Treasury Daily Par & Real Yield Curve CSV (`home.treasury.gov`) |
-| Short-term US stock history | Tencent daily K-lines (per configured watchlist symbol) | One Yahoo Finance `v7/finance/spark` batch → Stooq `.us` daily CSV |
+| Short-term US stock history | Sina US daily K (`stock.finance.sina.com.cn` JSONP) | Nasdaq historical API (`api.nasdaq.com`) → Tencent K-lines (both hosts, per-host breakers) → one Yahoo Finance `v7/finance/spark` batch → Stooq `.us` daily CSV; last good screen is served badged `cached · sources blocked · data as of …` if all fail |
 | Stock headlines (context only) | Google News RSS (`news.google.com/rss/search`, 7-day query) | Bing News RSS (`format=RSS`) → Yahoo Finance headline RSS |
 
 ### Resilience
@@ -151,6 +159,13 @@ shares curl's remaining time budget. Confirmed FRED 404s are negatively cached f
 the one wider FRED probe is limited to five years. Slow providers therefore cost milliseconds
 rather than repeated multi-second retries, and the board's footer names the provider that is
 failing instead of leaving an empty card unexplained.
+
+The stock-history cascade goes further because vendor WAFs actively block this IP: each host has
+its **own** breaker (`sina:…`, `nasdaq:…`, `tencent_kline:<host>`), requests are paced per host
+under a per-refresh request budget, and error bodies are **captured** (no `curl -f` on that path)
+so an HTML WAF block page is reported as "blocked by WAF" for that host only. `--doctor` §[9/10]
+probes Sina, Nasdaq and both Tencent hosts and prints the HTTP status plus the first 120 bytes of
+each body, so a total stock outage names itself instead of looking like a blank tab.
 
 `/api/summary` includes the breaker state (`providers`), so the board is debuggable with `curl`.
 

@@ -32,6 +32,62 @@ def _spec(symbol, sector="Technology"):
     return (symbol, f"{symbol} Corp", sector, f"us{symbol}.OQ")
 
 
+# Wire-format fixtures from the live LXC probes of 2026-10-21 (values are
+# illustrative; the envelopes, field names and encodings are the real ones).
+SINA_DAILY_K = (
+    'var s=([{"d":"2026-10-16","o":"25.400","h":"25.900","l":"25.210","c":"25.750","v":"21483600"},'
+    '{"d":"2026-10-15","o":"25.100","h":"25.550","l":"24.980","c":"25.380","v":"19876543"},'
+    '{"d":"2026-10-15","o":"25.100","h":"25.550","l":"24.980","c":"25.420","v":"19876543"},'
+    '{"d":"2026-10-19","o":"25.800","h":"26.100","l":"25.600","c":"25.990","v":""},'
+    '{"d":"bad","o":"1","h":"1","l":"1","c":"1","v":"1"}]);'
+)
+NASDAQ_HISTORICAL = {
+    "data": {"symbol": "PFE", "totalRecords": 3, "tradesTable": {
+        "asOf": None,
+        "headers": {"date": "Date", "close": "Close/Last", "volume": "Volume",
+                    "open": "Open", "high": "High", "low": "Low"},
+        "rows": [
+            {"date": "10/20/2026", "close": "$26.10", "volume": "21,483,600",
+             "open": "$25.80", "high": "$26.25", "low": "$25.61"},
+            {"date": "10/19/2026", "close": "$25.99", "volume": "N/A",
+             "open": "$25.80", "high": "$26.10", "low": "$25.60"},
+            {"date": "10/16/2026", "close": "$25.75", "volume": "19,876,543",
+             "open": "$25.40", "high": "$25.90", "low": "$25.21"},
+        ]}},
+    "message": None,
+    "status": {"rCode": 200, "bCodeMessage": None, "developerMessage": None},
+}
+TENCENT_WAF_501 = (
+    "<!DOCTYPE html><html><head><meta charset=\"utf-8\"><title>501</title></head>"
+    "<body><script>window.location.href="
+    "\"https://waf.tencent.com/501page.html?u=https://web.ifzq.gtimg.cn/\";"
+    "</script></body></html>"
+)
+
+
+def _sina_body(rows):
+    """Serialise [(date, close, volume)] as a Sina daily-K JSONP body."""
+    items = ",".join(
+        json.dumps({"d": d, "o": str(c), "h": str(c), "l": str(c),
+                    "c": str(c), "v": str(int(v))})
+        for d, c, v in rows)
+    return f"var s=([{items}]);"
+
+
+def _nasdaq_body(rows):
+    """Serialise rows as a Nasdaq historical body (newest first, $/commas)."""
+    return json.dumps({"data": {"tradesTable": {"rows": [
+        {"date": f"{d[5:7]}/{d[8:10]}/{d[:4]}", "close": f"${c:,.2f}",
+         "volume": f"{int(v):,}", "open": f"${c:,.2f}",
+         "high": f"${c:,.2f}", "low": f"${c:,.2f}"}
+        for d, c, v in reversed(rows)]}}})
+
+
+def _tencent_body(code, rows):
+    return json.dumps({"code": 0, "data": {code: {"qfqday": [
+        [d, str(c), str(c), str(c), str(c), str(v)] for d, c, v in rows]}}})
+
+
 class StockScreenTests(unittest.TestCase):
     def test_ranks_every_passer_and_reports_risk(self):
         universe = [_spec(f"T{i}", sector=f"Sector {i}") for i in range(5)]
@@ -107,6 +163,97 @@ class StockScreenTests(unittest.TestCase):
         stale = stocks.current_view(result, as_of=date.today() + timedelta(days=6))
         self.assertEqual(stale["status"], "stale")
         self.assertEqual(stale["candidates"], [])
+
+    def test_cached_screen_is_served_past_the_gate_when_sources_are_blocked(self):
+        # A total source outage must degrade, not empty, the tab: with
+        # keep_stale the last good screen keeps its picks (honestly aged)
+        # and is marked "cached" for the page badge.
+        universe = [_spec("FRESH")]
+        data = {"FRESH": {"rows": _history(), "source": "test"}}
+        result = stocks.build_screen(universe, data)
+        self.assertEqual(result["status"], "ok")
+        cached = stocks.current_view(
+            result, as_of=date.today() + timedelta(days=9), keep_stale=True)
+        self.assertEqual(cached["status"], "cached")
+        self.assertEqual(len(cached["candidates"]), 1)
+        self.assertEqual(cached["candidates"][0]["symbol"], "FRESH")
+        self.assertGreater(cached["candidates"][0]["quote_age_days"], 5)
+        self.assertEqual(cached["eligible_count"], result["eligible_count"])
+        # Within the freshness gate nothing changes.
+        still_ok = stocks.current_view(
+            result, as_of=date.today() + timedelta(days=2), keep_stale=True)
+        self.assertEqual(still_ok["status"], "ok")
+        self.assertEqual(len(still_ok["candidates"]), 1)
+
+    def test_cached_screen_page_shows_badge_and_keeps_cards(self):
+        universe = [_spec("AAA"), _spec("BBB")]
+        data = {
+            "AAA": {"rows": _history(start=15, growth=0.006), "source": "Sina daily K"},
+            "BBB": {"rows": _history(start=18, growth=0.005), "source": "Sina daily K"},
+        }
+        screen = stocks.build_screen(universe, data)
+        cached = stocks.current_view(
+            screen, as_of=date.today() + timedelta(days=9), keep_stale=True)
+        cached["refresh_error"] = "RuntimeError: no usable US stock histories"
+        cached["served_from_cache"] = True
+        cached["sources_blocked"] = True
+        page = render.build_stocks_page(cached, demo=False)
+        self.assertIn("cached · sources blocked · data as of", page)
+        self.assertIn(str(screen["data_date"]), page)
+        self.assertEqual(page.count('class="stock-card"'), 2)
+        self.assertIn("2/2 tickers with usable history", page)
+        self.assertNotIn("0/2 tickers", page)
+        self.assertIn("Last refresh failed; showing the last successful screen.", page)
+
+    def test_coverage_line_survives_attached_news(self):
+        # Regression: the headlines block used to shadow the `coverage`
+        # status string with the news coverage dict, printing a dict repr
+        # ("{'symbols': 7, ...}") instead of "N/32 tickers with usable
+        # history" whenever headlines were active.
+        universe = [_spec("AAA"), _spec("BBB")]
+        data = {
+            "AAA": {"rows": _history(start=15, growth=0.006), "source": "Sina daily K"},
+            "BBB": {"rows": _history(start=18, growth=0.005), "source": "Sina daily K"},
+        }
+        screen = stocks.build_screen(universe, data)
+        screen["news"] = {
+            "status": "ok",
+            "message": "Recent headlines found for 2 of 2 displayed tickers.",
+            "items": {}, "errors": {},
+            "coverage": {"symbols": 2, "with_headlines": 2, "headlines": 4,
+                         "providers": ["Google News RSS"]},
+        }
+        page = render.build_stocks_page(screen, demo=False)
+        self.assertIn("2/2 tickers with usable history", page)
+        self.assertNotIn("with_headlines", page)
+        self.assertIn("Google News RSS", page)
+
+    def test_summary_serves_last_good_screen_with_blocked_flags(self):
+        universe_rows = _history()
+        screen = stocks.build_screen(
+            [_spec("FRESH")],
+            {"FRESH": {"rows": universe_rows, "source": "test"}})
+        # Age the screen past the freshness gate, then fail the refresh.
+        screen = dict(screen)
+        old = (date.today() - timedelta(days=9)).isoformat()
+        screen["data_date"] = old
+        screen["candidates"] = [dict(c, as_of=old) for c in screen["candidates"]]
+        saved = dict(app.CACHE)
+        try:
+            app.CACHE.clear()
+            app.CACHE["stock_screen"] = {
+                "data": screen, "at": time.time(), "ttl": 3600,
+                "err": "RuntimeError: no usable US stock histories (blocked by WAF)",
+            }
+            view = app.summary()["stock_screen"]
+        finally:
+            app.CACHE.clear()
+            app.CACHE.update(saved)
+        self.assertTrue(view["served_from_cache"])
+        self.assertTrue(view["sources_blocked"])
+        self.assertEqual(view["status"], "cached")
+        self.assertEqual(len(view["candidates"]), 1)
+        self.assertEqual(view["data_date"], old)
 
     def test_empty_screen_exposes_unavailable_data_instead_of_fake_picks(self):
         result = stocks.build_screen([_spec("MISSING")], {}, fetch_error="feed blocked")
@@ -326,6 +473,21 @@ class StockCurrencyTests(unittest.TestCase):
 
 
 class StockDataAdapterTests(unittest.TestCase):
+    def setUp(self):
+        sources.reset_breakers()
+        sources._HOST_LAST_AT.clear()
+        self._pace = sources.STOCK_PACE_SECONDS
+        sources.STOCK_PACE_SECONDS = 0  # pacing is covered by its own test
+        self._cookie_setting = sources.YAHOO_USE_COOKIE
+        sources.YAHOO_USE_COOKIE = False
+        sources._YAHOO_LAST_AT = 0.0
+
+    def tearDown(self):
+        sources.STOCK_PACE_SECONDS = self._pace
+        sources.YAHOO_USE_COOKIE = self._cookie_setting
+        sources.reset_breakers()
+        sources._HOST_LAST_AT.clear()
+
     def test_tencent_kline_parser_reads_daily_close_and_volume(self):
         payload = {
             "code": 0,
@@ -345,6 +507,77 @@ class StockDataAdapterTests(unittest.TestCase):
         rows = sources._parse_tencent_kline_payload(body, "usTEST.N")
         self.assertEqual(rows, [("2026-10-09", 2.0, None)])
 
+    def test_sina_daily_k_parser_sorts_dedupes_and_handles_missing_volume(self):
+        rows = sources._parse_sina_daily_k_payload(SINA_DAILY_K)
+        self.assertEqual(rows, [
+            ("2026-10-15", 25.42, 19876543.0),   # duplicate date: last wins
+            ("2026-10-16", 25.75, 21483600.0),
+            ("2026-10-19", 25.99, None),          # empty volume field
+        ])
+
+    def test_sina_daily_k_parser_accepts_wrapper_variants_and_rejects_junk(self):
+        inner = '[{"d":"2026-10-20","c":"26.10","v":"100"}]'
+        expected = [("2026-10-20", 26.10, 100.0)]
+        self.assertEqual(sources._parse_sina_daily_k_payload(f"var s=({inner});"), expected)
+        self.assertEqual(sources._parse_sina_daily_k_payload(f"var s={inner};"), expected)
+        self.assertEqual(sources._parse_sina_daily_k_payload(inner), expected)
+        self.assertEqual(sources._parse_sina_daily_k_payload("var s=(null);"), [])
+        self.assertEqual(sources._parse_sina_daily_k_payload(""), [])
+        self.assertEqual(sources._parse_sina_daily_k_payload(TENCENT_WAF_501), [])
+        self.assertEqual(sources._parse_sina_daily_k_payload({"d": "x"}), [])
+
+    def test_nasdaq_parser_strips_dollar_and_commas_and_sorts_ascending(self):
+        expected = [
+            ("2026-10-16", 25.75, 19876543.0),
+            ("2026-10-19", 25.99, None),          # "N/A" volume
+            ("2026-10-20", 26.10, 21483600.0),
+        ]
+        self.assertEqual(
+            sources._parse_nasdaq_historical_payload(NASDAQ_HISTORICAL), expected)
+        self.assertEqual(
+            sources._parse_nasdaq_historical_payload(json.dumps(NASDAQ_HISTORICAL)),
+            expected)
+
+    def test_nasdaq_parser_handles_null_data_and_junk(self):
+        self.assertEqual(sources._parse_nasdaq_historical_payload(
+            {"data": None, "status": {"rCode": 400}}), [])
+        self.assertEqual(sources._parse_nasdaq_historical_payload("not json"), [])
+        self.assertEqual(sources._parse_nasdaq_historical_payload([]), [])
+
+    def test_waf_block_body_detection(self):
+        self.assertTrue(sources._is_waf_block_body(TENCENT_WAF_501))
+        self.assertTrue(sources._is_waf_block_body("  \n<HTML><body>blocked</body>"))
+        self.assertTrue(sources._is_waf_block_body("<!doctype html>challenge"))
+        self.assertTrue(sources._is_waf_block_body(
+            "anything containing waf.tencent.com in the middle"))
+        self.assertFalse(sources._is_waf_block_body(SINA_DAILY_K))
+        self.assertFalse(sources._is_waf_block_body('{"data":{"tradesTable":{}}}'))
+        self.assertFalse(sources._is_waf_block_body("kline_dayqfq({\"data\":{}})"))
+        self.assertFalse(sources._is_waf_block_body(""))
+        self.assertFalse(sources._is_waf_block_body(None))
+
+    def test_tencent_kline_url_param_survives_percent_encoding(self):
+        # Live evidence: %2C-encoded and literal commas both drew the WAF 501,
+        # so encoding is not the outage cause; the URL builder must simply
+        # round-trip the documented param shape.
+        import urllib.parse
+        url = sources._tencent_kline_url(
+            "https://web.ifzq.gtimg.cn/appstock/app/fqkline/get", "usPFE.N", days=130)
+        self.assertIn("%2C", url)
+        params = urllib.parse.parse_qs(urllib.parse.urlparse(url).query)
+        self.assertEqual(params["param"], ["usPFE.N,day,,,130,qfq"])
+
+    def test_nasdaq_url_spans_enough_calendar_days_for_130_sessions(self):
+        import urllib.parse
+        from datetime import date as _date
+        url = sources._nasdaq_historical_url("PFE", days=130)
+        params = urllib.parse.parse_qs(urllib.parse.urlparse(url).query)
+        span = (_date.fromisoformat(params["todate"][0])
+                - _date.fromisoformat(params["fromdate"][0])).days
+        self.assertGreaterEqual(span, 200)  # >=61 sessions with big headroom
+        self.assertGreaterEqual(int(params["limit"][0]), 200)
+        self.assertIn("/api/quote/PFE/historical", url)
+
     def test_yahoo_chart_parser_keeps_volume_for_screener(self):
         result = {
             "timestamp": [1791417600, 1791504000],
@@ -355,35 +588,58 @@ class StockDataAdapterTests(unittest.TestCase):
         self.assertEqual(rows[0][1:], (10.0, 100.0))
         self.assertIsNone(rows[1][2])
 
-    def test_stock_history_uses_yahoo_batch_as_fallback_for_tencent_misses(self):
+    def test_stock_history_cascade_falls_from_sina_to_nasdaq(self):
         rows = _history(days=70)
-        tencent_rows = [(d, c, v) for d, c, v in rows]
 
-        def fake_tencent(code, days=130):
-            if code == "usAAA.OQ":
-                return tencent_rows
-            raise RuntimeError("Tencent symbol unavailable")
+        def fake_sina(symbol, days=130, budget=None):
+            if symbol == "AAA":
+                return rows
+            raise RuntimeError("Sina symbol unavailable")
 
-        yahoo_rows = [(d, c, v) for d, c, v in rows]
-        with mock.patch.object(sources, "_tencent_us_stock_history", side_effect=fake_tencent), \
-                mock.patch.object(sources, "_yahoo_spark_batch", return_value={"BBB": yahoo_rows}) as yahoo, \
+        with mock.patch.object(sources, "_sina_us_daily_k_history", side_effect=fake_sina), \
+                mock.patch.object(sources, "_nasdaq_us_stock_history", return_value=rows) as nasdaq, \
+                mock.patch.object(sources, "_tencent_us_stock_history") as tencent, \
+                mock.patch.object(sources, "_yahoo_spark_batch") as yahoo, \
                 mock.patch.object(sources, "_stooq_us_stock_history") as stooq:
             out = sources.stock_history_batch(
                 ["AAA", "BBB"], {"AAA": "usAAA.OQ", "BBB": "usBBB.N"}, days=70)
-        self.assertEqual(out["AAA"]["source"], "Tencent K-line")
+        self.assertEqual(out["AAA"]["source"], "Sina daily K")
+        self.assertEqual(out["BBB"]["source"], "Nasdaq")
+        self.assertEqual(out["_meta"]["history_providers"], ["sina", "nasdaq"])
+        nasdaq.assert_called_once_with("BBB", days=70, budget=mock.ANY)
+        tencent.assert_not_called()
+        yahoo.assert_not_called()
+        stooq.assert_not_called()
+
+    def test_stock_history_uses_yahoo_batch_after_per_symbol_misses(self):
+        rows = _history(days=70)
+        miss = RuntimeError("symbol unavailable")
+        with mock.patch.object(sources, "_sina_us_daily_k_history", side_effect=miss), \
+                mock.patch.object(sources, "_nasdaq_us_stock_history", side_effect=miss), \
+                mock.patch.object(sources, "_tencent_us_stock_history", side_effect=miss), \
+                mock.patch.object(sources, "_yahoo_spark_batch", return_value={"BBB": rows}) as yahoo, \
+                mock.patch.object(sources, "_stooq_us_stock_history") as stooq:
+            out = sources.stock_history_batch(
+                ["BBB"], {"BBB": "usBBB.N"}, days=70)
         self.assertEqual(out["BBB"]["source"], "Yahoo Finance")
+        self.assertEqual(out["_meta"]["history_providers"],
+                         ["sina", "nasdaq", "tencent_kline", "yahoo"])
         yahoo.assert_called_once_with(["BBB"], days=70, include_volume=True)
         stooq.assert_not_called()
 
     def test_partial_provider_failures_are_reported_for_unresolved_tickers(self):
         rows = _history(days=70)
 
-        def fake_tencent(code, days=130):
-            if code == "usGOOD.OQ":
+        def fake_sina(symbol, days=130, budget=None):
+            if symbol == "GOOD":
                 return rows
-            raise RuntimeError("Tencent symbol unavailable")
+            raise RuntimeError("Sina symbol unavailable")
 
-        with mock.patch.object(sources, "_tencent_us_stock_history", side_effect=fake_tencent), \
+        with mock.patch.object(sources, "_sina_us_daily_k_history", side_effect=fake_sina), \
+                mock.patch.object(sources, "_nasdaq_us_stock_history",
+                                  side_effect=RuntimeError("Nasdaq symbol unavailable")), \
+                mock.patch.object(sources, "_tencent_us_stock_history",
+                                  side_effect=RuntimeError("Tencent symbol unavailable")), \
                 mock.patch.object(sources, "provider_available", return_value=True), \
                 mock.patch.object(sources, "_yahoo_spark_batch", return_value={}), \
                 mock.patch.object(sources, "_stooq_us_stock_history",
@@ -395,11 +651,125 @@ class StockDataAdapterTests(unittest.TestCase):
         diagnostics = out["_meta"]["history_errors"]
         self.assertEqual(diagnostics["count"], 1)
         self.assertIn("MISS", diagnostics["samples"])
-        self.assertIn("Tencent K-line", diagnostics["samples"]["MISS"])
-        self.assertIn("Yahoo Finance", diagnostics["samples"]["MISS"])
-        self.assertIn("Stooq", diagnostics["samples"]["MISS"])
+        for label in ("Sina daily K", "Nasdaq", "Tencent K-line", "Yahoo Finance", "Stooq"):
+            self.assertIn(label, diagnostics["samples"]["MISS"])
         screen = stocks.build_screen([_spec("GOOD"), _spec("MISS")], out)
         self.assertEqual(screen["history_errors"]["count"], 1)
+
+    def test_sina_down_nasdaq_serves_the_cascade(self):
+        # The required end-to-end shape: transport faked at sources._get, the
+        # real cascade, parsers, pacing and breakers all run.
+        rows = _history(days=70)
+
+        def fake_get(url, timeout=None, **kwargs):
+            if "stock.finance.sina.com.cn" in url:
+                raise RuntimeError("curl: (28) Failed to connect: Timeout was reached")
+            if "api.nasdaq.com" in url:
+                return _nasdaq_body(rows)
+            raise AssertionError(f"unexpected URL {url}")
+
+        with mock.patch.object(sources, "_get", side_effect=fake_get):
+            out = sources.stock_history_batch(
+                ["PFE"], {"PFE": "usPFE.N"}, days=70)
+
+        self.assertEqual(out["PFE"]["source"], "Nasdaq")
+        self.assertEqual(out["PFE"]["rows"][-1][0], rows[-1][0])
+        self.assertEqual(out["_meta"]["history_providers"], ["sina", "nasdaq"])
+        # Sina's host breaker cools after the connect timeout; Nasdaq's does not.
+        self.assertFalse(sources.provider_available(sources.SINA_KLINE_KEY))
+        self.assertTrue(sources.provider_available(sources.NASDAQ_KEY))
+
+    def test_waf_501_cools_only_the_blocked_tencent_host(self):
+        # Per-host isolation: web.ifzq.gtimg.cn is WAF-blocked (HTTP 501 with
+        # the captured body), proxy.finance.qq.com still serves, and neither
+        # Sina host breaker is touched by Tencent's block.
+        rows = _history(days=70)
+
+        def fake_get(url, timeout=None, **kwargs):
+            if "stock.finance.sina.com.cn" in url:
+                return "var s=([]);"  # answered, no K-lines: a symbol miss
+            if "api.nasdaq.com" in url:
+                return json.dumps({"data": None, "status": {"rCode": 400}})
+            if "web.ifzq.gtimg.cn" in url:
+                raise sources.HttpStatusError(501, TENCENT_WAF_501)
+            if "proxy.finance.qq.com" in url:
+                return _tencent_body("usPFE.N", rows)
+            raise AssertionError(f"unexpected URL {url}")
+
+        with mock.patch.object(sources, "_get", side_effect=fake_get):
+            out = sources.stock_history_batch(
+                ["PFE"], {"PFE": "usPFE.N"}, days=70)
+
+        self.assertEqual(out["PFE"]["source"], "Tencent K-line")
+        self.assertFalse(sources.provider_available("tencent_kline:web.ifzq.gtimg.cn"))
+        self.assertTrue(sources.provider_available("tencent_kline:proxy.finance.qq.com"))
+        self.assertTrue(sources.provider_available(sources.SINA_KLINE_KEY))
+        self.assertTrue(sources.provider_available(sources.NASDAQ_KEY))
+        self.assertTrue(sources.provider_available("sina"))  # hq index quotes
+        status = {s["provider"]: s for s in sources.provider_status()}
+        self.assertIn("blocked by WAF",
+                      status["tencent_kline:web.ifzq.gtimg.cn"]["reason"])
+        self.assertEqual(status["tencent_kline:web.ifzq.gtimg.cn"]["state"], "cooling")
+
+    def test_waf_html_body_on_http_200_is_also_a_host_block(self):
+        # Some WAFs serve the block page with HTTP 200; the body check must
+        # catch it before the parser ever sees HTML.
+        def fake_get(url, timeout=None, **kwargs):
+            if "stock.finance.sina.com.cn" in url:
+                return "var s=([]);"
+            if "api.nasdaq.com" in url:
+                return json.dumps({"data": None})
+            if "ifzq.gtimg.cn" in url or "proxy.finance.qq.com" in url:
+                return TENCENT_WAF_501
+            if "finance.yahoo.com" in url:
+                raise RuntimeError("curl: (22) error: 429 HTTP 429")
+            if "stooq." in url:
+                raise RuntimeError("curl: (28) Failed to connect: Timeout was reached")
+            raise AssertionError(f"unexpected URL {url}")
+
+        with mock.patch.object(sources, "_get", side_effect=fake_get):
+            with self.assertRaises(RuntimeError) as ctx:
+                sources.stock_history_batch(["PFE"], {"PFE": "usPFE.N"}, days=70)
+        self.assertIn("blocked by WAF", str(ctx.exception))
+        self.assertFalse(sources.provider_available("tencent_kline:web.ifzq.gtimg.cn"))
+        self.assertFalse(sources.provider_available("tencent_kline:proxy.finance.qq.com"))
+        # Symbol misses on Sina/Nasdaq never trip their breakers.
+        self.assertTrue(sources.provider_available(sources.SINA_KLINE_KEY))
+        self.assertTrue(sources.provider_available(sources.NASDAQ_KEY))
+
+    def test_request_budget_caps_a_refresh(self):
+        rows = _history(days=70)
+        calls = []
+
+        def fake_get(url, timeout=None, **kwargs):
+            calls.append(url)
+            return _sina_body(rows)
+
+        with mock.patch.object(sources, "STOCK_REFRESH_REQUEST_BUDGET", 1), \
+                mock.patch.object(sources, "_get", side_effect=fake_get):
+            out = sources.stock_history_batch(
+                ["AAA", "BBB"], {"AAA": "usAAA.OQ", "BBB": "usBBB.N"}, days=70)
+        self.assertEqual(len(calls), 1)  # the whole refresh spent one request
+        self.assertEqual(len([k for k in out if k != "_meta"]), 1)
+        self.assertEqual(out["_meta"]["history_requests"], 1)
+        samples = out["_meta"]["history_errors"]["samples"]
+        self.assertEqual(len(samples), 1)
+        self.assertIn("request budget exhausted", next(iter(samples.values())))
+
+    def test_pace_host_enforces_a_minimum_gap_per_host(self):
+        sources._HOST_LAST_AT["pace-test"] = time.time()
+        started = time.monotonic()
+        with mock.patch.object(sources.random, "uniform", return_value=0.0):
+            sources._pace_host("pace-test", interval=0.05)
+        self.assertGreaterEqual(time.monotonic() - started, 0.04)
+        # A different host key is not delayed by the first host's timestamp.
+        started = time.monotonic()
+        sources._pace_host("pace-test-other", interval=0.05)
+        self.assertLess(time.monotonic() - started, 0.04)
+        # Non-positive interval disables pacing entirely.
+        started = time.monotonic()
+        sources._pace_host("pace-test", interval=0)
+        self.assertLess(time.monotonic() - started, 0.04)
 
 
 class StockProviderScopeTests(unittest.TestCase):
@@ -407,15 +777,20 @@ class StockProviderScopeTests(unittest.TestCase):
 
     def setUp(self):
         sources.reset_breakers()
+        sources._HOST_LAST_AT.clear()
+        self._pace = sources.STOCK_PACE_SECONDS
+        sources.STOCK_PACE_SECONDS = 0
         self._cookie_setting = sources.YAHOO_USE_COOKIE
         sources.YAHOO_USE_COOKIE = False
         sources._YAHOO_LAST_AT = 0.0
 
     def tearDown(self):
+        sources.STOCK_PACE_SECONDS = self._pace
         sources.YAHOO_USE_COOKIE = self._cookie_setting
         sources.reset_breakers()
+        sources._HOST_LAST_AT.clear()
 
-    def test_full_tencent_coverage_ignores_unrelated_global_breakers(self):
+    def test_full_sina_coverage_ignores_unrelated_global_breakers(self):
         rows = _history(days=70)
         # Board-wide trouble unrelated to stocks: index quotes failing on Stooq
         # and spark charts failing on Yahoo open their shared breakers.
@@ -425,19 +800,23 @@ class StockProviderScopeTests(unittest.TestCase):
         sources.note_provider_failure(
             "yahoo", "curl: (22) error: 429 HTTP 429", rate_limited=True)
 
-        with mock.patch.object(sources, "_tencent_us_stock_history",
-                               side_effect=lambda code, days=130: rows) as tencent, \
+        with mock.patch.object(sources, "_sina_us_daily_k_history",
+                               side_effect=lambda symbol, days=130, budget=None: rows) as sina, \
+                mock.patch.object(sources, "_nasdaq_us_stock_history") as nasdaq, \
+                mock.patch.object(sources, "_tencent_us_stock_history") as tencent, \
                 mock.patch.object(sources, "_yahoo_spark_batch") as yahoo, \
                 mock.patch.object(sources, "_stooq_us_stock_history") as stooq:
             out = sources.stock_history_batch(
                 ["AAA", "BBB"], {"AAA": "usAAA.OQ", "BBB": "usBBB.N"}, days=70)
 
         self.assertEqual(set(out) - {"_meta"}, {"AAA", "BBB"})
-        self.assertTrue(all(out[s]["source"] == "Tencent K-line"
+        self.assertTrue(all(out[s]["source"] == "Sina daily K"
                             for s in ("AAA", "BBB")))
-        self.assertEqual(out["_meta"]["history_providers"], ["tencent_kline"])
+        self.assertEqual(out["_meta"]["history_providers"], ["sina"])
         self.assertNotIn("history_errors", out["_meta"])
-        self.assertEqual(tencent.call_count, 2)
+        self.assertEqual(sina.call_count, 2)
+        nasdaq.assert_not_called()
+        tencent.assert_not_called()
         yahoo.assert_not_called()
         stooq.assert_not_called()
 
@@ -464,15 +843,17 @@ class StockProviderScopeTests(unittest.TestCase):
         rows = _history(days=70)
 
         def fake_get(url, timeout=None, **kwargs):
-            if "web.ifzq.gtimg.cn" in url:
-                if "usGOOD.OQ" in url:
-                    payload = {"data": {"usGOOD.OQ": {"qfqday": [
-                        [d, str(c), str(c), str(c), str(c), str(v)]
-                        for d, c, v in rows]}}}
-                    return json.dumps(payload)
+            if "stock.finance.sina.com.cn" in url:
+                if "symbol=GOOD" in url:
+                    return _sina_body(rows)
                 # A per-symbol mapping miss: no K-lines, and by design no
-                # breaker trip for the shared Tencent host.
-                return json.dumps({"data": {}})
+                # breaker trip for the shared Sina host.
+                return "var s=([]);"
+            if "api.nasdaq.com" in url:
+                raise RuntimeError(
+                    "curl: (28) Failed to connect: Timeout was reached")
+            if "ifzq.gtimg.cn" in url or "proxy.finance.qq.com" in url:
+                raise sources.HttpStatusError(501, TENCENT_WAF_501)
             if "finance.yahoo.com" in url:
                 raise RuntimeError("curl: (22) error: 429 HTTP 429")
             if "stooq." in url:
@@ -485,23 +866,35 @@ class StockProviderScopeTests(unittest.TestCase):
                 ["GOOD", "MISS"], {"GOOD": "usGOOD.OQ", "MISS": "usMISS.OQ"},
                 days=70)
 
-        self.assertEqual(out["GOOD"]["source"], "Tencent K-line")
+        self.assertEqual(out["GOOD"]["source"], "Sina daily K")
         self.assertEqual(out["_meta"]["history_providers"],
-                         ["tencent_kline", "yahoo", "stooq"])
+                         ["sina", "nasdaq", "tencent_kline", "yahoo", "stooq"])
         diagnostics = out["_meta"]["history_errors"]
         self.assertEqual(diagnostics["count"], 1)
-        self.assertIn("Tencent K-line", diagnostics["samples"]["MISS"])
-        self.assertIn("Yahoo Finance", diagnostics["samples"]["MISS"])
-        self.assertIn("Stooq", diagnostics["samples"]["MISS"])
+        for label in ("Sina daily K", "Nasdaq", "Tencent K-line",
+                      "blocked by WAF", "Yahoo Finance", "Stooq"):
+            self.assertIn(label, diagnostics["samples"]["MISS"])
 
-        # Yahoo and Stooq were genuinely attempted for this refresh, so their
-        # breaker states are in scope; the global list alone is not trusted.
+        # Per-host isolation, live: Tencent's WAF block cools only its hosts;
+        # the Sina daily-K host that served GOOD is untouched, as is the
+        # unrelated hq.sinajs.cn index-quote breaker ("sina").
+        self.assertTrue(sources.provider_available(sources.SINA_KLINE_KEY))
+        self.assertTrue(sources.provider_available("sina"))
+        self.assertFalse(sources.provider_available("tencent_kline:web.ifzq.gtimg.cn"))
+        self.assertFalse(sources.provider_available("tencent_kline:proxy.finance.qq.com"))
+
+        # Nasdaq, Tencent, Yahoo and Stooq were genuinely attempted for this
+        # refresh, so their breaker states are in scope; the global list
+        # alone is not trusted.
         screen = stocks.build_screen([_spec("GOOD"), _spec("MISS")], out)
         self.assertEqual(screen["history_errors"]["count"], 1)
         issues = app._stock_provider_issues(sources.provider_status(), screen)
         names = {issue["provider"] for issue in issues}
         self.assertIn("yahoo", names)
+        self.assertIn("nasdaq:api.nasdaq.com", names)
+        self.assertIn("tencent_kline:web.ifzq.gtimg.cn", names)
         self.assertTrue(any(name.startswith("stooq") for name in names))
+        self.assertNotIn("sina", names)
 
         screen["provider_issues"] = issues
         page = render.build_stocks_page(screen, demo=False)
@@ -509,7 +902,11 @@ class StockProviderScopeTests(unittest.TestCase):
         self.assertIn("Data notes", page)
         self.assertIn("1 ticker(s) lacked usable history", page)
         self.assertIn("MISS", page)
-        self.assertIn("yahoo: cooling down", page)
+        self.assertIn("blocked by WAF", page)
+        # The page prints only the first four provider lines (longest
+        # cooldown first): Nasdaq's 30 min line outranks Yahoo's 15 min one,
+        # but Yahoo's 429 still shows in the per-ticker sample above.
+        self.assertIn("nasdaq:api.nasdaq.com: cooling down", page)
         self.assertIn("HTTP 429", page)
         self.assertTrue("stooq:stooq.com" in page or "stooq:stooq.pl" in page)
 
@@ -519,28 +916,42 @@ class StockProviderScopeTests(unittest.TestCase):
              "reason": "Timeout was reached"},
             {"provider": "yahoo", "state": "cooling", "retry_in": 30,
              "reason": "HTTP 429"},
-            {"provider": "tencent_kline", "state": "degraded", "retry_in": 0,
+            {"provider": "tencent_kline:web.ifzq.gtimg.cn", "state": "cooling",
+             "retry_in": 900, "reason": "blocked by WAF (HTTP 501)"},
+            {"provider": "sina:stock.finance.sina.com.cn", "state": "cooling",
+             "retry_in": 300, "reason": "Timeout was reached"},
+            {"provider": "nasdaq:api.nasdaq.com", "state": "degraded", "retry_in": 0,
              "reason": "timeout"},
+            {"provider": "sina", "state": "cooling", "retry_in": 60,
+             "reason": "hq index quotes, not stock history"},
             {"provider": "fred", "state": "cooling", "retry_in": 60,
              "reason": "no data"},
         ]
-        # Legacy filter: the three stock-history provider families only.
+        stock_keys = ["stooq:stooq.com", "yahoo",
+                      "tencent_kline:web.ifzq.gtimg.cn",
+                      "sina:stock.finance.sina.com.cn", "nasdaq:api.nasdaq.com"]
+        # Family filter: the five stock-history families only. The bare
+        # "sina" key is the hq.sinajs.cn index-quote breaker and stays out.
         self.assertEqual(
             [p["provider"] for p in app._stock_provider_issues(providers)],
-            ["stooq:stooq.com", "yahoo", "tencent_kline"])
-        # Scoped to a Tencent-only refresh: shared Stooq/Yahoo breakers drop out.
+            stock_keys)
+        # Scoped to a Sina-only refresh: every other family drops out.
+        self.assertEqual(
+            app._stock_provider_issues(providers, {"history_providers": ["sina"]}),
+            [dict(providers[3])])
+        # The scoped tencent_kline:<host> key maps back to its family.
         self.assertEqual(
             app._stock_provider_issues(providers, {"history_providers": ["tencent_kline"]}),
             [dict(providers[2])])
         scoped = app._stock_provider_issues(
             providers, {"history_providers": ["tencent_kline", "stooq"]})
         self.assertEqual([p["provider"] for p in scoped],
-                         ["stooq:stooq.com", "tencent_kline"])
+                         ["stooq:stooq.com", "tencent_kline:web.ifzq.gtimg.cn"])
         # Screens without refresh scope (demo/synthetic data) keep the
         # family-wide view instead of hiding everything.
-        self.assertEqual(len(app._stock_provider_issues(providers, {})), 3)
+        self.assertEqual(len(app._stock_provider_issues(providers, {})), 5)
         self.assertEqual(
-            len(app._stock_provider_issues(providers, {"history_providers": None})), 3)
+            len(app._stock_provider_issues(providers, {"history_providers": None})), 5)
 
     def test_warning_styling_is_preserved_for_stale_and_failed_refreshes(self):
         ok_screen = stocks.build_screen(

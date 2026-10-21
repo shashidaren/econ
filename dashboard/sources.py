@@ -15,7 +15,10 @@ Why multi-source + curl -4 transport?
 Sources & Fallbacks:
   * Market quotes   Yahoo Finance (v7 spark batch / v8 chart) -> FRED CSV ->
                     CNBC / Tencent-Sina indices -> Stooq -> CoinGecko metals
-  * US stocks       Tencent adjusted daily K-lines -> Yahoo spark batch -> Stooq .us
+  * US stocks       Sina US daily K -> Nasdaq historical -> Tencent K-line
+                    (per-host breakers) -> Yahoo spark batch -> Stooq .us;
+                    WAF/HTML block pages are detected from the response body
+                    and cool only the blocked host (see _stock_host_get)
   * FX rates        Frankfurter ECB (api.frankfurter.app / api.frankfurter.dev)
   * Macro annual    World Bank (api.worldbank.org)
   * Policy & curve  FRED fredgraph.csv (with &cosd= date window) ->
@@ -41,11 +44,13 @@ import io
 import json
 import math
 import os
+import random
 import shutil
 import socket
 import subprocess
 import threading
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
@@ -295,14 +300,32 @@ def reset_fred_dead_cache() -> None:
 _STATUS_MARK = "__HTTP__:"
 
 
+class HttpStatusError(RuntimeError):
+    """An HTTP error status whose response body was captured, not swallowed.
+
+    Raised only on the `capture_error_body=True` transport path (US stock
+    history + doctor probes). curl's default `-f` discards error bodies, which
+    is how Tencent's 2026-10-21 WAF 501 page hid behind a bare "curl: (22)"
+    log line; callers here get the `status` and `body` so a WAF block page can
+    be told apart from an ordinary HTTP error.
+    """
+
+    def __init__(self, status: int, body: str = "", message: str | None = None):
+        self.status = status
+        self.body = body or ""
+        super().__init__(message or f"HTTP {status}")
+
+
 def _curl_get(url: str, timeout: int = TIMEOUT, headers: dict | None = None,
-              connect_timeout: int = 5) -> str:
+              connect_timeout: int = 5, capture_error_body: bool = False) -> str:
     hdrs = {**DEFAULT_HEADERS, **(headers or {})}
     cmd = [
         CURL_BIN,
         "-4",                       # Force IPv4 (avoids broken IPv6 routing in LXC)
         "-g",                       # Disable URL globbing for ^, [], {}
-        "-fsSL",                    # Fail on HTTP >=400, silent, follow redirects
+        # Default: fail on HTTP >=400. With capture_error_body the -f is dropped
+        # so the error body survives for WAF detection (see HttpStatusError).
+        "-sSL" if capture_error_body else "-fsSL",
         "--compressed",             # Handle gzip/deflate/br transparently
         "--connect-timeout", str(connect_timeout),
         "--max-time", str(timeout),
@@ -337,17 +360,34 @@ def _curl_get(url: str, timeout: int = TIMEOUT, headers: dict | None = None,
         if status:
             err = f"{err} HTTP {status}"
         raise RuntimeError(err)
+    if capture_error_body and status is not None and status >= 400:
+        # curl exited 0 because -f was dropped; surface the error body so the
+        # caller can recognise a WAF block page instead of parsing it as data.
+        raise HttpStatusError(status, out)
     return out
 
 
-def _urllib_get(url: str, timeout: int = TIMEOUT, headers: dict | None = None) -> str:
+def _urllib_get(url: str, timeout: int = TIMEOUT, headers: dict | None = None,
+                capture_error_body: bool = False) -> str:
     hdrs = {**DEFAULT_HEADERS, "Accept-Encoding": "gzip", **(headers or {})}
     req = urllib.request.Request(url, headers=hdrs)
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        raw = resp.read()
-        if (resp.headers.get("Content-Encoding") or "").lower() == "gzip":
-            raw = gzip.decompress(raw)
-        return raw.decode("utf-8", "replace")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            raw = resp.read()
+            if (resp.headers.get("Content-Encoding") or "").lower() == "gzip":
+                raw = gzip.decompress(raw)
+            return raw.decode("utf-8", "replace")
+    except urllib.error.HTTPError as exc:
+        if not capture_error_body:
+            raise
+        try:
+            raw = exc.read() or b""
+            if (exc.headers.get("Content-Encoding") or "").lower() == "gzip":
+                raw = gzip.decompress(raw)
+            body = raw.decode("utf-8", "replace")
+        except Exception:
+            body = ""
+        raise HttpStatusError(exc.code, body) from exc
 
 
 def _curl_error_allows_urllib(exc) -> bool:
@@ -379,16 +419,22 @@ def _curl_error_allows_urllib(exc) -> bool:
 
 
 def _get(url: str, timeout: int = TIMEOUT, headers: dict | None = None,
-         connect_timeout: int = 5) -> str:
+         connect_timeout: int = 5, capture_error_body: bool = False) -> str:
     if not CURL_BIN:
-        return _urllib_get(url, timeout=timeout, headers=headers)
+        return _urllib_get(url, timeout=timeout, headers=headers,
+                           capture_error_body=capture_error_body)
 
     started = time.monotonic()
     deadline = started + max(1.0, float(timeout) + 1.0)
     try:
         return _curl_get(url, timeout=timeout, headers=headers,
-                         connect_timeout=connect_timeout)
+                         connect_timeout=connect_timeout,
+                         capture_error_body=capture_error_body)
     except Exception as curl_exc:
+        # A captured HTTP error body is a completed HTTP exchange (and the body
+        # is the whole point); never re-ask urllib and lose it.
+        if isinstance(curl_exc, HttpStatusError):
+            raise
         if not _curl_error_allows_urllib(curl_exc):
             raise
         remaining = deadline - time.monotonic()
@@ -397,7 +443,8 @@ def _get(url: str, timeout: int = TIMEOUT, headers: dict | None = None,
         try:
             # Share a single wall-clock budget: the fallback never gets a fresh
             # full `timeout` after curl has already spent time on the request.
-            return _urllib_get(url, timeout=remaining, headers=headers)
+            return _urllib_get(url, timeout=remaining, headers=headers,
+                               capture_error_body=capture_error_body)
         except Exception:
             raise curl_exc
 
@@ -1231,6 +1278,281 @@ def stooq_history(symbol: str, days: int = 150):
     raise RuntimeError(f"all sources failed -> {' | '.join(errs)}")
 
 
+# --------------------------------------------------------------------------
+# US stock daily history — Sina -> Nasdaq -> Tencent -> Yahoo -> Stooq
+#
+# Rebuilt 2026-10-21 after Tencent's K-line WAF started answering HTTP 501
+# (an HTML page bouncing to waf.tencent.com) on BOTH K-line hosts from the
+# LXC's IP, while curl -f swallowed the body and a single shared
+# "tencent_kline" breaker took the whole cascade down with it. The rules now:
+#   * every vendor HOST has its own breaker key — a block on one provider or
+#     host must never disable another;
+#   * error bodies are captured (capture_error_body) so a WAF/HTML block page
+#     is recognised, cools only its own host for 30 min, and is reported as
+#     "blocked by WAF" in the per-ticker diagnostics;
+#   * requests per host are paced with jitter and each refresh has a request
+#     budget, so a 32-symbol sweep cannot trip a WAF by bursting;
+#   * every fetcher returns the same [(date, close, volume)] row contract, so
+#     stocks.py (7-day window, risk buckets, filters) is untouched.
+# The bare "sina" breaker already belongs to the hq.sinajs.cn index-quote
+# host, so the daily-K host gets a host-scoped key under the "sina" family.
+# --------------------------------------------------------------------------
+
+# Minimum gap between two requests to the same stock-history host (seconds),
+# plus up to 50% jitter. Yahoo has its own slower pacing (_yahoo_pace).
+STOCK_PACE_SECONDS = float(os.environ.get("ECON_STOCK_PACE", "0.3"))
+# Hard cap on HTTP requests inside one stock_history_batch() refresh. Two
+# full 32-symbol per-symbol sweeps fit with room to spare; a pathological
+# every-host-for-every-symbol storm does not.
+STOCK_REFRESH_REQUEST_BUDGET = int(os.environ.get("ECON_STOCK_REQUEST_BUDGET", "128"))
+
+SINA_KLINE_HOST = "stock.finance.sina.com.cn"
+SINA_KLINE_KEY = f"sina:{SINA_KLINE_HOST}"
+NASDAQ_HOST = "api.nasdaq.com"
+NASDAQ_KEY = f"nasdaq:{NASDAQ_HOST}"
+# (host, fq-kline base URL). The proxy host serves the same backend under a
+# different hostname/WAF, so each gets its own breaker: tencent_kline:<host>.
+TENCENT_KLINE_HOSTS = (
+    ("web.ifzq.gtimg.cn", "https://web.ifzq.gtimg.cn/appstock/app/fqkline/get"),
+    ("proxy.finance.qq.com", "https://proxy.finance.qq.com/ifzqgtimg/appstock/app/fqkline/get"),
+)
+
+SINA_KLINE_HEADERS = {"Referer": "https://finance.sina.com.cn/"}
+NASDAQ_HEADERS = {
+    "Accept": "application/json, text/plain, */*",
+    "Referer": "https://www.nasdaq.com/",
+}
+TENCENT_KLINE_HEADERS = {"Referer": "https://gu.qq.com/"}
+
+_HOST_PACE_LOCK = threading.Lock()
+_HOST_LAST_AT: dict[str, float] = {}
+
+
+def _pace_host(key: str, interval: float | None = None) -> None:
+    """Serialise requests to one vendor host with a small jittered gap.
+
+    Same shape as _yahoo_pace but keyed per host breaker, so the Sina sweep
+    and the Nasdaq sweep never slow each other down. A non-positive interval
+    disables pacing (tests).
+    """
+    if interval is None:
+        interval = STOCK_PACE_SECONDS
+    if interval <= 0:
+        return
+    with _HOST_PACE_LOCK:
+        wait = _HOST_LAST_AT.get(key, 0.0) + interval - time.time()
+        if wait > 0:
+            time.sleep(wait + random.uniform(0.0, interval * 0.5))
+        _HOST_LAST_AT[key] = time.time()
+
+
+class _RequestBudget:
+    """Thread-safe cap on HTTP requests for one stock-history refresh."""
+
+    def __init__(self, limit: int):
+        self.limit = max(0, int(limit))
+        self.used = 0
+        self._lock = threading.Lock()
+
+    def take(self) -> bool:
+        with self._lock:
+            if self.used >= self.limit:
+                return False
+            self.used += 1
+            return True
+
+
+class _SymbolMiss(RuntimeError):
+    """The host answered but has no usable data for this symbol.
+
+    A mapping/empty-result miss is not evidence the shared host is down, so it
+    must never trip the host breaker; the cascade just tries the next provider
+    for this one ticker.
+    """
+
+
+def _is_waf_block_body(text) -> bool:
+    """True when a body is a WAF/HTML block page rather than market data."""
+    if not text:
+        return False
+    if "waf.tencent.com" in text:
+        return True
+    head = text.lstrip(" \t\r\n\ufeff")[:64].lower()
+    return head.startswith("<!doctype") or head.startswith("<html")
+
+
+def _stock_host_get(url: str, key: str, *, headers: dict | None = None,
+                    timeout: int = 10, connect_timeout: int = 5,
+                    budget: _RequestBudget | None = None,
+                    symbol_miss_statuses=(404,)) -> str:
+    """One paced, budgeted GET against a stock-history host, with WAF detection.
+
+    Returns the body on HTTP success. Transport failures and non-WAF HTTP
+    errors note the *host* breaker via _classify (429 -> rate-limit cooldown,
+    unreachable -> 30 min cooldown, otherwise two-strike). A WAF/HTML block
+    page — whether it arrives as an HTTP error body or a 200 challenge page —
+    cools only this host for BREAKER_COOLDOWN (30 min) and raises with
+    "blocked by WAF" in the message so per-ticker diagnostics can say so.
+    HTTP statuses in `symbol_miss_statuses` raise _SymbolMiss without
+    touching the breaker.
+    """
+    if not provider_available(key):
+        raise RuntimeError(f"{key} cooling down")
+    _pace_host(key)
+    if budget is not None and not budget.take():
+        raise RuntimeError("stock refresh request budget exhausted")
+    try:
+        text = _get(url, timeout=timeout, headers=headers,
+                    connect_timeout=connect_timeout, capture_error_body=True)
+    except HttpStatusError as exc:
+        if _is_waf_block_body(exc.body):
+            msg = f"blocked by WAF (HTTP {exc.status})"
+            note_provider_failure(key, msg, cooldown=BREAKER_COOLDOWN)
+            raise RuntimeError(msg)
+        if exc.status in symbol_miss_statuses:
+            raise _SymbolMiss(f"HTTP {exc.status}")
+        unreachable, limited = _classify(exc)
+        note_provider_failure(key, exc, unreachable=unreachable, rate_limited=limited)
+        raise RuntimeError(str(exc))
+    except Exception as exc:
+        unreachable, limited = _classify(exc)
+        note_provider_failure(key, exc, unreachable=unreachable, rate_limited=limited)
+        raise
+    if _is_waf_block_body(text):
+        msg = "blocked by WAF (HTML block page)"
+        note_provider_failure(key, msg, cooldown=BREAKER_COOLDOWN)
+        raise RuntimeError(msg)
+    return text
+
+
+def _sina_daily_k_url(symbol: str) -> str:
+    """Sina US daily-K JSONP endpoint (full history; no count parameter)."""
+    sym = urllib.parse.quote(str(symbol).upper(), safe="")
+    return ("https://stock.finance.sina.com.cn/usstock/api/jsonp.php/"
+            f"var%20s=/US_MinKService.getDailyK?symbol={sym}&___qn=3")
+
+
+def _parse_sina_daily_k_payload(payload):
+    """Parse Sina's `var s=([{d,o,h,l,c,v}, ...])` JSONP to sorted rows."""
+    if isinstance(payload, str):
+        text = payload.strip()
+        # Strip the JSONP assignment wrapper (`var s=(` ... `);`, `var s=[...];`
+        # or a bare array) by taking the outermost [ ... ] span.
+        start, end = text.find("["), text.rfind("]")
+        if start == -1 or end <= start:
+            return []
+        try:
+            payload = json.loads(text[start:end + 1])
+        except (TypeError, ValueError):
+            return []
+    if not isinstance(payload, list):
+        return []
+    out = {}
+    for row in payload:
+        if not isinstance(row, dict):
+            continue
+        day = str(row.get("d") or "")[:10]
+        try:
+            date.fromisoformat(day)
+            close = float(str(row.get("c")).replace(",", "").replace("$", ""))
+        except (TypeError, ValueError):
+            continue
+        if close <= 0 or not math.isfinite(close):
+            continue
+        volume = None
+        try:
+            volume = float(str(row.get("v")).replace(",", ""))
+            if volume < 0 or not math.isfinite(volume):
+                volume = None
+        except (TypeError, ValueError):
+            volume = None
+        out[day] = (day, close, volume)
+    return [out[d] for d in sorted(out)]
+
+
+def _sina_us_daily_k_history(symbol: str, days: int = 130, budget: _RequestBudget | None = None):
+    """Sina US daily K-lines for one ticker (primary stock-history source)."""
+    key = SINA_KLINE_KEY
+    try:
+        text = _stock_host_get(_sina_daily_k_url(symbol), key,
+                               headers=SINA_KLINE_HEADERS, timeout=12, budget=budget)
+        rows = _parse_sina_daily_k_payload(text)
+        if not rows:
+            raise _SymbolMiss(f"no daily K-lines for {symbol}")
+        note_provider_ok(key)
+        return rows[-days:]
+    except Exception as exc:
+        raise RuntimeError(f"sina-dailyk({symbol}): {exc}") from exc
+
+
+def _nasdaq_historical_url(symbol: str, days: int = 130) -> str:
+    """Nasdaq historical-quote API URL spanning enough days for `days` sessions."""
+    todate = date.today()
+    # ~1.7 calendar days per session plus slack clears weekends/holidays, so
+    # days=130 asks for ~235 calendar days (~160 sessions) under a 200 limit.
+    fromdate = todate - timedelta(days=int(int(days) * 1.7) + 14)
+    limit = max(200, int(days) + 20)
+    sym = urllib.parse.quote(str(symbol).upper(), safe="")
+    return (f"https://api.nasdaq.com/api/quote/{sym}/historical?assetclass=stocks"
+            f"&fromdate={fromdate.isoformat()}&todate={todate.isoformat()}&limit={limit}")
+
+
+def _parse_nasdaq_historical_payload(payload):
+    """Parse Nasdaq `data.tradesTable.rows` (newest first) to ascending rows."""
+    if isinstance(payload, str):
+        try:
+            payload = json.loads(payload)
+        except (TypeError, ValueError):
+            return []
+    if not isinstance(payload, dict):
+        return []
+    data = payload.get("data") or {}
+    table = data.get("tradesTable") or {}
+    raw_rows = table.get("rows") or []
+
+    def _clean(raw):
+        try:
+            return float(str(raw).replace("$", "").replace(",", "").strip())
+        except (TypeError, ValueError):
+            return None
+
+    out = {}
+    for row in raw_rows:
+        if not isinstance(row, dict):
+            continue
+        raw_day = str(row.get("date") or "").strip()
+        try:
+            day = datetime.strptime(raw_day, "%m/%d/%Y").date().isoformat()
+        except ValueError:
+            try:
+                day = date.fromisoformat(raw_day[:10]).isoformat()
+            except ValueError:
+                continue
+        close = _clean(row.get("close"))
+        if close is None or close <= 0 or not math.isfinite(close):
+            continue
+        volume = _clean(row.get("volume"))
+        if volume is not None and (volume < 0 or not math.isfinite(volume)):
+            volume = None
+        out[day] = (day, close, volume)
+    return [out[d] for d in sorted(out)]
+
+
+def _nasdaq_us_stock_history(symbol: str, days: int = 130, budget: _RequestBudget | None = None):
+    """Nasdaq historical daily bars for one ticker (needs the browser UA)."""
+    key = NASDAQ_KEY
+    try:
+        text = _stock_host_get(_nasdaq_historical_url(symbol, days=days), key,
+                               headers=NASDAQ_HEADERS, timeout=12, budget=budget)
+        rows = _parse_nasdaq_historical_payload(text)
+        if not rows:
+            raise _SymbolMiss(f"no historical rows for {symbol}")
+        note_provider_ok(key)
+        return rows[-days:]
+    except Exception as exc:
+        raise RuntimeError(f"nasdaq({symbol}): {exc}") from exc
+
+
 def _parse_tencent_kline_payload(payload, code: str):
     """Parse Tencent daily K-lines to [(date, close, volume)]."""
     if isinstance(payload, str):
@@ -1275,33 +1597,47 @@ def _parse_tencent_kline_payload(payload, code: str):
     return [out[d] for d in sorted(out)]
 
 
-def _tencent_us_stock_history(code: str, days: int = 130):
-    """Fetch Tencent's adjusted daily K-lines for one US ticker."""
-    if not provider_available("tencent_kline"):
-        raise RuntimeError("tencent K-line provider cooling down")
+def _tencent_kline_url(base: str, code: str, days: int = 130) -> str:
+    """Tencent fq-kline URL (commas percent-encoded; the WAF blocks both forms)."""
     params = urllib.parse.urlencode({"param": f"{code},day,,,{int(days)},qfq"})
-    url = f"https://web.ifzq.gtimg.cn/appstock/app/fqkline/get?{params}"
-    try:
-        text = _get(url, timeout=10, headers={"Referer": "https://gu.qq.com/"})
-        rows = _parse_tencent_kline_payload(text, code)
-        if not rows:
-            # Some Tencent responses include a callback wrapper; the parser also
-            # accepts that form, so an empty result is treated as a symbol miss.
-            raise RuntimeError(f"no daily K-lines for {code}")
-        note_provider_ok("tencent_kline")
-        return rows[-days:]
-    except Exception as exc:
-        message = str(exc)
-        # A per-symbol 404 is a mapping miss, not evidence that the shared host
-        # is unavailable; keep trying the next configured US ticker/fallback.
-        if "no daily K-lines" not in message and "HTTP 404" not in message:
-            unreachable, limited = _classify(exc)
-            note_provider_failure(
-                "tencent_kline", exc, unreachable=unreachable, rate_limited=limited)
-        raise RuntimeError(f"tencent-kline({code}): {exc}")
+    return f"{base}?{params}"
 
 
-def _stooq_us_stock_history(symbol: str, days: int = 130):
+def _tencent_us_stock_history(code: str, days: int = 130, budget: _RequestBudget | None = None):
+    """Fetch Tencent's adjusted daily K-lines for one US ticker, per host.
+
+    Best effort only since 2026-10-21: both K-line hosts answer the LXC with a
+    WAF 501 page. Each host has its own breaker (tencent_kline:<host>), so a
+    block on web.ifzq.gtimg.cn neither disables proxy.finance.qq.com nor —
+    as the old single "tencent_kline" key did — the whole cascade. A symbol
+    miss (empty payload / HTTP 404) stops the host loop: both hosts front the
+    same backend, so the second would miss too.
+    """
+    last_err = None
+    for host, base in TENCENT_KLINE_HOSTS:
+        key = f"tencent_kline:{host}"
+        try:
+            text = _stock_host_get(_tencent_kline_url(base, code, days=days), key,
+                                   headers=TENCENT_KLINE_HEADERS, timeout=10,
+                                   budget=budget)
+            rows = _parse_tencent_kline_payload(text, code)
+            if not rows:
+                # Some Tencent responses include a callback wrapper; the parser
+                # also accepts that form, so an empty result is a symbol miss.
+                raise _SymbolMiss(f"no daily K-lines for {code}")
+            note_provider_ok(key)
+            return rows[-days:]
+        except _SymbolMiss as exc:
+            last_err = exc
+            break
+        except Exception as exc:
+            last_err = exc
+    if last_err is None:
+        last_err = RuntimeError("all Tencent K-line hosts are cooling down")
+    raise RuntimeError(f"tencent-kline({code}): {last_err}")
+
+
+def _stooq_us_stock_history(symbol: str, days: int = 130, budget: _RequestBudget | None = None):
     """Stooq fallback for US shares, whose symbols use the `.us` suffix."""
     d1 = (date.today() - timedelta(days=int(days * 1.7))).strftime("%Y%m%d")
     d2 = date.today().strftime("%Y%m%d")
@@ -1310,6 +1646,10 @@ def _stooq_us_stock_history(symbol: str, days: int = 130):
         key = f"stooq:{domain}{port_tag}"
         if not provider_available(key):
             continue
+        _pace_host(key)
+        if budget is not None and not budget.take():
+            last_err = RuntimeError("stock refresh request budget exhausted")
+            break
         sym = urllib.parse.quote(f"{symbol.lower()}.us", safe="")
         url = f"{scheme}://{domain}/q/d/l/?s={sym}&d1={d1}&d2={d2}&i=d"
         try:
@@ -1334,53 +1674,76 @@ def _stock_history_has_liquidity(rows):
 
 
 def stock_history_batch(symbols, vendor_symbols=None, days: int = 130):
-    """Fetch stock daily histories: Tencent K-line -> Yahoo batch -> Stooq.
+    """Fetch stock daily histories: Sina -> Nasdaq -> Tencent -> Yahoo -> Stooq.
 
-    Tencent is preferred because its live quote host is already used by this
-    dashboard; Yahoo is batched to respect its per-IP rate limit. Stooq is a
-    last fallback. Only histories with enough rows and usable volume fields are
-    accepted for the liquidity screen. `_meta` records which cascade stages ran
-    (`history_providers`) plus per-ticker errors for unresolved symbols.
+    Sina's US daily-K and Nasdaq's historical API are the providers verified
+    live from the LXC on 2026-10-21; Tencent K-line (WAF-blocked there) is
+    best effort, Yahoo is one batched spark request, Stooq the last resort.
+    Per-symbol stages run at most 4 concurrent fetches, each host is paced
+    with jitter, and one request budget caps the whole refresh. Only
+    histories with enough rows and usable volume fields are accepted for the
+    liquidity screen. `_meta` records which cascade stages ran
+    (`history_providers`, as breaker *family* names), the requests spent, and
+    per-ticker errors for unresolved symbols.
     """
     symbols = list(dict.fromkeys(str(s).upper() for s in symbols if s))
     vendor_symbols = vendor_symbols or {}
     out = {}
     errors = []
     symbol_errors = {}
-    # Providers this refresh actually needed or touched (one per cascade stage
-    # that ran). Downstream diagnostics scope to this list so shared-breaker
-    # trouble from unrelated board features (index quotes, spark charts) cannot
-    # mark a fully covered refresh degraded.
-    history_providers = ["tencent_kline"]
+    budget = _RequestBudget(STOCK_REFRESH_REQUEST_BUDGET)
+    # Provider families this refresh actually needed or touched (one per
+    # cascade stage that ran). Downstream diagnostics scope to this list so
+    # shared-breaker trouble from unrelated board features (index quotes,
+    # spark charts) cannot mark a fully covered refresh degraded.
+    history_providers = ["sina"]
 
     def add_symbol_error(symbol, provider, exc):
         symbol_errors.setdefault(symbol, []).append(f"{provider}: {exc}")
 
-    def fetch_tencent(symbol):
-        code = vendor_symbols.get(symbol)
-        if not code:
-            raise RuntimeError(f"no Tencent K-line mapping for {symbol}")
-        rows = _tencent_us_stock_history(code, days=days)
-        if not _stock_history_has_liquidity(rows):
-            raise RuntimeError(f"Tencent history/volume too short for {symbol}")
-        return symbol, rows
+    def run_stage(missing, fetch_one, label, prefix):
+        with ThreadPoolExecutor(max_workers=4, thread_name_prefix=prefix) as pool:
+            futures = {pool.submit(fetch_one, symbol): symbol for symbol in missing}
+            for future, symbol in futures.items():
+                try:
+                    rows = future.result()
+                    if not _stock_history_has_liquidity(rows):
+                        raise RuntimeError(
+                            f"{label} history/volume too short for {symbol}")
+                    out[symbol] = {"rows": rows, "source": label}
+                except Exception as exc:
+                    errors.append(f"{symbol}: {exc}")
+                    add_symbol_error(symbol, label, exc)
 
-    with ThreadPoolExecutor(max_workers=4, thread_name_prefix="stocks-tencent") as pool:
-        futures = {pool.submit(fetch_tencent, symbol): symbol for symbol in symbols}
-        for future, symbol in ((f, s) for f, s in futures.items()):
-            try:
-                ticker, rows = future.result()
-                out[ticker] = {"rows": rows, "source": "Tencent K-line"}
-            except Exception as exc:
-                errors.append(f"{symbol}: {exc}")
-                add_symbol_error(symbol, "Tencent K-line", exc)
+    run_stage(symbols,
+              lambda s: _sina_us_daily_k_history(s, days=days, budget=budget),
+              "Sina daily K", "stocks-sina")
+
+    missing = [symbol for symbol in symbols if symbol not in out]
+    if missing:
+        history_providers.append("nasdaq")
+        run_stage(missing,
+                  lambda s: _nasdaq_us_stock_history(s, days=days, budget=budget),
+                  "Nasdaq", "stocks-nasdaq")
+
+    missing = [symbol for symbol in symbols if symbol not in out]
+    if missing:
+        history_providers.append("tencent_kline")
+
+        def fetch_tencent(symbol):
+            code = vendor_symbols.get(symbol)
+            if not code:
+                raise RuntimeError(f"no Tencent K-line mapping for {symbol}")
+            return _tencent_us_stock_history(code, days=days, budget=budget)
+
+        run_stage(missing, fetch_tencent, "Tencent K-line", "stocks-tencent")
 
     missing = [symbol for symbol in symbols if symbol not in out]
     if missing:
         # The Yahoo stage is relevant to this refresh even when its breaker is
         # already cooling and the attempt is skipped.
         history_providers.append("yahoo")
-    if missing and provider_available("yahoo"):
+    if missing and provider_available("yahoo") and budget.take():
         try:
             yahoo_rows = _yahoo_spark_batch(missing, days=days, include_volume=True)
             for symbol in missing:
@@ -1397,27 +1760,17 @@ def stock_history_batch(symbols, vendor_symbols=None, days: int = 130):
             for symbol in missing:
                 add_symbol_error(symbol, "Yahoo Finance batch", exc)
     elif missing:
+        reason = ("request budget exhausted" if provider_available("yahoo")
+                  else "provider cooling down")
         for symbol in missing:
-            add_symbol_error(symbol, "Yahoo Finance", "provider cooling down")
+            add_symbol_error(symbol, "Yahoo Finance", reason)
 
     missing = [symbol for symbol in symbols if symbol not in out]
     if missing:
         history_providers.append("stooq")
-        def fetch_stooq(symbol):
-            rows = _stooq_us_stock_history(symbol, days=days)
-            if not _stock_history_has_liquidity(rows):
-                raise RuntimeError(f"Stooq history/volume too short for {symbol}")
-            return symbol, rows
-
-        with ThreadPoolExecutor(max_workers=4, thread_name_prefix="stocks-stooq") as pool:
-            futures = {pool.submit(fetch_stooq, symbol): symbol for symbol in missing}
-            for future, symbol in ((f, s) for f, s in futures.items()):
-                try:
-                    ticker, rows = future.result()
-                    out[ticker] = {"rows": rows, "source": "Stooq"}
-                except Exception as exc:
-                    errors.append(f"{symbol}: {exc}")
-                    add_symbol_error(symbol, "Stooq", exc)
+        run_stage(missing,
+                  lambda s: _stooq_us_stock_history(s, days=days, budget=budget),
+                  "Stooq", "stocks-stooq")
 
     unavailable = [symbol for symbol in symbols if symbol not in out]
     if not out:
@@ -1428,6 +1781,7 @@ def stock_history_batch(symbols, vendor_symbols=None, days: int = 130):
         raise RuntimeError(f"no usable US stock histories ({detail})")
     meta = out.setdefault("_meta", {})
     meta["history_providers"] = list(history_providers)
+    meta["history_requests"] = budget.used
     if unavailable:
         meta["history_errors"] = {
             "count": len(unavailable),
@@ -1895,6 +2249,53 @@ def _doctor_cnbc(run_checks):
     ], width=28)
 
 
+def _doctor_stock_history(run_checks):
+    """Probe every US stock-history host for PFE with status + body head.
+
+    The 2026-10-21 outage stayed invisible because curl -f discarded
+    Tencent's WAF 501 body and no doctor section covered the stock cascade at
+    all: a total outage looked like a blank tab. Each probe therefore
+    captures the error body and prints the HTTP status plus the first 120
+    bytes, pass or fail, so a WAF page names itself. The closing probe runs
+    the real cascade for one ticker.
+    """
+    reset_breakers("sina")
+    reset_breakers("nasdaq")
+    reset_breakers("tencent_kline")
+
+    def probe(url, headers, parse):
+        try:
+            body = _get(url, timeout=12, headers=headers, capture_error_body=True)
+        except HttpStatusError as exc:
+            raise RuntimeError(f"HTTP {exc.status} body[:120]={exc.body[:120]!r}")
+        rows = parse(body)
+        if not rows:
+            raise RuntimeError(
+                f"HTTP 200 but no rows parsed; body[:120]={body[:120]!r}")
+        return (f"HTTP 200, {len(rows)} rows, last {rows[-1][0]} = {rows[-1][1]} "
+                f"| body[:120]={body[:120]!r}")
+
+    def cascade_probe():
+        out = stock_history_batch(["PFE"], {"PFE": "usPFE.N"}, days=130)
+        rows = out["PFE"]["rows"]
+        return (f"{out['PFE']['source']}, {len(rows)} rows, "
+                f"last {rows[-1][0]} = {rows[-1][1]}")
+
+    checks = [
+        ("sina daily K PFE", lambda: probe(
+            _sina_daily_k_url("PFE"), SINA_KLINE_HEADERS, _parse_sina_daily_k_payload)),
+        ("nasdaq historical PFE", lambda: probe(
+            _nasdaq_historical_url("PFE", days=130), NASDAQ_HEADERS,
+            _parse_nasdaq_historical_payload)),
+    ]
+    for host, base in TENCENT_KLINE_HOSTS:
+        checks.append((f"tencent {host}", lambda b=base: probe(
+            _tencent_kline_url(b, "usPFE.N", days=130), TENCENT_KLINE_HEADERS,
+            lambda body: _parse_tencent_kline_payload(body, "usPFE.N"))))
+    checks.append(("cascade PFE (batch)", cascade_probe))
+    run_checks(checks, width=28)
+
+
 def fetch_news(candidates, *, days=7, per_symbol=3):
     """Headlines for the displayed stock picks (see news.py for the rules).
 
@@ -1967,6 +2368,8 @@ if __name__ == "__main__":
             ("quote:^spx", lambda: stooq_history("^spx", days=30)[-1]),
             ("quote:cl.f", lambda: stooq_history("cl.f", days=30)[-1]),
             ("quote:xauusd", lambda: stooq_history("xauusd", days=30)[-1]),
+            ("stock:PFE", lambda: stock_history_batch(
+                ["PFE"], {"PFE": "usPFE.N"}, days=130)["PFE"]["source"]),
         ])
         print("provider breakers:")
         _print_breakers()
@@ -1978,7 +2381,7 @@ if __name__ == "__main__":
         print(f"curl: {CURL_BIN or 'NOT FOUND (urllib only)'} | yahoo pace "
               f"{YAHOO_MIN_INTERVAL}s | yahoo cookie {'on' if YAHOO_USE_COOKIE else 'off'}")
 
-        print("\n[1/9] FX & macro")
+        print("\n[1/10] FX & macro")
         _run_checks([
             ("frankfurter.app", lambda: _get_json(
                 "https://api.frankfurter.app/latest?from=USD&to=EUR,JPY")["date"]),
@@ -1988,7 +2391,7 @@ if __name__ == "__main__":
             ("worldbank GDP", lambda: worldbank_indicator(["US"], "NY.GDP.MKTP.KD.ZG")[0]["value"]),
         ], width=24)
 
-        print("\n[2/9] Rates, curve & their official fallbacks")
+        print("\n[2/10] Rates, curve & their official fallbacks")
         _run_checks([
             ("fred DFF", lambda: fred_series("DFF", years=1)[-1]),
             ("fred ECBDFR", lambda: fred_series("ECBDFR", years=1)[-1]),
@@ -2000,7 +2403,7 @@ if __name__ == "__main__":
             ("ustreasury breakeven", lambda: _ustreasury_breakeven_series(years=1)[-1]),
         ], width=24)
 
-        print("\n[3/9] FRED quote series (mapped to board cards, including fallbacks)")
+        print("\n[3/10] FRED quote series (mapped to board cards, including fallbacks)")
         mapped_fred = {sid for sid, _age in FRED_QUOTE_MAP.values()}
         mapped_fred.update(
             sid for fallbacks in FRED_QUOTE_FALLBACKS.values()
@@ -2011,7 +2414,7 @@ if __name__ == "__main__":
             for sid in sorted(mapped_fred)
         ], width=24)
 
-        print("\n[4/9] FRED candidate series (not wired in yet)")
+        print("\n[4/10] FRED candidate series (not wired in yet)")
         if FRED_PROBE_CANDIDATES:
             _run_checks([
                 (f"fred {sid}", lambda s=sid: _fred_probe(s, monthly=s.endswith("USDM")))
@@ -2020,13 +2423,13 @@ if __name__ == "__main__":
         else:
             print("  (no unverified candidates)")
 
-        print("\n[5/9] Yahoo Finance (cookie + crumb handshake, charts, spark batch)")
+        print("\n[5/10] Yahoo Finance (cookie + crumb handshake, charts, spark batch)")
         _doctor_yahoo(_run_checks)
 
-        print("\n[6/9] CNBC quote candidates (international indices)")
+        print("\n[6/10] CNBC quote candidates (international indices)")
         _doctor_cnbc(_run_checks)
 
-        print("\n[7/9] Stooq & CoinGecko")
+        print("\n[7/10] Stooq & CoinGecko")
         checks = []
         for scheme, domain, tag in (("https", "stooq.com", ""),
                                     ("https", "stooq.pl", ""),
@@ -2038,7 +2441,7 @@ if __name__ == "__main__":
                            lambda c=coin, s=sym: _coingecko_history(s, days=30)[-1]))
         _run_checks(checks, width=24)
 
-        print("\n[8/9] Tencent / Sina (indices FRED does not publish)")
+        print("\n[8/10] Tencent / Sina (indices FRED does not publish)")
         reset_breakers("tencent")
         reset_breakers("sina")
         clear_asia_cache()
@@ -2054,7 +2457,10 @@ if __name__ == "__main__":
             ("euro stoxx ^stx", lambda: _asia_probe("^stx")),
         ], width=24)
 
-        print("\n[9/9] Stock headline feeds (Stocks tab; Google -> Bing -> Yahoo)")
+        print("\n[9/10] US stock history (Stocks tab; Sina -> Nasdaq -> Tencent hosts, PFE probe)")
+        _doctor_stock_history(_run_checks)
+
+        print("\n[10/10] Stock headline feeds (Stocks tab; Google -> Bing -> Yahoo)")
         import news
         reset_breakers("google_news")
         reset_breakers("bing_news")

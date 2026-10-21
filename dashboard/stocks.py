@@ -380,13 +380,21 @@ def build_screen(
     }
 
 
-def current_view(screen, *, as_of=None):
-    """Suppress cached picks once their quote date is outside the freshness gate."""
+def current_view(screen, *, as_of=None, keep_stale=False):
+    """Suppress cached picks once their quote date is outside the freshness gate.
+
+    With `keep_stale` (app.py passes it while fresh stock history is failing),
+    aged-out picks are KEPT and the screen is marked ``status="cached"``
+    instead: a total source outage must degrade the tab to its last good
+    screen — badged with the data-as-of date — not empty it. Quote ages are
+    still updated honestly; filters, ranking and risk buckets are unchanged
+    because the metrics were computed when the screen was fresh.
+    """
     if not isinstance(screen, dict):
         return screen
     today = as_of or date.today()
     view = dict(screen)
-    fresh = []
+    ordered = []  # (candidate, still_fresh) in the screen's ranking order
     removed = False
     for candidate in screen.get("candidates") or []:
         item = dict(candidate)
@@ -394,25 +402,33 @@ def current_view(screen, *, as_of=None):
             age = (today - date.fromisoformat(str(item.get("as_of"))[:10])).days
         except (TypeError, ValueError):
             age = MAX_QUOTE_AGE_DAYS + 1
-        if -1 <= age <= MAX_QUOTE_AGE_DAYS:
-            item["quote_age_days"] = max(0, age)
-            fresh.append(item)
-        else:
+        item["quote_age_days"] = max(0, age)
+        still_fresh = -1 <= age <= MAX_QUOTE_AGE_DAYS
+        if not still_fresh:
             removed = True
-    view["candidates"] = fresh
-    if removed:
-        view["eligible_count"] = len(fresh)
+        ordered.append((item, still_fresh))
+    fresh = [item for item, ok in ordered if ok]
+    if keep_stale:
+        # Aged-out names keep their ranked slot; the badge says they are old.
+        view["candidates"] = [item for item, _ok in ordered]
+    else:
+        view["candidates"] = fresh
+        if removed:
+            view["eligible_count"] = len(fresh)
     data_date = screen.get("data_date")
     try:
         data_age = (today - date.fromisoformat(str(data_date)[:10])).days if data_date else None
     except (TypeError, ValueError):
         data_age = MAX_QUOTE_AGE_DAYS + 1
-    if data_age is not None and data_age > MAX_QUOTE_AGE_DAYS:
+    data_stale = data_age is not None and data_age > MAX_QUOTE_AGE_DAYS
+    if keep_stale and (data_stale or removed):
+        view["status"] = "cached"
+    elif data_stale:
         view["status"] = "stale"
         view["message"] = "Cached stock history is stale; waiting for a fresh quote before showing picks."
         view["candidates"] = []
         view["eligible_count"] = 0
-    elif removed:
+    elif removed and not keep_stale:
         view["eligible_count"] = len(fresh)
         if fresh:
             view["status"] = "ok"
