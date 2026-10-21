@@ -36,7 +36,7 @@ apt-get update -y
 apt-get install -y --no-install-recommends python3 ca-certificates curl cron
 
 echo "==> [2/5] Smoke test"
-python3 -c "import sys; sys.path.insert(0, '$APP_DIR/dashboard'); import config, render, charts, sources, app; print('modules import OK')"
+python3 -c "import sys; sys.path.insert(0, '$APP_DIR/dashboard'); import config, render, charts, sources, news, app; print('modules import OK')"
 
 echo "==> [3/5] Installing systemd unit (port $PORT, dir $APP_DIR)"
 sed -e "s|__APP_DIR__|$APP_DIR|g" -e "s|__PORT__|$PORT|g" \

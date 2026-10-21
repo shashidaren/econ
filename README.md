@@ -81,11 +81,26 @@ Preview without a server (sample data): `ECON_DEMO=1 python3 dashboard/app.py`
   the next check is due. The underlying data is **daily closes**, so the list
   itself only changes after the U.S. close (~04:00–05:00 Malaysia time) — it is
   not intraday, and an unchanged list between closes is expected.
+- **Seven-day movement:** each card shows the change from the last close at or
+  before seven calendar days before the latest bar (normally five U.S. trading
+  sessions), a 12-session sparkline, and the 7-day high/low range. A strip above
+  the cards averages the same window across the displayed names and counts how
+  many are up, down, and flat. `week` in `/api/stocks` carries the same numbers.
+  It describes past closes; it is not a forecast.
+- **Recent headlines:** up to three per displayed ticker, newest first, from
+  key-less public RSS — Google News, then Bing News, then Yahoo Finance's
+  headline feed. Only unduplicated items published inside the last seven days
+  whose title mentions the ticker or company are kept; undated items are
+  discarded. Headlines are **context only** and never enter the filter, the
+  score, or the ranking; a feed outage says so and cannot blank the screen.
+  Configure with `ECON_STOCK_NEWS=0` (off), `ECON_STOCK_NEWS_DAYS=14`, and
+  `ECON_STOCK_NEWS_PER_SYMBOL=2`.
 - Risk labels use 20-session annualized realized volatility and 60-session
   drawdown only. They are backward-looking, not a measure of total or future
-  risk. The screen has no fundamentals, news, earnings calendar, analyst
-  targets, intraday prices, or trade execution. A share price under $50 does not
-  mean the stock is cheap; this is a research shortlist, not a buy signal.
+  risk. The screen has no fundamentals, earnings calendar, analyst targets,
+  intraday prices, or trade execution, and its ranking ignores headlines. A
+  share price under $50 does not mean the stock is cheap; this is a research
+  shortlist, not a buy signal.
 - History sources: Tencent adjusted daily K-lines (primary), one batched Yahoo
   Finance spark request (fallback), then Stooq. The page labels Kuala Lumpur and
   U.S. Eastern timestamps, identifies daily-bar dates as U.S. market session
@@ -124,6 +139,7 @@ python3 -m unittest discover -s tests -v
 | Central-bank policy rates (`DFF`, `ECBDFR`) | FRED public CSV (`fredgraph.csv?cosd=...`) | NY Fed Markets API (`markets.newyorkfed.org`) for `DFF`; ECB Data Portal (`data-api.ecb.europa.eu`) for `ECBDFR` |
 | US 10Y–2Y yield curve & 10Y breakeven | FRED public CSV (`T10Y2Y`, `T10YIE`) | Official US Treasury Daily Par & Real Yield Curve CSV (`home.treasury.gov`) |
 | Short-term US stock history | Tencent daily K-lines (per configured watchlist symbol) | One Yahoo Finance `v7/finance/spark` batch → Stooq `.us` daily CSV |
+| Stock headlines (context only) | Google News RSS (`news.google.com/rss/search`, 7-day query) | Bing News RSS (`format=RSS`) → Yahoo Finance headline RSS |
 
 ### Resilience
 

@@ -6,7 +6,7 @@ Enabled with ECON_DEMO=1. On the server, run WITHOUT it for live data.
 
 import math
 import zlib
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 
 # Plausible starting levels so the demo looks realistic
 _BASE = {
@@ -123,3 +123,44 @@ def fred_series(series_id: str, years: int | None = None):
     base = _FRED_LEVEL.get(series_id, 1.0)
     vol = 0.012 if series_id in ("T10Y2Y", "T10YIE") else 0.003
     return _walk(series_id, base, n, vol=vol, drift=0.0)
+
+
+def fetch_news(candidates, *, days=7, per_symbol=3, now=None):
+    """Synthetic headlines so the Stocks tab can be previewed with no network.
+
+    Every title is prefixed DEMO and carries no link, so a demo page can never
+    look like a live news feed.
+    """
+    now = now or datetime.now(timezone.utc)
+    items, errors = {}, {}
+    for candidate in candidates or []:
+        if not isinstance(candidate, dict):
+            continue
+        symbol = str(candidate.get("symbol") or "").upper()
+        name = str(candidate.get("name") or symbol)
+        if not symbol:
+            continue
+        items[symbol] = [{
+            "title": (f"DEMO headline {i + 1}: synthetic {name} story "
+                      "for layout testing only"),
+            "link": None,
+            "publisher": "DEMO synthetic",
+            "published_utc": (now - timedelta(hours=7 * (i + 1))).isoformat(
+                timespec="minutes"),
+        } for i in range(max(1, int(per_symbol)))]
+    return {
+        "status": "ok" if items else "unavailable",
+        "message": ("Synthetic demo headlines — not real news."
+                    if items else "No demo candidates to label."),
+        "window_days": days,
+        "per_symbol_limit": per_symbol,
+        "fetched_at_utc": now.isoformat(timespec="minutes"),
+        "items": items,
+        "errors": errors,
+        "coverage": {"symbols": len(items), "with_headlines": len(items),
+                     "headlines": sum(len(v) for v in items.values()),
+                     "providers": ["DEMO synthetic"] if items else []},
+        "limitations": ("Demo mode: these headlines are generated locally and "
+                        "carry no links. They are not real news."),
+        "demo": True,
+    }
