@@ -155,3 +155,17 @@ STOCK_MAX_RESULTS = int(os.environ.get("ECON_STOCK_MAX_RESULTS", "7"))
 # Cache daily-history screens for an hour; historical closes do not justify
 # hammering keyless providers every five-minute dashboard refresh.
 TTL["stocks"] = 60 * 60
+
+# --- Stock headlines (Stocks tab) --------------------------------------------
+# Up to a few recent headlines per *displayed* ticker, from key-less public RSS
+# (Google News -> Bing News -> Yahoo Finance headline feed). Headlines are
+# context only: they never change which tickers pass or how they are ranked.
+STOCK_NEWS_ENABLED = os.environ.get("ECON_STOCK_NEWS", "1") not in ("0", "false", "no")
+try:
+    STOCK_NEWS_WINDOW_DAYS = max(1, min(int(os.environ.get("ECON_STOCK_NEWS_DAYS", "7")), 30))
+except ValueError:
+    STOCK_NEWS_WINDOW_DAYS = 7
+try:
+    STOCK_NEWS_PER_SYMBOL = max(1, min(int(os.environ.get("ECON_STOCK_NEWS_PER_SYMBOL", "3")), 5))
+except ValueError:
+    STOCK_NEWS_PER_SYMBOL = 3

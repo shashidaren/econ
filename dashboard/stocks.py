@@ -2,12 +2,13 @@
 
 This module deliberately does not forecast returns or make buy recommendations.
 It ranks a small, editable US ticker universe using recent daily price/volume
-history, then labels observed volatility/drawdown risk. No fundamentals or news
-are available in the free, keyless data pipeline, so the output is a watchlist
-for further research only.
+history, then labels observed volatility/drawdown risk. No fundamentals are
+available in the free, keyless data pipeline. Recent headlines are rendered next
+to the list (news.py) as context only: this screen never reads them back, so the
+output remains a watchlist for further research rather than a signal.
 """
 
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 import math
 import statistics
 
@@ -65,6 +66,14 @@ def _change(now, before):
     return ((now / before) - 1.0) * 100.0 if before else None
 
 
+def _as_date(value):
+    """Parse an ISO date/datetime string; None instead of raising."""
+    try:
+        return date.fromisoformat(str(value)[:10])
+    except (TypeError, ValueError):
+        return None
+
+
 def _risk_label(volatility_pct, drawdown_pct):
     """Observed-risk buckets; not a probability of loss or a forecast."""
     if volatility_pct <= 25.0 and drawdown_pct >= -10.0:
@@ -98,11 +107,38 @@ def _metrics(rows):
 
     dollar_volumes = [r[1] * r[2] for r in rows[-20:] if r[2] is not None]
     avg_dollar_volume = statistics.fmean(dollar_volumes) if len(dollar_volumes) >= 15 else None
+
+    # Seven-calendar-day window: the last close at or before (latest bar - 7
+    # days), which on U.S. daily bars is normally five trading sessions. The
+    # window ends at the latest bar, not at "now", so a stale-but-allowed quote
+    # never pretends to include days it does not have.
+    end_day = _as_date(rows[-1][0])
+    week_base = None
+    if end_day is not None:
+        target = end_day - timedelta(days=7)
+        for day_str, close_value, _volume in rows:
+            row_day = _as_date(day_str)
+            if row_day is None:
+                continue
+            if row_day <= target:
+                week_base = (day_str, close_value)
+            else:
+                break
+    ret7 = _change(close, week_base[1]) if week_base else None
+    window = [r for r in rows if week_base and r[0] >= week_base[0]] or rows[-6:]
+    week_high = max(r[1] for r in window)
+    week_low = min(r[1] for r in window)
     return {
         "close": close,
         "as_of": rows[-1][0],
         "ret1_pct": _change(close, closes[-2]),
         "ret5_pct": ret5,
+        "ret7_pct": ret7,
+        "week_start": week_base[0] if week_base else None,
+        "week_end": rows[-1][0],
+        "week_high": week_high,
+        "week_low": week_low,
+        "recent_bars": [[r[0], round(r[1], 4)] for r in rows[-12:]],
         "ret20_pct": ret20,
         "ret60_pct": ret60,
         "sma20": sma20,
@@ -250,6 +286,31 @@ def build_screen(
     eligible_count = len(candidates)
     candidates = candidates[:limit]
     data_date = max(data_dates) if data_dates else None
+
+    # Breadth of the *displayed* list over the same seven-day window. This is
+    # descriptive: it says what the shown names did, not what they will do.
+    week_moves = [c for c in candidates if c.get("ret7_pct") is not None]
+    week = None
+    if week_moves:
+        ordered = sorted(week_moves, key=lambda c: c["ret7_pct"])
+        week = {
+            "window_days": 7,
+            "end_date": data_date,
+            "start_date": min((c.get("week_start") for c in week_moves
+                               if c.get("week_start")), default=None),
+            "count": len(week_moves),
+            "average_ret7_pct": round(
+                statistics.fmean(c["ret7_pct"] for c in week_moves), 2),
+            "up": sum(1 for c in week_moves if c["ret7_pct"] > 0),
+            "down": sum(1 for c in week_moves if c["ret7_pct"] < 0),
+            "flat": sum(1 for c in week_moves if c["ret7_pct"] == 0),
+            "best": {"symbol": ordered[-1]["symbol"],
+                     "ret7_pct": ordered[-1]["ret7_pct"]},
+            "worst": {"symbol": ordered[0]["symbol"],
+                      "ret7_pct": ordered[0]["ret7_pct"]},
+            "basis": ("daily closes; starts at the last close at or before "
+                      "seven calendar days before the latest bar"),
+        }
     if candidates:
         status = "ok"
         if eligible_count > len(candidates):
@@ -287,6 +348,7 @@ def build_screen(
         "data_date_kind": "daily U.S. market session date; no intraday timestamp",
         "eligible_count": eligible_count,
         "max_candidates": limit,
+        "week": week,
         "candidates": candidates,
         "exclusions": exclusions,
         "filters": {

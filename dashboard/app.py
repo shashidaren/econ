@@ -190,7 +190,7 @@ def build_registry():
             vendor_symbols=vendor_symbols,
             days=config.STOCK_HISTORY_SESSIONS,
         )
-        return stock_screener.build_screen(
+        screen = stock_screener.build_screen(
             config.STOCK_UNIVERSE,
             histories,
             max_price=config.STOCK_MAX_PRICE,
@@ -198,6 +198,30 @@ def build_registry():
             min_avg_dollar_volume=config.STOCK_MIN_AVG_DOLLAR_VOLUME,
             limit=config.STOCK_MAX_RESULTS,
         )
+        # Headlines are context only and must never break the screen: they are
+        # fetched for the displayed (already ranked and capped) candidates and
+        # any failure becomes a visible status string, not an exception.
+        if not config.STOCK_NEWS_ENABLED:
+            screen["news"] = {
+                "status": "disabled",
+                "message": "Stock headlines are disabled (ECON_STOCK_NEWS=0).",
+                "items": {}, "errors": {},
+            }
+        else:
+            try:
+                screen["news"] = backend.fetch_news(
+                    screen.get("candidates") or [],
+                    days=config.STOCK_NEWS_WINDOW_DAYS,
+                    per_symbol=config.STOCK_NEWS_PER_SYMBOL,
+                )
+            except Exception as exc:  # noqa: BLE001 — never fail the screen
+                screen["news"] = {
+                    "status": "unavailable",
+                    "message": (f"Headline fetch failed: "
+                                f"{type(exc).__name__}: {exc}")[:240],
+                    "items": {}, "errors": {},
+                }
+        return screen
     reg.append(("stock_screen", stock_screen_data, config.TTL["stocks"]))
 
     return reg
@@ -427,6 +451,13 @@ def summary():
             limit=config.STOCK_MAX_RESULTS,
             fetch_error=stock_error,
         )
+        stock_screen_data["news"] = {
+            "status": "waiting",
+            "message": ("Waiting for the first stock refresh before looking up "
+                        "headlines."),
+            "items": {}, "errors": {},
+            "window_days": config.STOCK_NEWS_WINDOW_DAYS,
+        }
     else:
         stock_screen_data = stock_screener.current_view(stock_screen_data)
         if stock_error:

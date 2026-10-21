@@ -1895,6 +1895,17 @@ def _doctor_cnbc(run_checks):
     ], width=28)
 
 
+def fetch_news(candidates, *, days=7, per_symbol=3):
+    """Headlines for the displayed stock picks (see news.py for the rules).
+
+    Imported lazily because news.py uses this module's transport and provider
+    breakers; a top-level import would be circular. Kept as a thin wrapper so
+    app.py can call the same `backend.fetch_news(...)` in live and demo modes.
+    """
+    import news
+
+    return news.fetch_news(candidates, days=days, per_symbol=per_symbol)
+
 
 if __name__ == "__main__":
     # CLI diagnostics for the server:
@@ -1967,7 +1978,7 @@ if __name__ == "__main__":
         print(f"curl: {CURL_BIN or 'NOT FOUND (urllib only)'} | yahoo pace "
               f"{YAHOO_MIN_INTERVAL}s | yahoo cookie {'on' if YAHOO_USE_COOKIE else 'off'}")
 
-        print("\n[1/7] FX & macro")
+        print("\n[1/9] FX & macro")
         _run_checks([
             ("frankfurter.app", lambda: _get_json(
                 "https://api.frankfurter.app/latest?from=USD&to=EUR,JPY")["date"]),
@@ -1977,7 +1988,7 @@ if __name__ == "__main__":
             ("worldbank GDP", lambda: worldbank_indicator(["US"], "NY.GDP.MKTP.KD.ZG")[0]["value"]),
         ], width=24)
 
-        print("\n[2/7] Rates, curve & their official fallbacks")
+        print("\n[2/9] Rates, curve & their official fallbacks")
         _run_checks([
             ("fred DFF", lambda: fred_series("DFF", years=1)[-1]),
             ("fred ECBDFR", lambda: fred_series("ECBDFR", years=1)[-1]),
@@ -1989,7 +2000,7 @@ if __name__ == "__main__":
             ("ustreasury breakeven", lambda: _ustreasury_breakeven_series(years=1)[-1]),
         ], width=24)
 
-        print("\n[3/7] FRED quote series (mapped to board cards, including fallbacks)")
+        print("\n[3/9] FRED quote series (mapped to board cards, including fallbacks)")
         mapped_fred = {sid for sid, _age in FRED_QUOTE_MAP.values()}
         mapped_fred.update(
             sid for fallbacks in FRED_QUOTE_FALLBACKS.values()
@@ -2000,7 +2011,7 @@ if __name__ == "__main__":
             for sid in sorted(mapped_fred)
         ], width=24)
 
-        print("\n[4/7] FRED candidate series (not wired in yet)")
+        print("\n[4/9] FRED candidate series (not wired in yet)")
         if FRED_PROBE_CANDIDATES:
             _run_checks([
                 (f"fred {sid}", lambda s=sid: _fred_probe(s, monthly=s.endswith("USDM")))
@@ -2009,13 +2020,13 @@ if __name__ == "__main__":
         else:
             print("  (no unverified candidates)")
 
-        print("\n[5/7] Yahoo Finance (cookie + crumb handshake, charts, spark batch)")
+        print("\n[5/9] Yahoo Finance (cookie + crumb handshake, charts, spark batch)")
         _doctor_yahoo(_run_checks)
 
-        print("\n[6/7] CNBC quote candidates (international indices)")
+        print("\n[6/9] CNBC quote candidates (international indices)")
         _doctor_cnbc(_run_checks)
 
-        print("\n[7/8] Stooq & CoinGecko")
+        print("\n[7/9] Stooq & CoinGecko")
         checks = []
         for scheme, domain, tag in (("https", "stooq.com", ""),
                                     ("https", "stooq.pl", ""),
@@ -2027,7 +2038,7 @@ if __name__ == "__main__":
                            lambda c=coin, s=sym: _coingecko_history(s, days=30)[-1]))
         _run_checks(checks, width=24)
 
-        print("\n[8/8] Tencent / Sina (indices FRED does not publish)")
+        print("\n[8/9] Tencent / Sina (indices FRED does not publish)")
         reset_breakers("tencent")
         reset_breakers("sina")
         clear_asia_cache()
@@ -2042,6 +2053,26 @@ if __name__ == "__main__":
             ("dax ^dax", lambda: _asia_probe("^dax")),
             ("euro stoxx ^stx", lambda: _asia_probe("^stx")),
         ], width=24)
+
+        print("\n[9/9] Stock headline feeds (Stocks tab; Google -> Bing -> Yahoo)")
+        import news
+        reset_breakers("google_news")
+        reset_breakers("bing_news")
+        reset_breakers("yahoo_news")
+        sample = (("PFE", "Pfizer"),)   # a ticker in the configured watchlist
+        probe_checks = []
+        for provider, label, builder in news._URL_BUILDERS:
+            def _probe(b=builder, name=sample[0][1], sym=sample[0][0]):
+                body = _get(b(name, sym, 7), timeout=8)
+                items = news.parse_feed(body)
+                if not items:
+                    raise RuntimeError("empty or unparseable RSS")
+                newest = max((i["published"] for i in items if i["published"]),
+                             default=None)
+                stamp = newest.isoformat(timespec="minutes") if newest else "no dates"
+                return f"{len(items)} item(s), newest {stamp}"
+            probe_checks.append((label, _probe))
+        _run_checks(probe_checks, width=24)
 
         print("\nProvider breakers after the probe:")
         _print_breakers()

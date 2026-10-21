@@ -6,6 +6,7 @@ and the page reloads itself every few minutes (wall-board friendly).
 
 import html
 import math
+import urllib.parse
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
@@ -100,7 +101,7 @@ h2:after{content:"";flex:1;height:1px;background:var(--line)}
 .risk-low{color:var(--up);border-color:#27685e;background:#10221f}
 .risk-medium{color:var(--warn);border-color:#78631e;background:#211d10}
 .risk-high{color:var(--down);border-color:#773c3a;background:#251414}
-.stock-stats{display:grid;grid-template-columns:repeat(3,1fr);gap:7px}
+.stock-stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(78px,1fr));gap:7px}
 .stock-stat{background:var(--panel2);border-radius:7px;padding:7px 8px}
 .stock-stat small{display:block;color:var(--muted);font-size:10px;text-transform:uppercase;letter-spacing:.5px}
 .stock-stat b{display:block;font-size:13px;margin-top:2px;font-variant-numeric:tabular-nums}
@@ -108,6 +109,23 @@ h2:after{content:"";flex:1;height:1px;background:var(--line)}
 .stock-reasons{padding-left:18px;color:var(--muted);font-size:12px}
 .stock-reasons li{margin:2px 0}
 .stock-meta{color:var(--muted);font-size:10.5px;border-top:1px solid var(--line);padding-top:7px}
+.stock-spark svg{width:100%;height:44px;display:block}
+.stock-week{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:12px 14px;margin:12px 0}
+.stock-week h3{font-size:12px;letter-spacing:1.1px;text-transform:uppercase;color:var(--muted);display:flex;flex-wrap:wrap;align-items:baseline;gap:8px;margin-bottom:8px}
+.stock-week h3 .src{font-weight:400;letter-spacing:0;text-transform:none;font-size:11px}
+.stock-week-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(155px,1fr));gap:8px}
+.stock-week-stat{background:var(--panel2);border-radius:8px;padding:8px 10px}
+.stock-week-stat small{display:block;color:var(--muted);font-size:10px;text-transform:uppercase;letter-spacing:.5px}
+.stock-week-stat b{display:block;font-size:15px;margin-top:2px;font-variant-numeric:tabular-nums}
+.stock-week p{color:var(--muted);font-size:11.5px;margin-top:8px}
+.stock-news{border-top:1px solid var(--line);padding-top:8px}
+.stock-news .news-head{font-size:10px;letter-spacing:1px;text-transform:uppercase;color:var(--muted);margin-bottom:5px}
+.stock-news ul{list-style:none;padding:0;margin:0;display:flex;flex-direction:column;gap:6px}
+.stock-news li{font-size:12.5px;line-height:1.35}
+.stock-news a{color:var(--text)}
+.stock-news a:hover{color:var(--accent);text-decoration:underline}
+.stock-news small{display:block;color:var(--muted);font-size:10.5px;margin-top:1px}
+.stock-news .news-empty{color:var(--muted);font-size:11.5px}
 .stock-method{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:13px 16px;margin-top:16px}
 .stock-method summary{cursor:pointer;font-weight:650;font-size:13px}
 .stock-method p,.stock-method li{color:var(--muted);font-size:12px;margin-top:6px}
@@ -175,6 +193,80 @@ def fmt_num(v, dec=2) -> str:
     if v is None:
         return "—"
     return f"{v:,.{dec}f}"
+
+
+def _safe_link(url):
+    """Return an href only for absolute http(s) URLs from a third-party feed."""
+    if not isinstance(url, str):
+        return None
+    candidate = url.strip()
+    try:
+        parsed = urllib.parse.urlparse(candidate)
+    except ValueError:
+        return None
+    if parsed.scheme not in ("http", "https") or not parsed.netloc:
+        return None
+    return candidate
+
+
+def _news_age(value, now=None) -> str:
+    """Coarse age for a headline timestamp; empty string when unparseable."""
+    try:
+        published = _parse_timestamp(value)
+        moment = _parse_timestamp(now) if now is not None else datetime.now(timezone.utc)
+        seconds = (moment - published).total_seconds()
+    except (TypeError, ValueError, OverflowError, OSError):
+        return ""
+    if seconds < 0:
+        return "just now"
+    if seconds < 90 * 60:
+        return f"{max(1, round(seconds / 60))} min ago"
+    if seconds < 36 * 3600:
+        return f"{round(seconds / 3600)} h ago"
+    return f"{round(seconds / 86400)} d ago"
+
+
+def _pct_span(value) -> str:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return '<span class="stock-pct flat">—</span>'
+    cls = "up" if number > 0 else ("down" if number < 0 else "flat")
+    return f'<span class="stock-pct {cls}">{number:+.1f}%</span>'
+
+
+def _stock_week_html(week) -> str:
+    """The 7-day movement strip above the cards (descriptive, not a forecast)."""
+    if not isinstance(week, dict) or not week.get("count"):
+        return ""
+    best = week.get("best") or {}
+    worst = week.get("worst") or {}
+
+    def named(item):
+        symbol = esc(item.get("symbol") or "?")
+        return f"{symbol} {_pct_span(item.get('ret7_pct'))}"
+
+    start = esc(week.get("start_date") or "?")
+    end = esc(week.get("end_date") or "?")
+    window = int(week.get("window_days") or 7)
+    return (
+        '<section class="stock-week">'
+        f'<h3>7-day price movement <span class="src">daily closes · '
+        f'{start} → {end}</span></h3>'
+        '<div class="stock-week-grid">'
+        f'<div class="stock-week-stat"><small>Average {window}-day move</small>'
+        f'<b>{_pct_span(week.get("average_ret7_pct"))}</b></div>'
+        '<div class="stock-week-stat"><small>Up / down</small>'
+        f'<b>{int(week.get("up") or 0)} / {int(week.get("down") or 0)}</b></div>'
+        f'<div class="stock-week-stat"><small>Strongest</small><b>{named(best)}</b></div>'
+        f'<div class="stock-week-stat"><small>Weakest</small><b>{named(worst)}</b></div>'
+        '</div>'
+        f'<p>{int(week.get("count") or 0)} displayed stock(s) · {window} calendar '
+        'days ≈ five U.S. trading sessions. The window starts at the last close '
+        'at or before that boundary and ends at the latest daily bar, so it is '
+        'not an intraday move.</p>'
+        '</section>'
+    )
 
 
 def fmt_auto(v) -> str:
@@ -626,6 +718,35 @@ def build_stocks_page(screen, *, demo=False, generated_at=None, refresh=300):
             'rel="noopener noreferrer">Moomoo Malaysia’s current U.S. fee schedule</a>.</p>'
         )
 
+    news = screen.get("news") if isinstance(screen.get("news"), dict) else {}
+    news_items = news.get("items") if isinstance(news.get("items"), dict) else {}
+    news_errors = news.get("errors") if isinstance(news.get("errors"), dict) else {}
+    news_days = 7
+    try:
+        news_days = max(1, int(news.get("window_days") or 7))
+    except (TypeError, ValueError):
+        pass
+    news_active = bool(news) and news.get("status") != "disabled"
+    news_note = ""
+    if news:
+        if news.get("status") == "disabled":
+            news_note = (f'<p class="stock-currency-note">'
+                         f'{esc(news.get("message") or "Headlines are disabled.")}</p>')
+        elif news.get("status") == "unavailable":
+            news_note = (
+                '<p class="stock-currency-note">Headlines unavailable: '
+                f'{esc(news.get("message") or "no feed answered")} '
+                'Quotes and the stock screen are unaffected.</p>')
+        else:
+            coverage = news.get("coverage") or {}
+            providers = ", ".join(str(p) for p in coverage.get("providers") or [])
+            fetched = _myt_timestamp(news.get("fetched_at_utc"))
+            news_note = (
+                f'<p class="stock-currency-note">Headlines: '
+                f'{esc(news.get("message") or "")} '
+                f'Sources: {esc(providers or "none")} · fetched {fetched}. '
+                'Third-party RSS, not verified, and never used in the ranking.</p>')
+
     cards = []
     for rank, item in enumerate(candidates, 1):
         risk = str(item.get("risk") or "Unknown")
@@ -657,6 +778,50 @@ def build_stocks_page(screen, *, demo=False, generated_at=None, refresh=300):
         quote_age = max(0, int(item.get("quote_age_days") or 0))
         quote_age_unit = "day" if quote_age == 1 else "days"
         reasons = "".join(f"<li>{esc(reason)}</li>" for reason in item.get("reasons") or [])
+        symbol = str(item.get("symbol") or "").upper()
+        bars = [row for row in item.get("recent_bars") or []
+                if isinstance(row, (list, tuple)) and len(row) >= 2]
+        spark_values = [row[1] for row in bars
+                        if isinstance(row[1], (int, float)) and math.isfinite(row[1])]
+        ret7 = item.get("ret7_pct")
+        try:
+            ret7_num = float(ret7)
+        except (TypeError, ValueError):
+            ret7_num = None
+        spark_up = None if ret7_num in (None, 0) else ret7_num > 0
+        spark_html = (
+            f'<div class="stock-spark">{sparkline(spark_values, width=280, height=44, up=spark_up)}</div>'
+            if len(spark_values) >= 2 else "")
+        week_range = ""
+        try:
+            low, high = float(item.get("week_low")), float(item.get("week_high"))
+            if math.isfinite(low) and math.isfinite(high):
+                week_range = f"7-day range ${low:,.2f}–${high:,.2f} · "
+        except (TypeError, ValueError):
+            week_range = ""
+        hits = news_items.get(symbol) or []
+        if hits:
+            rows_html = []
+            for hit in hits[:3]:
+                title = esc(hit.get("title") or "")
+                link = _safe_link(hit.get("link"))
+                headline = (f'<a href="{esc(link)}" target="_blank" '
+                            f'rel="noopener noreferrer">{title}</a>' if link else title)
+                meta = esc(hit.get("publisher") or "unknown publisher")
+                age = _news_age(hit.get("published_utc"), now)
+                if age:
+                    meta += f" · {age}"
+                rows_html.append(f"<li>{headline}<small>{meta}</small></li>")
+            news_html = ('<div class="stock-news"><div class="news-head">Recent headlines</div>'
+                         f'<ul>{"".join(rows_html)}</ul></div>')
+        elif news_active:
+            detail = str(news_errors.get(symbol) or "")[:180]
+            suffix = f" Feed detail: {esc(detail)}" if detail else ""
+            news_html = ('<div class="stock-news"><div class="news-head">Recent headlines</div>'
+                         f'<div class="news-empty">No headline inside the last {news_days} '
+                         f'days matched this ticker.{suffix}</div></div>')
+        else:
+            news_html = ""
         cards.append(f"""<article class="stock-card">
   <div class="stock-head">
     <div><div class="stock-rank">Rank #{rank}</div>
@@ -668,8 +833,10 @@ def build_stocks_page(screen, *, demo=False, generated_at=None, refresh=300):
   <div class="stock-head"><div><div class="stock-price">{price_text}</div>{myr_price_html}</div>
     <div class="stock-name">{esc(item.get("sector") or "")}</div>
   </div>
+  {spark_html}
   <div class="stock-stats">
-    <div class="stock-stat"><small>5 sessions</small><b>{pct(item.get("ret5_pct"))}</b></div>
+    <div class="stock-stat"><small>1 day</small><b>{pct(item.get("ret1_pct"))}</b></div>
+    <div class="stock-stat"><small>7 days</small><b>{pct(item.get("ret7_pct"))}</b></div>
     <div class="stock-stat"><small>20 sessions</small><b>{pct(item.get("ret20_pct"))}</b></div>
     <div class="stock-stat"><small>60 sessions</small><b>{pct(item.get("ret60_pct"))}</b></div>
     <div class="stock-stat"><small>20d volatility</small><b>{fmt_num(item.get("vol20_annual_pct"), 1)}%</b></div>
@@ -677,13 +844,15 @@ def build_stocks_page(screen, *, demo=False, generated_at=None, refresh=300):
     <div class="stock-stat"><small>20d $ volume</small><b>{adv_text}</b></div>
   </div>
   <ul class="stock-reasons">{reasons}</ul>
-  <div class="stock-meta">relative rank score {score_text} · U.S. daily-bar date {esc(item.get("as_of") or "?")} (Eastern Time) ·
+  {news_html}
+  <div class="stock-meta">{week_range}relative rank score {score_text} · U.S. daily-bar date {esc(item.get("as_of") or "?")} (Eastern Time) ·
     {esc(item.get("source") or "unknown source")} · quote age {quote_age} calendar {quote_age_unit}</div>
 </article>""")
 
     cards_html = ("<div class='stock-grid'>" + "".join(cards) + "</div>") if cards else (
         '<div class="section-empty">No stock picks are being shown. '
         'This can mean the feeds are warming, quotes are stale, or no ticker passed the filters.</div>')
+    week_html = _stock_week_html(screen.get("week"))
     fetch_error = screen.get("fetch_error") or screen.get("refresh_error")
     error_label = "Refresh issue / using last-good data" if screen.get("refresh_error") else "Data-source detail"
     error_html = (f'<p class="note">{error_label}: {esc(fetch_error)}</p>'
@@ -738,6 +907,7 @@ def build_stocks_page(screen, *, demo=False, generated_at=None, refresh=300):
 <section class="stock-intro">
   <h2>Short-term stock watchlist <span class="src">· U.S.-listed · every passer, up to {display_cap} names</span></h2>
   <p>Daily closing-price screen of a configured ticker universe. It looks for recent positive momentum and liquidity, then labels recent realized volatility/drawdown risk. Every ticker that clears all filters is listed, ranked by relative score. This is not a forecast, trade signal, or order recommendation.</p>
+  <p>Each card adds the last seven calendar days of price movement and recent third-party headlines. Both are context for your own research: neither is scored, and neither changes which tickers appear.</p>
   <p class="stock-verification">This editable universe is not checked against Moomoo Malaysia’s live symbol availability or order eligibility. Verify each ticker in the app before relying on it; fractional-share eligibility is limited to selected U.S. securities and the list can change. See <a href="https://www.moomoo.com/my/support/topic9_193" target="_blank" rel="noopener noreferrer">Moomoo Malaysia’s fractional-share guide</a>.</p>
 </section>
 <div class="stock-status {state_class}"><b>{message}</b><br>
@@ -746,7 +916,9 @@ def build_stocks_page(screen, *, demo=False, generated_at=None, refresh=300):
   {diagnostics_html}
 </div>
 {cadence_html}
+{news_note}
 {currency_note}
+{week_html}
 {cards_html}
 <details class="stock-method">
   <summary>How the screen and risk labels work</summary>
@@ -758,12 +930,14 @@ def build_stocks_page(screen, *, demo=False, generated_at=None, refresh=300):
     <li>Trend screen: positive 20-session return and latest close above its 20-day average. {esc(screen.get("method") or "The relative score is not a probability or expected return.")}</li>
     <li>Risk buckets: {esc(screen.get("risk_method") or "Not available.")}</li>
     <li>Display: every passing ticker is shown, ranked highest score first, up to {display_cap} names. Ranking is relative within this universe, so a longer list is a wider watchlist, not a stronger signal.</li>
+    <li>7-day movement: the change from the last close at or before seven calendar days before the latest bar (about five U.S. trading sessions) to the latest close. The strip above the cards averages that window across the displayed names; it is a description of past closes, not a forecast.</li>
+    <li>Headlines: one key-less RSS search per displayed ticker (Google News → Bing News → Yahoo Finance headline feed), newest first, keeping only unduplicated items published inside the last {news_days} days whose title mentions the ticker or company. Headlines are third-party context, are not verified, and never change which tickers pass or how they rank. A ticker with no matching article says so.</li>
     <li>Excluded counts: {excluded_html}. Universe size: {universe_size} tickers.</li>
   </ul>
   <p>{esc(screen.get("limitations") or "Technical data only; verify the quote and research the company before investing.")}</p>
   {error_html}
 </details>
-<footer>Data uses daily closes, not intraday prices. Short-term stock investing can lose money quickly. Check current price, bid/ask spread, upcoming earnings/news, company filings, and your broker’s execution details before acting. The screen does not personalize risk or guarantee performance.</footer>
+<footer>Data uses daily closes, not intraday prices. Headlines are third-party RSS links that may be delayed, syndicated or inaccurate; they are not verified and are not part of the screen. Short-term stock investing can lose money quickly. Check current price, bid/ask spread, upcoming earnings/news, company filings, and your broker’s execution details before acting. The screen does not personalize risk or guarantee performance.</footer>
 """
     return (PAGE.replace("__STYLE__", STYLE)
                 .replace("__REFRESH__", str(max(60, int(refresh))))
