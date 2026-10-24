@@ -10,7 +10,7 @@ import urllib.parse
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
-from charts import line_chart, sparkline
+from charts import dual_line_chart, line_chart, sparkline
 
 import briefing
 
@@ -145,6 +145,52 @@ footer{margin-top:36px;color:var(--muted);font-size:12px;border-top:1px solid va
 .status-unavailable{color:var(--muted);border-color:var(--line);background:var(--panel2)}
 .status-inline{margin-left:auto;color:var(--muted);font-size:10px}
 .brief-coverage{font-size:11px;color:var(--muted);margin:0 0 8px}
+.econ-intro{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:14px 16px;margin-bottom:14px}
+.econ-intro p{font-size:13.5px;margin-top:7px}
+.econ-intro p:first-child{margin-top:0}
+.econ-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(340px,1fr));gap:14px;margin:12px 0}
+.econ-country{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:15px 16px}
+.econ-country-head{display:flex;flex-wrap:wrap;align-items:baseline;justify-content:space-between;gap:8px}
+.econ-country-head h3{font-size:18px;letter-spacing:.2px}
+.econ-tag{color:var(--muted);font-size:11px}
+.econ-read{font-size:13.5px;margin:8px 0 10px}
+.econ-stats{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}
+.econ-stat{background:var(--panel2);border-radius:8px;padding:9px 10px}
+.econ-stat small{display:block;color:var(--muted);font-size:10px;letter-spacing:.6px;text-transform:uppercase}
+.econ-stat b{display:block;font-size:19px;font-weight:700;font-variant-numeric:tabular-nums;margin-top:2px}
+.econ-stat b i{font-style:normal;font-size:11px;color:var(--muted);margin-left:2px;font-weight:600}
+.econ-stat span{display:block;color:var(--muted);font-size:10.5px;margin-top:1px}
+.econ-policy{margin-top:10px;background:#101820;border:1px solid #2c4f78;border-radius:8px;padding:9px 11px}
+.econ-policy small{display:block;color:var(--muted);font-size:10px;text-transform:uppercase;letter-spacing:.6px}
+.econ-policy b{font-size:17px;font-variant-numeric:tabular-nums}
+.econ-policy .econ-src{color:var(--muted);font-size:10.5px;margin-left:6px}
+.econ-policy p{color:var(--muted);font-size:11.5px;margin-top:5px}
+.econ-country h4{font-size:11px;letter-spacing:1.1px;text-transform:uppercase;color:var(--muted);margin:14px 0 6px}
+.econ-signals{list-style:none;padding:0;margin:0;display:flex;flex-direction:column;gap:7px}
+.econ-signals li{font-size:12.5px;line-height:1.4;padding-left:13px;position:relative}
+.econ-signals li:before{content:"";position:absolute;left:0;top:5px;width:6px;height:6px;border-radius:50%;background:currentColor}
+.econ-signals b{color:var(--text);font-weight:650}
+.econ-quote{font-size:12.5px;margin:8px 0 0;padding-left:13px;position:relative}
+.econ-quote:before{content:"";position:absolute;left:0;top:5px;width:6px;height:6px;border-radius:50%;background:var(--accent)}
+.econ-quote b{color:var(--text);font-weight:650}
+.econ-cols{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:12px;margin:12px 0}
+.econ-card{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:13px 15px}
+.econ-card h4{font-size:13.5px;margin-bottom:5px}
+.econ-card p{font-size:12.5px;color:var(--muted)}
+.econ-card ul{padding-left:17px;margin:0}
+.econ-card li{font-size:12.5px;color:var(--muted);margin:4px 0}
+.econ-card li b{color:var(--text);font-weight:650}
+.chart-title{font-size:11.5px;letter-spacing:1px;text-transform:uppercase;color:var(--muted);margin-bottom:6px}
+.econ-bar{margin:2px 0}
+.econ-bar .bar-label{white-space:normal}
+.bar-fill.econ-us{background:#4a9eff}
+.bar-fill.econ-my{background:#e5a50a}
+.econ-glossary{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:13px 16px;margin-top:16px}
+.econ-glossary summary{cursor:pointer;font-weight:650;font-size:13px}
+.econ-glossary dl{margin-top:9px;display:grid;gap:8px}
+.econ-glossary dt{font-weight:650;font-size:12.5px}
+.econ-glossary dd{color:var(--muted);font-size:12px;margin:0}
+.econ-coverage{color:var(--muted);font-size:11.5px;margin-top:10px}
 @media(max-width:640px){
   body{padding:12px 12px 28px;font-size:14px}
   header{gap:7px;align-items:flex-start;flex-direction:column}
@@ -432,6 +478,7 @@ def tabs(active):
     return ('<nav class="tabs">'
             + link("/", "board", "Board")
             + link("/summary", "summary", "Summary")
+            + link("/economies", "economies", "Economy 101")
             + link("/stocks", "stocks", "Stocks")
             + "</nav>")
 
@@ -708,6 +755,279 @@ def build_summary_page(sections, *, demo=False, generated_at=None, refresh=300):
     return (PAGE.replace("__STYLE__", STYLE)
                 .replace("__REFRESH__", str(max(60, int(refresh))))
                 .replace("__BODY__", body))
+
+
+def _econ_stat_tile(stat):
+    value = stat.get("value")
+    unit = str(stat.get("unit") or "")
+    if value is None:
+        return (f'<div class="econ-stat"><small>{esc(stat.get("label"))}</small>'
+                f'<b>—</b><span>awaiting data</span></div>')
+    shown_unit = f"<i>{esc(unit)}</i>" if unit else ""
+    return (f'<div class="econ-stat"><small>{esc(stat.get("label"))}</small>'
+            f'<b>{value:,.1f}{shown_unit}</b>'
+            f'<span>{esc(stat.get("year") or "")}</span></div>')
+
+
+def _econ_signal_item(signal, unit="%"):
+    value = signal.get("value")
+    year = signal.get("year")
+    label = esc(signal.get("label"))
+    if value is None:
+        head = f"{label} — awaiting data"
+    else:
+        shown = (f"{value:,.1f}%" if unit == "%"
+                 else f"{value:,.1f} {unit}".strip())
+        head = f"{label} {shown}" + (f" ({year})" if year else "")
+    tone = esc(signal.get("tone") or "muted")
+    return (f'<li class="tone-{tone}"><b>{head}</b> — '
+            f'{esc(signal.get("text"))}</li>')
+
+
+def _econ_compare_bars(comparison, unit="%"):
+    """Two horizontal bars for one indicator (latest year each)."""
+    rows = []
+    for code, name, cls in (("US", "United States", "econ-us"),
+                            ("MY", "Malaysia", "econ-my")):
+        item = comparison.get(code) or {}
+        value = item.get("value")
+        if value is None:
+            continue
+        year = item.get("year") or ""
+        rows.append((name, float(value), year, cls))
+    if not rows:
+        return ""
+    span = max(abs(value) for _, value, _, _ in rows) or 1.0
+    out = []
+    for name, value, year, cls in rows:
+        width = max(2.0, min(100.0, abs(value) / span * 100.0))
+        out.append(
+            f'<div class="bar-row econ-bar">'
+            f'<span class="bar-label">{esc(name)} <small>({esc(year)})</small></span>'
+            f'<div class="bar-track"><div class="bar-fill {cls}" '
+            f'style="width:{width:.0f}%"></div></div>'
+            f'<span class="bar-val">{value:,.0f}{esc(unit)}</span></div>')
+    return "".join(out)
+
+
+def build_economy_page(view, *, demo=False, generated_at=None, refresh=300):
+    """Economy 101 — plain-language US vs Malaysia explainer tab.
+
+    Renders only what ``economy.build_economy`` assembled from cached data, so a
+    missing World Bank series shows "awaiting data" instead of breaking the tab.
+    """
+    now = generated_at or datetime.now(timezone.utc).astimezone()
+    view = view or {}
+    countries = list(view.get("countries") or [])
+    coverage = view.get("coverage") or {}
+    banner = ('<span class="badge demo">DEMO MODE — synthetic annual series; '
+              'not live World Bank data</span>' if demo else "")
+
+    # --- Country panels ------------------------------------------------------
+    panels = []
+    for country in countries:
+        stats = "".join(_econ_stat_tile(stat) for stat in country.get("stats") or [])
+        policy = country.get("policy") or {}
+        rate = policy.get("value")
+        rate_text = f"{rate:,.2f}%" if isinstance(rate, (int, float)) else "awaiting data"
+        manual = ('<span class="econ-src">manual reference · as of '
+                  f'{esc(policy.get("as_of") or "?")}</span>'
+                  if policy.get("manual") else
+                  f'<span class="econ-src">live · {esc(policy.get("source") or "?")} · '
+                  f'{esc(policy.get("as_of") or "?")}</span>')
+        link = policy.get("link")
+        note = esc(policy.get("note") or "")
+        if isinstance(link, str) and link.startswith("https://"):
+            note += f' <a href="{esc(link)}" rel="noopener noreferrer">source</a>'
+        signals = "".join(
+            _econ_signal_item(signal, str(signal.get("unit") or "%"))
+            for signal in country.get("signals") or [])
+        panels.append(f"""<article class="econ-country">
+  <div class="econ-country-head">
+    <h3>{esc(country.get("name"))}</h3>
+    <span class="econ-tag">{esc(country.get("currency"))} · {esc(country.get("central_bank"))}</span>
+  </div>
+  <p class="econ-read">{esc(country.get("read"))}</p>
+  <div class="econ-stats">{stats}</div>
+  <div class="econ-policy">
+    <small>Policy rate · {esc(policy.get("label") or "—")}</small>
+    <b>{esc(rate_text)}</b>{manual}
+    <p>{note}</p>
+  </div>
+  <h4>What the numbers mean</h4>
+  <ul class="econ-signals">{signals}</ul>
+</article>""")
+
+    if not panels:
+        panels.append('<div class="section-empty">Fetching the annual World Bank '
+                      'series for the US and Malaysia… first load runs in the '
+                      'background.</div>')
+
+    # --- Charts --------------------------------------------------------------
+    series_by_code = {c.get("code"): (c.get("series") or {}) for c in countries}
+    chart_labels = [c.get("name") or c.get("code") or "" for c in countries]
+
+    def chart_for(key):
+        return [(series_by_code.get(c.get("code")) or {}).get(key) or []
+                for c in countries]
+
+    def chart_card(title, key, note, color_unit="%"):
+        pairs = chart_for(key)
+        if not any(pairs):
+            return (f'<div class="big-chart"><div class="chart-title">{esc(title)}</div>'
+                    f'<div class="chart-empty">awaiting World Bank data</div></div>')
+        return (f'<div class="big-chart"><div class="chart-title">{esc(title)}</div>'
+                + dual_line_chart(pairs, labels=chart_labels)
+                + f'<div class="note">{esc(note)}</div></div>')
+
+    years = int(coverage.get("history_years") or 12)
+    growth_chart = chart_card(
+        f"Growth — % change a year, last {years} years", "gdp_growth",
+        "Real GDP growth, year on year. Below the dashed line = output shrank.")
+    inflation_chart = chart_card(
+        f"Inflation — % change in consumer prices, last {years} years", "inflation",
+        "Average consumer prices, year on year. The dashed line is zero.")
+
+    comparisons = list(view.get("comparisons") or [])
+    trade_comparison = next(
+        (item for item in comparisons if item.get("key") == "trade"), None)
+    trade_chart = ""
+    if trade_comparison:
+        trade_chart = (
+            f'<div class="big-chart"><div class="chart-title">Trade openness — '
+            f'exports + imports, % of GDP</div>'
+            + _econ_compare_bars(trade_comparison, unit="%")
+            + '<div class="note">A higher bar means the outside world moves that '
+              'economy more.</div></div>')
+
+    comparison_cards = "".join(
+        f'<div class="econ-card"><h4>{esc(item.get("label"))}</h4>'
+        f'<p>{esc(item.get("text"))}</p></div>'
+        for item in comparisons)
+    comparison_block = (f'<div class="econ-cols">{comparison_cards}</div>'
+                        if comparison_cards else "")
+
+    # --- Ringgit chart -------------------------------------------------------
+    ringgit = view.get("ringgit") or {}
+    ringgit_block = '<div class="section-empty">Awaiting the USD/MYR reference rate.</div>'
+    if ringgit.get("rate") is not None:
+        spark = ringgit.get("spark") or []
+        change = ringgit.get("change_pct")
+        change_text = ""
+        if isinstance(change, (int, float)):
+            change_text = (f" · {change:+.1f}% over ~60 reference days "
+                           f"({'ringgit weaker' if change > 0 else 'ringgit stronger'})")
+        chart = (line_chart(spark, color="#e5a50a", fmt=lambda v: f"{v:.3f}")
+                 if len(spark) >= 2 else "")
+        ringgit_block = (
+            f'<div class="big-chart"><div class="chart-title">USD/MYR — ringgit '
+            f'per dollar</div>{chart}'
+            f'<div class="note">{ringgit["rate"]:.3f} ringgit per dollar · '
+            f'{esc(ringgit.get("date") or "?")} · {esc(ringgit.get("source") or "ECB")}'
+            f'{esc(change_text)}. A rising line means a weaker ringgit.</div></div>')
+
+    connections = "".join(
+        f'<div class="econ-card"><h4>{esc(item.get("title"))}</h4>'
+        f'<p>{esc(item.get("text"))}</p></div>'
+        for item in view.get("connections") or [])
+
+    households = view.get("households") or {}
+
+    def household_card(title, key):
+        items = households.get(key) or []
+        if not items:
+            return ""
+        rows = "".join(
+            f'<li><b>{esc(item.get("title"))}</b> — {esc(item.get("text"))}</li>'
+            for item in items)
+        return (f'<div class="econ-card"><h4>{esc(title)}</h4>'
+                f'<ul>{rows}</ul></div>')
+
+    # --- Coverage ------------------------------------------------------------
+    indicator_coverage = coverage.get("indicators") or {}
+    cov_lines = []
+    for meta in view.get("indicators") or []:
+        info = indicator_coverage.get(meta.get("key")) or {}
+        got = info.get("countries_with_data")
+        expected = info.get("expected")
+        if got is None:
+            continue
+        state = "ok" if got == expected else ("partial" if got else "missing")
+        cov_lines.append(
+            f'<li>{esc(meta.get("label"))} — {int(got)}/{int(expected)} countries'
+            + (f' <span class="warn-inline">({esc(info.get("error"))})</span>'
+               if info.get("error") else "")
+            + f' · {state}</li>')
+    latest_year = coverage.get("latest_year")
+    cov_html = (
+        '<p class="econ-coverage">Source: World Bank annual indicators (same '
+        "provider as the board's macro panel), ECB reference rates via "
+        'Frankfurter for USD/MYR, and FRED DFF for the Fed funds rate. '
+        + (f'Newest annual observation loaded: {esc(latest_year)}. ' if latest_year else "")
+        + 'Annual values are revised and usually published 6–18 months after '
+          'the year they describe, so the newest point is history, not today. '
+          'The OPR figure is typed into the dashboard config, not fetched live.'
+          '</p>'
+        + ('<ul class="econ-coverage">' + "".join(cov_lines) + '</ul>'
+           if cov_lines else ""))
+
+    waiting_note = ""
+    if not coverage.get("has_data"):
+        waiting_note = ('<div class="section-empty">Fetching the annual World Bank '
+                        'series for the United States and Malaysia. The first load '
+                        'takes a few seconds and then refreshes once a day; this '
+                        'page shows "awaiting data" until it lands.</div>')
+
+    glossary = "".join(
+        f'<dt>{esc(item.get("term"))}</dt><dd>{esc(item.get("text"))}</dd>'
+        for item in view.get("glossary") or [])
+
+    body = f"""<header>
+  <h1>ECON<span>.</span>world</h1>
+  <span class="updated">updated {esc(now.strftime("%Y-%m-%d %H:%M %Z"))}</span>
+  {banner}
+</header>
+{tabs("economies")}
+<div class="econ-intro">
+  <p><b>Two economies, in plain English.</b> The United States is the world's
+  largest economy and sets the price of dollars. Malaysia is a small, very open
+  economy that trades heavily with the US and the rest of Asia. This tab puts the
+  same four numbers next to each other — growth, inflation, unemployment and
+  trade — then explains what they mean and how the two countries affect each
+  other.</p>
+  <p class="meta">Reading rule: every sentence below sits next to the number it
+  is based on. If a number is missing, the page says so. Nothing here is a
+  forecast, a recommendation, or advice.</p>
+</div>
+
+<h2>At a glance <span class="src">· annual World Bank data, newest print per indicator</span></h2>
+<div class="econ-grid">{"".join(panels)}</div>
+
+<h2>Two lines, ten years <span class="src">· United States vs Malaysia</span></h2>
+{waiting_note}
+<div class="econ-cols">{growth_chart}{inflation_chart}</div>
+{trade_chart}
+{comparison_block}
+
+<h2>How Malaysia and the United States are linked <span class="src">· transmission channels, not forecasts</span></h2>
+<div class="econ-cols">{ringgit_block}</div>
+<div class="econ-cols">{connections}</div>
+
+<h2>What it means for households <span class="src">· general explanation, not advice</span></h2>
+<div class="econ-cols">{household_card("If you live in Malaysia", "MY")}{household_card("If you live in the United States", "US")}</div>
+
+<details class="econ-glossary">
+  <summary>Plain-language glossary</summary>
+  <dl>{glossary}</dl>
+</details>
+{cov_html}
+<footer>Descriptive comparison of published annual data · World Bank / FRED / ECB.
+Not a forecast and not investment advice.</footer>
+"""
+    return (PAGE.replace("__STYLE__", STYLE)
+                .replace("__REFRESH__", str(max(60, int(refresh))))
+                .replace("__BODY__", body))
+
 
 
 def build_stocks_page(screen, *, demo=False, generated_at=None, refresh=300):
