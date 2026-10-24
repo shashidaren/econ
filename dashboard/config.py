@@ -80,7 +80,7 @@ FX_CURRENCIES = [
 ]
 
 # World Bank macro aggregates (annual, latest available value)
-WB_COUNTRIES = ["US", "EMU", "CN", "JP", "GB", "IN", "DE"]
+WB_COUNTRIES = ["US", "EMU", "CN", "JP", "GB", "IN", "DE", "MY"]
 WB_CPI = "FP.CPI.TOTL.ZG"      # Inflation, consumer prices (annual %)
 WB_GDP = "NY.GDP.MKTP.KD.ZG"   # GDP growth (annual %)
 
@@ -94,12 +94,57 @@ FRED_CURVE = ("T10Y2Y", "US 10Y − 2Y Treasury Spread", 4)   # (id, title, year
 FRED_BREAKEVEN = ("T10YIE", "US 10Y Breakeven Inflation")
 FRED_REAL = ("DFII10", "US 10Y Real Yield")  # TIPS yield; the usual gold headwind/tailwind
 
+# --- Economy 101 tab (US vs Malaysia) ---------------------------------------
+# Annual World Bank series for the two economies, drawn from the same provider
+# as the macro panel above. No new upstream services: the FX (ECB/Frankfurter)
+# and Fed-funds (FRED) numbers this tab uses are already fetched for the board.
+ECON_COUNTRIES = [
+    {"code": "US", "name": "United States", "currency": "USD",
+     "central_bank": "Federal Reserve", "rate_label": "Fed funds rate"},
+    {"code": "MY", "name": "Malaysia", "currency": "MYR",
+     "central_bank": "Bank Negara Malaysia",
+     "rate_label": "Overnight Policy Rate (OPR)"},
+]
+
+# Year span shown on the tab's charts (12 annual points is plenty for a glance).
+ECON_HISTORY_YEARS = int(os.environ.get("ECON_HISTORY_YEARS", "12"))
+
+# Indicator keys are stable ids used by economy.py; `explain` is layman wording.
+ECON_INDICATORS = [
+    {"key": "gdp_growth", "indicator": "NY.GDP.MKTP.KD.ZG",
+     "label": "Economic growth", "short": "Growth", "unit": "%",
+     "explain": "How much more the country produced than a year earlier, "
+                "after stripping out price changes."},
+    {"key": "inflation", "indicator": "FP.CPI.TOTL.ZG",
+     "label": "Inflation", "short": "Inflation", "unit": "%",
+     "explain": "How much the average basket of consumer prices rose versus "
+                "a year earlier."},
+    {"key": "unemployment", "indicator": "SL.UEM.TOTL.ZS",
+     "label": "Unemployment", "short": "Unemployment", "unit": "%",
+     "explain": "Share of people who want work but do not have it "
+                "(ILO modelled estimate)."},
+    {"key": "trade", "indicator": "NE.TRD.GNFS.ZS",
+     "label": "Trade openness", "short": "Trade", "unit": "% of GDP",
+     "explain": "Exports plus imports as a share of the whole economy — how "
+                "much the outside world matters to it."},
+]
+
+# Malaysia's OPR has no stable key-less JSON endpoint, so it is a manual
+# reference value, clearly labelled as such wherever it is displayed. Update
+# it whenever Bank Negara Malaysia changes the rate (bnm.gov.my).
+ECON_MY_OPR_AS_OF = os.environ.get("ECON_MY_OPR_AS_OF", "2023-05-03")
+try:
+    ECON_MY_OPR = float(os.environ.get("ECON_MY_OPR", "3.00"))
+except ValueError:
+    ECON_MY_OPR = 3.00
+
 # --- Cache lifetimes (seconds) ------------------------------------------------
 TTL = {
     "market": 10 * 60,        # indices & commodities
     "fx": 60 * 60,            # FX reference rates
     "wb": 24 * 60 * 60,       # World Bank annual data
     "fred": 60 * 60,          # FRED / central-bank daily series
+    "economy": 24 * 60 * 60,  # Economy 101 annual World Bank series
 }
 
 # Days of history used for sparklines / charts

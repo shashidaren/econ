@@ -4,7 +4,8 @@ Self-hosted, glanceable **global macro dashboard** for a Debian LXC container
 (hostname `econ`, LAN IP `192.168.0.149`, port `8080`).
 
 A dark-mode wall-board for world indices, commodities, currencies, inflation,
-central-bank rates, and the US yield curve — plus a separate **Stocks** tab that
+central-bank rates, and the US yield curve — plus an **Economy 101** tab that
+explains the US and Malaysian economies in plain English, and a **Stocks** tab that
 screens a fixed US watchlist and lists every short-term technical candidate
 under $50 that passes (up to seven, ranked) with backward-looking
 low/medium/high risk labels. Served
@@ -64,6 +65,40 @@ How it behaves:
   and attempts to reinstall the previous revision.
 
 Preview without a server (sample data): `ECON_DEMO=1 python3 dashboard/app.py`
+
+## Economy 101 — US vs Malaysia, in plain English
+
+- `/economies` — a layman-oriented explainer tab; `/api/economies` returns the
+  same view model as JSON (also nested in `/api/summary` as `economy`).
+- **At a glance:** one panel per country with the same four annual indicators —
+  real GDP growth, CPI inflation, unemployment, and trade openness
+  (exports + imports as a share of GDP) — each print labelled with its year, plus
+  a one-sentence read and a plain-language "what the numbers mean" list driven by
+  fixed thresholds (growth 0/2/4/7%, inflation 0/2/3/5%, unemployment
+  3.5/5.5/8%, trade 50/100% of GDP).
+- **Charts:** two-line SVG comparison charts (US vs Malaysia) for growth and
+  inflation over `ECON_HISTORY_YEARS` (default 12 years), a trade-openness bar
+  comparison, and a USD/MYR line chart. Missing years are gaps, never
+  interpolated. All charts are inline SVG — no JS, no CDN.
+- **How the two are linked:** short cards on the ringgit, the Fed funds/OPR
+  interest-rate gap, imported inflation, energy and palm oil, the electronics
+  and semiconductor cycle, and risk-off dollar flows. These are described as
+  transmission channels, not modelled causal estimates.
+- **Households:** "If you live in Malaysia" and "If you live in the United
+  States" cards (prices, loan repayments, jobs/exports, dollar abroad), plus a
+  plain-language glossary.
+- **Data:** the same key-less World Bank API the macro panel uses (annual,
+  revised, usually 6–18 months behind), the existing ECB/Frankfurter USD/MYR
+  quote, and the existing FRED `DFF` Fed funds series. **No new upstream
+  services.** A single failing indicator is reported on the page and does not
+  blank the others; the tab caches for 24 h (`TTL["economy"]`).
+- **Malaysia's OPR is a manual config value** (`ECON_MY_OPR`,
+  `ECON_MY_OPR_AS_OF`) because BNM has no stable key-less endpoint. It is
+  labelled "manual reference · as of <date>" everywhere it appears, with a link
+  to bnm.gov.my. Update it when BNM moves the rate; it is never presented as a
+  live print.
+- Descriptive only. Annual data is history, not today's economy, and nothing on
+  the tab is a forecast or investment advice.
 
 ## Stocks watchlist
 
@@ -145,6 +180,7 @@ python3 -m unittest discover -s tests -v
 | World indices & commodities | Yahoo Finance — current warm path tries one batched `v7/finance/spark` request first, then v8 chart per unserved symbol; `--doctor` probes v8 charts with the cookie before spark | FRED public CSV, freshness-gated (`SP500`, `NASDAQ100`, `DJIA`, `NIKKEI225`, monthly `POILWTIUSDM`, daily `DCOILBRENTEU` → monthly `POILBREUSDM`, `PCOPPUSDM`, `PWHEAMTUSDM`, `PALUMUSDM`, `PNICKUSDM`; 120-day freshness for monthly IMF data) → Stooq (`.com`/`.pl`, https+http) → CoinGecko tokenised metals (`pax-gold`, `kinesis-silver`) |
 | Currencies (FX, USD base) | Frankfurter (`api.frankfurter.app`, ECB rates) | `api.frankfurter.dev/v1` |
 | Annual inflation & GDP growth | World Bank API (`api.worldbank.org`) | Cached last-good snapshot on disk |
+| Economy 101 annual series (US + Malaysia growth, inflation, unemployment, trade) | World Bank API (`api.worldbank.org`, bounded `date=` window) | Cached last-good payload on disk; one failing indicator is reported, not substituted |
 | Central-bank policy rates (`DFF`, `ECBDFR`) | FRED public CSV (`fredgraph.csv?cosd=...`) | NY Fed Markets API (`markets.newyorkfed.org`) for `DFF`; ECB Data Portal (`data-api.ecb.europa.eu`) for `ECBDFR` |
 | US 10Y–2Y yield curve & 10Y breakeven | FRED public CSV (`T10Y2Y`, `T10YIE`) | Official US Treasury Daily Par & Real Yield Curve CSV (`home.treasury.gov`) |
 | Short-term US stock history | Sina US daily K (`stock.finance.sina.com.cn` JSONP) | Nasdaq historical API (`api.nasdaq.com`) → Tencent K-lines (both hosts, per-host breakers) → one Yahoo Finance `v7/finance/spark` batch → Stooq `.us` daily CSV; last good screen is served badged `cached · sources blocked · data as of …` if all fail |

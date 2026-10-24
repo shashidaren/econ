@@ -1916,6 +1916,52 @@ def worldbank_indicator(country_codes, indicator: str):
     return out
 
 
+def worldbank_history(country_codes, indicator: str, years: int = 12):
+    """Annual World Bank series per country, for the Economy 101 tab.
+
+    Returns ``{ISO2: {"name": str, "series": [[year, value], ...]}}`` with each
+    series sorted oldest -> newest. A year the World Bank has not published yet
+    is simply absent; a country with no observations keeps an empty list. The
+    call is separate from :func:`worldbank_indicator` because that one asks for
+    only the latest value (`mrnev=1`) and cannot draw a chart.
+    """
+    codes = [str(c).strip().upper() for c in country_codes or [] if str(c).strip()]
+    if not codes:
+        raise ValueError("worldbank_history: no country codes")
+    end_year = date.today().year
+    start_year = end_year - max(2, int(years)) + 1
+    ids = ";".join(codes)
+    url = (
+        f"https://api.worldbank.org/v2/country/{ids}/indicator/{indicator}"
+        f"?format=json&date={start_year}:{end_year}&per_page=1000"
+    )
+    j = _get_json(url, timeout=15)
+    if not isinstance(j, list) or len(j) < 2 or not isinstance(j[1], list):
+        raise RuntimeError(f"worldbank: unexpected payload for {indicator}")
+    out = {code: {"name": code, "series": []} for code in codes}
+    for row in j[1]:
+        if not isinstance(row, dict) or row.get("value") is None:
+            continue
+        country = row.get("country") or {}
+        code = str(country.get("id") or "").strip().upper()
+        if code not in out:
+            continue
+        try:
+            year = int(str(row.get("date"))[:4])
+            value = float(row["value"])
+        except (TypeError, ValueError):
+            continue
+        if not math.isfinite(value):
+            continue
+        out[code]["name"] = country.get("value") or out[code]["name"]
+        out[code]["series"].append([year, round(value, 2)])
+    for entry in out.values():
+        entry["series"].sort(key=lambda point: point[0])
+    if not any(entry["series"] for entry in out.values()):
+        raise RuntimeError(f"worldbank: no observations for {indicator}")
+    return out
+
+
 # --------------------------------------------------------------------------
 # FRED + Official Central-Bank / US Treasury Fallbacks
 # --------------------------------------------------------------------------
@@ -2327,6 +2373,18 @@ if __name__ == "__main__":
         print(f"  -> {ok}/{len(checks)} passed")
         return ok
 
+    def _wb_history_probe(codes, indicator, label):
+        out = worldbank_history(codes, indicator, years=12)
+        bits = []
+        for code in codes:
+            series = (out.get(code) or {}).get("series") or []
+            if not series:
+                bits.append(f"{code}: no data")
+                continue
+            year, value = series[-1]
+            bits.append(f"{code} {year}={value} ({len(series)}y)")
+        return f"{label}: " + " | ".join(bits)
+
     def _fred_probe(sid, monthly=False):
         rows = _fred_csv_series(sid, window_years=20 if monthly else 2)
         valid = [(d, v) for d, v in rows if v is not None]
@@ -2361,6 +2419,8 @@ if __name__ == "__main__":
         _run_checks([
             ("fx_latest", lambda: fx_latest(["EUR", "JPY", "GBP"])),
             ("worldbank_cpi", lambda: worldbank_indicator(["US", "EMU"], "FP.CPI.TOTL.ZG")),
+            ("worldbank_history", lambda: len(worldbank_history(
+                ["US", "MY"], "NY.GDP.MKTP.KD.ZG", years=5)["MY"]["series"])),
             ("rate:DFF", lambda: fred_series("DFF", years=1)[-1]),
             ("rate:ECBDFR", lambda: fred_series("ECBDFR", years=1)[-1]),
             ("curve:T10Y2Y", lambda: fred_series("T10Y2Y", years=1)[-1]),
@@ -2389,7 +2449,11 @@ if __name__ == "__main__":
                 "https://api.frankfurter.dev/v1/latest?base=USD&symbols=EUR,JPY")["date"]),
             ("worldbank CPI", lambda: worldbank_indicator(["US"], "FP.CPI.TOTL.ZG")[0]["value"]),
             ("worldbank GDP", lambda: worldbank_indicator(["US"], "NY.GDP.MKTP.KD.ZG")[0]["value"]),
-        ], width=24)
+            ("wb history growth (US/MY)", lambda: _wb_history_probe(
+                ["US", "MY"], "NY.GDP.MKTP.KD.ZG", "growth")),
+            ("wb history trade (US/MY)", lambda: _wb_history_probe(
+                ["US", "MY"], "NE.TRD.GNFS.ZS", "trade")),
+        ], width=26)
 
         print("\n[2/10] Rates, curve & their official fallbacks")
         _run_checks([

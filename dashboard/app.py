@@ -8,9 +8,15 @@ Python stdlib only (no pip deps). Runs as a systemd service on the LXC.
   ECON_DEMO=1        serve bundled sample data (no network) for previews
   ECON_REFRESH=300   background cache refresh cadence (seconds)
 
-Endpoints:  /            the dashboard
-            /api/summary data as JSON
-            /healthz     liveness probe
+Endpoints:  /             the dashboard
+            /summary      prose summary
+            /economies    Economy 101 (US vs Malaysia explainer)
+            /stocks       short-term stock screen
+            /api/summary  data as JSON
+            /api/economies Economy 101 view as JSON
+            /api/stocks   stock screen as JSON
+            /api/status   compact freshness probe
+            /healthz      liveness probe
 """
 
 import json
@@ -27,6 +33,7 @@ from urllib.parse import urlparse
 
 import briefing
 import config
+import economy
 import render
 import sources
 import stocks as stock_screener
@@ -119,6 +126,38 @@ def fetch_into_cache(key, fn, ttl):
 # ---------------------------------------------------------------------------
 # Fetch registry — fast macro sources first, then market quotes
 # ---------------------------------------------------------------------------
+
+def economy_history():
+    """Annual World Bank series for the Economy 101 tab (US + Malaysia).
+
+    One payload, four indicators. A single failing indicator is recorded as an
+    error string and does not blank the others; only a complete miss raises, so
+    the cache keeps the last good series.
+    """
+    countries = {str(c["code"]).upper(): {"name": c["name"], "indicators": {}}
+                 for c in config.ECON_COUNTRIES}
+    errors = {}
+    for meta in config.ECON_INDICATORS:
+        key, indicator = meta["key"], meta["indicator"]
+        try:
+            rows = backend.worldbank_history(
+                list(countries), indicator, years=config.ECON_HISTORY_YEARS)
+        except Exception as exc:  # noqa: BLE001 — one indicator must not blank the tab
+            errors[key] = f"{type(exc).__name__}: {exc}"[:200]
+            continue
+        for code, payload in rows.items():
+            if code not in countries:
+                continue
+            countries[code]["name"] = payload.get("name") or countries[code]["name"]
+            countries[code]["indicators"][key] = payload.get("series") or []
+    if not any(entry["indicators"] for entry in countries.values()):
+        raise RuntimeError("worldbank: no annual series for the Economy tab")
+    return {
+        "countries": countries,
+        "errors": errors,
+        "generated_at_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+    }
+
 
 def build_registry():
     reg = []  # (key, fn, ttl)
@@ -223,6 +262,11 @@ def build_registry():
                 }
         return screen
     reg.append(("stock_screen", stock_screen_data, config.TTL["stocks"]))
+
+    # 6. Economy 101 tab: annual World Bank series for the US and Malaysia.
+    # Same provider as the macro panel; one cached payload on a daily TTL.
+    reg.append(("economy_history", economy_history, config.TTL.get(
+        "economy", 24 * 60 * 60)))
 
     return reg
 
@@ -593,8 +637,10 @@ def summary():
         "errors": errors[:6],
         "providers": providers,
         "stock_screen": stock_screen_data,
+        "economy_history": get_data("economy_history") or {},
     }
     out["briefing"] = briefing.build_briefing(out)
+    out["economy"] = economy.build_economy(out)
     return out
 
 
@@ -635,6 +681,20 @@ class Handler(BaseHTTPRequestHandler):
                     refresh=config.REFRESH_SECONDS,
                 )
                 self._send(200, page.encode(), "text/html; charset=utf-8")
+            elif path == "/economies":
+                s = summary()
+                page = render.build_economy_page(
+                    s.get("economy") or {},
+                    demo=config.DEMO,
+                    generated_at=datetime.now(timezone.utc).astimezone(),
+                    refresh=config.REFRESH_SECONDS,
+                )
+                self._send(200, page.encode(), "text/html; charset=utf-8")
+            elif path == "/api/economies":
+                s = summary()
+                body = json.dumps(s.get("economy") or {}, default=str,
+                                  indent=1).encode()
+                self._send(200, body, "application/json")
             elif path == "/stocks":
                 s = summary()
                 page = render.build_stocks_page(

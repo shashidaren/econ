@@ -22,11 +22,11 @@ _WB = {
     "FP.CPI.TOTL.ZG": [("United States", "US", "2.9"), ("Euro area", "EMU", "2.4"),
                        ("China", "CN", "0.2"), ("Japan", "JP", "2.5"),
                        ("United Kingdom", "GB", "2.6"), ("India", "IN", "4.9"),
-                       ("Germany", "DE", "2.5")],
+                       ("Germany", "DE", "2.5"), ("Malaysia", "MY", "2.1")],
     "NY.GDP.MKTP.KD.ZG": [("United States", "US", "2.8"), ("Euro area", "EMU", "0.9"),
                           ("China", "CN", "5.0"), ("Japan", "JP", "0.1"),
                           ("United Kingdom", "GB", "1.1"), ("India", "IN", "6.7"),
-                          ("Germany", "DE", "-0.3")],
+                          ("Germany", "DE", "-0.3"), ("Malaysia", "MY", "4.4")],
 }
 _FRED_LEVEL = {
     "DFF": 4.83, "ECBDFR": 3.50, "T10Y2Y": -0.05, "T10YIE": 2.28, "DFII10": 1.70,
@@ -106,7 +106,7 @@ def fx_series(currencies, days: int = 90, base: str = "USD"):
 
 def worldbank_indicator(country_codes, indicator: str):
     iso2_to3 = {"US": "USA", "EMU": "EMU", "CN": "CHN", "JP": "JPN",
-                "GB": "GBR", "IN": "IND", "DE": "DEU"}
+                "GB": "GBR", "IN": "IND", "DE": "DEU", "MY": "MYS"}
     rows = _WB.get(indicator, [])
     out = []
     for name, c2, val in rows:
@@ -115,6 +115,49 @@ def worldbank_indicator(country_codes, indicator: str):
                         "year": str(date.today().year - 2),
                         "value": round(float(val), 2)})
     out.sort(key=lambda x: -x["value"])
+    return out
+
+
+# Deterministic synthetic annual paths so the Economy 101 tab can be previewed
+# offline. Values are DEMO ONLY and never claim to be live World Bank prints.
+_DEMO_ANNUAL = {
+    "NY.GDP.MKTP.KD.ZG": {
+        "US": [2.3, 1.7, 2.4, 2.9, 2.5, 2.2, -2.2, 6.1, 2.5, 2.1, 2.9, 2.8],
+        "MY": [5.4, 4.8, 4.9, 4.7, 4.4, 4.0, -5.5, 3.1, 8.7, 3.6, 4.2, 4.4],
+    },
+    "FP.CPI.TOTL.ZG": {
+        "US": [1.6, 0.1, 1.2, 1.8, 1.9, 2.3, 1.2, 4.7, 8.0, 4.1, 2.9, 2.9],
+        "MY": [2.1, 0.9, 1.0, 0.7, 1.0, 1.4, -1.1, 2.5, 3.4, 2.5, 1.8, 2.1],
+    },
+    "SL.UEM.TOTL.ZS": {
+        "US": [6.2, 5.3, 4.9, 4.4, 3.9, 3.7, 8.1, 5.3, 3.6, 3.6, 4.0, 4.1],
+        "MY": [3.2, 3.4, 3.3, 3.3, 3.3, 3.3, 4.5, 4.6, 3.8, 3.5, 3.4, 3.3],
+    },
+    "NE.TRD.GNFS.ZS": {
+        "US": [24.4, 24.0, 24.6, 24.6, 24.5, 24.3, 23.2, 25.0, 25.9, 24.9, 24.7, 24.8],
+        "MY": [133.5, 131.0, 129.4, 126.9, 123.3, 121.0, 116.0, 130.6, 143.0, 138.4,
+               135.1, 136.0],
+    },
+}
+_DEMO_NAMES = {"US": "United States", "MY": "Malaysia"}
+
+
+def worldbank_history(country_codes, indicator: str, years: int = 12):
+    codes = [str(c).upper() for c in country_codes or []]
+    paths = _DEMO_ANNUAL.get(indicator)
+    if not paths:
+        raise RuntimeError(f"worldbank: no demo series for {indicator}")
+    last_year = date.today().year - 2
+    out = {}
+    for code in codes:
+        values = paths.get(code)
+        if not values:
+            out[code] = {"name": _DEMO_NAMES.get(code, code), "series": []}
+            continue
+        window = values[-max(2, int(years)):]
+        start = last_year - len(window) + 1
+        series = [[start + i, float(v)] for i, v in enumerate(window)]
+        out[code] = {"name": _DEMO_NAMES.get(code, code), "series": series}
     return out
 
 
