@@ -983,5 +983,39 @@ class StockProviderScopeTests(unittest.TestCase):
         self.assertIn("Tencent timeout; Yahoo HTTP 429", page)
 
 
+class DataStatusTests(unittest.TestCase):
+    def test_market_quote_mapping_counts_as_one_card(self):
+        self.assertEqual(app._data_item_count({"name": "S&P 500", "close": 5200}), 1)
+
+    def test_section_status_reports_partial_and_delay(self):
+        keys = app._SECTION_CACHE_KEYS["indices"]
+        now = 1_800_000_000.0
+        fixtures = {
+            keys[0]: {"data": [{"name": "S&P 500", "stale": False}],
+                     "at": now - 120, "ttl": 600, "err": None},
+            keys[1]: {"data": [{"name": "Nasdaq", "stale": False}],
+                     "at": now - 60, "ttl": 600, "err": "temporary failure"},
+        }
+        with mock.patch.object(app, "cache_get", side_effect=lambda key: fixtures.get(key)):
+            status = app.data_status(now=now)["indices"]
+        self.assertEqual(status["status"], "delayed")
+        self.assertEqual(status["available"], 2)
+        self.assertEqual(status["expected"], len(keys))
+        self.assertEqual(status["cache_age_seconds"], 120)
+        self.assertEqual(status["issues"], [keys[1]])
+
+    def test_summary_exposes_freshness_contract(self):
+        saved = dict(app.CACHE)
+        try:
+            app.CACHE.clear()
+            summary = app.summary()
+            self.assertIn("generated_at_utc", summary)
+            self.assertIn("data_status", summary)
+            self.assertIn("indices", summary["data_status"])
+        finally:
+            app.CACHE.clear()
+            app.CACHE.update(saved)
+
+
 if __name__ == "__main__":
     unittest.main()

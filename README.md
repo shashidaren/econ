@@ -57,10 +57,11 @@ How it behaves:
 - Runs are serialised with `flock`; an overlapping run skips instead of queueing.
 - If the checkout is on some other branch, the job refuses rather than merging
   `main` into it.
-- The only gate before restart is `install.sh`'s import smoke test. A commit that
-  breaks the Python imports therefore leaves the **running** service on the old
-  code and logs an error. There is no test-suite gate and no automatic rollback —
-  if you want one, add it in `tools/auto_update.sh`.
+- Before install/restart, the updater runs `py_compile` and the offline
+  `unittest` suite. If either fails, it restores the previous checkout and
+  leaves the running service untouched. `install.sh` also runs its import smoke
+  test before restarting. If installation itself fails, the updater restores
+  and attempts to reinstall the previous revision.
 
 Preview without a server (sample data): `ECON_DEMO=1 python3 dashboard/app.py`
 
@@ -167,6 +168,6 @@ so an HTML WAF block page is reported as "blocked by WAF" for that host only. `-
 probes Sina, Nasdaq and both Tencent hosts and prints the HTTP status plus the first 120 bytes of
 each body, so a total stock outage names itself instead of looking like a blank tab.
 
-`/api/summary` includes the breaker state (`providers`), so the board is debuggable with `curl`.
+`/api/summary` includes the breaker state (`providers`) and per-section freshness (`data_status`). `/api/status` is a compact health/freshness view; `/healthz` remains a liveness-only probe.
 
 Not investment advice — it's a glance-board, not a trading terminal.

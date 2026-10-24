@@ -296,6 +296,93 @@ def get_data(key):
     return (entry or {}).get("data")
 
 
+# Group cache entries by the visible sections they feed. The oldest contributing
+# cache age is used so a section never looks fresher than its stalest input.
+_SECTION_CACHE_KEYS = {
+    "indices": [f"stooq:{symbol}" for _, symbol in config.INDICES],
+    "commodities": [f"stooq:{symbol}" for _, symbol in config.COMMODITIES],
+    "fx": ["fx"],
+    "macro": ["wb_cpi", "wb_gdp"],
+    "rates": ([f"fred:{sid}" for sid, _ in config.FRED_POLICY]
+              + ["fred:curve", "fred:breakeven", "fred:real"]),
+}
+_SECTION_EXPECTED = {
+    "indices": len(config.INDICES),
+    "commodities": len(config.COMMODITIES),
+    "fx": len(config.FX_CURRENCIES),
+    "macro": len(config.WB_COUNTRIES) * 2,
+    "rates": len(_SECTION_CACHE_KEYS["rates"]),
+}
+
+
+def _data_item_count(data):
+    if isinstance(data, dict):
+        # A market quote is itself a mapping; count it as one card, not one
+        # item per field. Other mapping payloads are counted by their entries.
+        return 1 if "close" in data else len(data)
+    if isinstance(data, (list, tuple)):
+        return len(data)
+    return int(data is not None)
+
+
+def data_status(*, now=None):
+    """Per-section cache freshness and coverage, for UI and diagnostics."""
+    now = float(now or time.time())
+    result = {}
+    for section, keys in _SECTION_CACHE_KEYS.items():
+        entries = [(key, cache_get(key)) for key in keys]
+        populated = [(key, entry) for key, entry in entries
+                     if entry and _data_item_count(entry.get("data")) > 0]
+        ages = [max(0.0, now - float(entry.get("at", now)))
+                for _, entry in populated]
+        stale_observation = any(
+            isinstance(item, dict) and item.get("stale")
+            for _, entry in populated
+            for item in (entry.get("data") if isinstance(entry.get("data"), list) else [])
+        )
+        errors = [key for key, entry in entries if entry and entry.get("err")]
+        expired = any(
+            age >= float((entry or {}).get("ttl", 600))
+            for age, (_, entry) in zip(ages, populated)
+        )
+        if section == "rates":
+            available_count = len(populated)
+        else:
+            available_count = sum(_data_item_count(entry.get("data"))
+                                  for _, entry in populated)
+        expected_count = _SECTION_EXPECTED[section]
+        if errors:
+            state = "delayed"
+        elif available_count == 0:
+            state = "unavailable"
+        elif available_count < expected_count:
+            state = "partial"
+        elif expired or stale_observation:
+            state = "stale"
+        else:
+            state = "fresh"
+        oldest_at = min(
+            (float(entry.get("at", 0)) for _, entry in populated),
+            default=None,
+        )
+        result[section] = {
+            "status": state,
+            "label": {
+                "fresh": "Fresh", "partial": "Partial", "delayed": "Delayed",
+                "stale": "Stale", "unavailable": "Awaiting data",
+            }[state],
+            "available": available_count,
+            "expected": expected_count,
+            "cache_age_seconds": int(max(ages)) if ages else None,
+            "last_checked_at_utc": (
+                datetime.fromtimestamp(oldest_at, timezone.utc).isoformat(timespec="seconds")
+                if oldest_at else None
+            ),
+            "issues": errors,
+        }
+    return result
+
+
 def _stock_breaker_family(name):
     """Map a breaker key to the stock-history cascade stage that shares it.
 
@@ -488,6 +575,8 @@ def summary():
     stock_screen_data["provider_issues"] = _stock_provider_issues(
         providers, stock_screen_data)
     out = {
+        "generated_at_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "data_status": data_status(),
         "indices": [get_data(f"stooq:{s}") for _, s in config.INDICES],
         "commodities": [get_data(f"stooq:{s}") for _, s in config.COMMODITIES],
         "fx": fx_quotes,
@@ -562,6 +651,24 @@ class Handler(BaseHTTPRequestHandler):
             elif path == "/api/summary":
                 s = summary()
                 body = json.dumps(s, default=str, indent=1).encode()
+                self._send(200, body, "application/json")
+            elif path == "/api/status":
+                s = summary()
+                stock = s.get("stock_screen") or {}
+                payload = {
+                    "generated_at_utc": s.get("generated_at_utc"),
+                    "sections": s.get("data_status") or {},
+                    "source_errors": s.get("errors") or [],
+                    "provider_issues": s.get("providers") or [],
+                    "stock_screen": {
+                        "status": stock.get("status"),
+                        "data_date": stock.get("data_date"),
+                        "checked_at_utc": stock.get("checked_at_utc"),
+                        "next_check_in_seconds": stock.get("next_check_in_seconds"),
+                        "served_from_cache": bool(stock.get("served_from_cache")),
+                    },
+                }
+                body = json.dumps(payload, default=str, indent=1).encode()
                 self._send(200, body, "application/json")
             elif path == "/healthz":
                 self._send(200, b"ok\n", "text/plain")

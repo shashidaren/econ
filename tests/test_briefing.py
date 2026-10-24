@@ -65,6 +65,17 @@ class BriefingTests(unittest.TestCase):
         self.assertEqual(out["posture"], "Awaiting data")
         self.assertTrue(out["cards"])
 
+    def test_sparse_inputs_are_labeled_awaiting_data(self):
+        out = briefing.build_briefing({
+            "curve": _hist(-0.2),
+            "indices": [], "commodities": [], "fx": [], "cpi": [], "gdp": [],
+        })
+        self.assertEqual(out["posture"], "Awaiting data")
+        self.assertEqual(out["coverage"]["available_groups"], 1)
+        self.assertIn("1/6", out["headline"])
+        self.assertIn("historical late-cycle warning", next(
+            c["text"] for c in out["cards"] if c["id"] == "curve"))
+
     def test_page_renders_briefing_strip(self):
         sections = {
             "indices": [_q("S&P 500", 7800, 0.4)],
@@ -80,11 +91,18 @@ class BriefingTests(unittest.TestCase):
             "breakeven_meta": ("T10YIE", "US 10Y Breakeven Inflation"),
             "errors": [],
             "providers": [],
+            "data_status": {
+                "indices": {"status": "partial", "label": "Partial", "available": 1,
+                            "expected": 9, "cache_age_seconds": 30, "issues": []},
+            },
         }
         sections["briefing"] = briefing.build_briefing(sections)
         page = render.build_page(sections, demo=True)
         self.assertIn("Investment briefing", page)
-        self.assertIn("Not a forecast", page)
+        self.assertIn("not a forecast", page.lower())
+        self.assertIn("Signals available:", page)
+        self.assertIn("Data status", page)
+        self.assertIn("status-partial", page)
         self.assertIn("0.51%", page)
 
 

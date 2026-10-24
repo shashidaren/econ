@@ -13,10 +13,11 @@
 #   ECON_UPDATE_DRY_RUN=1                report what would happen; touch nothing
 #   ECON_UPDATE_LOCK=/path/to.lock       lock file (default /var/lock/econ-update.lock)
 #
-# Deliberate behaviour (owner's choice, 2026-10-21):
-#   * No test/compile gate. The only gate is install.sh's own import smoke test,
-#     which runs before it restarts the service — if a pulled commit is broken,
-#     install.sh exits non-zero and the running service keeps the old code.
+# Safety gates:
+#   * Every changed revision must pass Python compilation and the offline
+#     unittest suite before install.sh can restart the production service.
+#     A failing revision is rolled back to the previous local HEAD.
+#   * install.sh retains its import smoke test as a final pre-restart gate.
 #   * `git reset --hard origin/<branch>` matches the documented manual deploy
 #     (`git fetch --all && git reset --hard origin/main && ./install.sh`), so
 #     ANY hand edit inside /opt/econ is discarded on the next run. Edit in git,
@@ -82,7 +83,25 @@ main() {
   git -C "$APP_DIR" reset --hard --quiet "origin/$BRANCH" || die "git reset --hard failed"
   log "working tree now at $(short "$(local_head)")"
 
-  "$APP_DIR/install.sh" || die "install.sh failed — the service may be down; see: journalctl -u econ-dashboard -n 50"
+  log "running Python compile and offline test gates"
+  if ! (
+    cd "$APP_DIR" &&
+    python3 -m py_compile dashboard/*.py tests/*.py &&
+    python3 -m unittest discover -s tests
+  ); then
+    log "test gate failed; rolling back to $(short "$before")"
+    git -C "$APP_DIR" reset --hard --quiet "$before" || die "test failed and rollback reset failed"
+    die "test gate failed; previous checkout restored and service was not restarted"
+  fi
+
+  if ! "$APP_DIR/install.sh"; then
+    log "install.sh failed; rolling checkout back to $(short "$before")"
+    git -C "$APP_DIR" reset --hard --quiet "$before" || die "install failed and rollback reset failed"
+    if "$APP_DIR/install.sh"; then
+      die "install.sh failed; previous checkout restored and reinstalled"
+    fi
+    die "install.sh and rollback install both failed; inspect service and logs"
+  fi
   log "update complete at $(short "$(local_head)")"
 }
 

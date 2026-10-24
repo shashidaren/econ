@@ -39,8 +39,12 @@ git -C "$TMP/seed" push --quiet origin main
 git -C "$TMP" clone --quiet origin.git work
 git -C "$TMP/work" config user.email t@example.com
 git -C "$TMP/work" config user.name test
-mkdir -p "$TMP/work/tools"
+mkdir -p "$TMP/work/tools" "$TMP/work/dashboard" "$TMP/work/tests"
 cp "$SCRIPT" "$TMP/work/tools/auto_update.sh"
+# Minimal real Python targets so the updater's compile + unittest gates run
+# offline in this throwaway checkout.
+printf 'VALUE = 1\n' > "$TMP/work/dashboard/app.py"
+printf 'import unittest\nclass Smoke(unittest.TestCase):\n def test_ok(self): self.assertEqual(1, 1)\n' > "$TMP/work/tests/test_smoke.py"
 # Stub installer: the real one needs root, apt and systemd.
 printf '#!/usr/bin/env bash\necho "stub install.sh ran"\n' > "$TMP/work/install.sh"
 chmod 755 "$TMP/work/install.sh"
@@ -71,9 +75,28 @@ has "$out" "update available" "update is detected"
 has "$out" "stub install.sh ran" "install.sh runs on change"
 has "$out" "update complete" "success is logged"
 
-# 3. dry run -> reports the pending update but changes nothing
+# 3. failing test suite -> do not install, restore the previous checkout
 echo v3 > "$TMP/seed/README.md"
 git -C "$TMP/seed" commit --quiet -am v3
+git -C "$TMP/seed" push --quiet origin main
+before="$(head_of)"
+printf 'import unittest\nclass Smoke(unittest.TestCase):\n def test_bad(self): self.fail("expected failure")\n' > "$TMP/work/tests/test_smoke.py"
+out="$(run_update)"
+code=$?
+check "failed test gate exits non-zero" "$([ "$code" -ne 0 ] && echo yes)" "yes"
+check "failed test gate restores previous HEAD" "$(head_of)" "$before"
+has "$out" "test gate failed" "failed tests are reported"
+has "$out" "previous checkout restored" "rollback is reported"
+if grep -q "stub install.sh ran" <<<"$out"; then
+  bad "failed tests must not run install.sh"
+else
+  ok "failed tests do not run install.sh"
+fi
+printf 'import unittest\nclass Smoke(unittest.TestCase):\n def test_ok(self): self.assertEqual(1, 1)\n' > "$TMP/work/tests/test_smoke.py"
+
+# 4. dry run -> reports the pending update but changes nothing
+echo v4 > "$TMP/seed/README.md"
+git -C "$TMP/seed" commit --quiet -am v4
 git -C "$TMP/seed" push --quiet origin main
 before="$(head_of)"
 out="$(run_update env ECON_UPDATE_DRY_RUN=1)"
@@ -82,14 +105,14 @@ check "dry run exits 0" "$code" "0"
 check "dry run leaves HEAD alone" "$(head_of)" "$before"
 has "$out" "would reset --hard" "dry run reports intent only"
 
-# 4. wrong branch -> refuses instead of merging main into it
+# 5. wrong branch -> refuses instead of merging main into it
 git -C "$TMP/work" checkout --quiet -b feature
 out="$(run_update)"
 code=$?
 check "wrong branch exits non-zero" "$([ "$code" -ne 0 ] && echo yes)" "yes"
 has "$out" "expected 'main'" "wrong branch is refused"
 
-# 5. a hand edit in the checkout is discarded by the next run (documented rule)
+# 6. a hand edit in the checkout is discarded by the next run (documented rule)
 git -C "$TMP/work" checkout --quiet main
 echo "local hack" >> "$TMP/work/README.md"
 out="$(run_update)"
@@ -100,7 +123,7 @@ else
   ok "reset --hard discards local edits"
 fi
 
-# 6. lock held by an earlier run -> this run skips instead of overlapping
+# 7. lock held by an earlier run -> this run skips instead of overlapping
 exec 9>"$TMP/update.lock"
 flock -n 9 || bad "test harness could not take the lock"
 out="$(run_update)"
