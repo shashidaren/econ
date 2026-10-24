@@ -72,8 +72,8 @@ def build_briefing(sections):
         risk += 2
         cards.append(_card(
             "curve", "Yield curve", "risk", f"{curve:.2f}%",
-            "Inverted. Classic late-cycle warning — quality and duration "
-            "over cyclical beta until the spread turns positive."))
+            "Inverted. A historical late-cycle warning, not a reliable timer "
+            "or a stand-alone forecast."))
     elif curve < 0.50:
         caution += 1
         cards.append(_card(
@@ -102,7 +102,7 @@ def build_briefing(sections):
             if real >= 1.5:
                 tone = "caution"
                 caution += 1
-                tail = "Restrictive vs market inflation. Headwind for duration-sensitive growth."
+                tail = "Restrictive versus market inflation; this can weigh on duration-sensitive assets, but is not a forecast."
             elif real < 0:
                 tone = "caution"
                 caution += 1
@@ -159,11 +159,11 @@ def build_briefing(sections):
             if real >= 1.5:
                 tone = "risk"
                 risk += 1
-                tail = "High real yield is a headwind for gold. A hold is a rates bet, not an inflation bet."
+                tail = "High real yields have often been a headwind for gold; this relationship is not a price forecast."
             elif real >= 0.5:
                 tone = "caution"
                 caution += 1
-                tail = "Real yield still positive. Gold usually wants this falling, not just inflation sticky."
+                tail = "Real yield is positive; historically, gold has often faced a headwind in this setting."
             elif real >= 0:
                 tail = "Real yield is low. Less of a headwind; still not a negative-yield regime."
             else:
@@ -250,16 +250,24 @@ def build_briefing(sections):
             "markets", "Markets", tone, f"{up}/{populated} up",
             f"Populated indices {up} up / {down} down. " + " · ".join(extra) + "."))
 
-    if curve is not None and curve < 0:
+    available_groups = sum(1 for card in cards if card["tone"] != "muted")
+    expected_groups = len(cards)
+    if available_groups < 3:
+        posture, tone = "Awaiting data", "muted"
+        headline = (
+            f"Only {available_groups}/{expected_groups} signal groups are available. "
+            "Individual readings are shown below, but there is not enough coverage "
+            "for a broad posture.")
+    elif curve is not None and curve < 0:
         posture, tone = "Defensive", "risk"
         headline = (
-            "Curve inverted. That is the recession warning — treat equity "
-            "strength as a trade, not a regime.")
+            "The yield curve is inverted, a historical recession warning — "
+            "not a reliable timer or a stand-alone forecast.")
     elif risk >= 2:
         posture, tone = "Defensive", "risk"
         headline = (
-            "Two or more risk flags (real yield, breadth, or growth), "
-            "not an inverted curve. Tight conditions — equity strength is a trade.")
+            "Two or more risk flags are present across real yields, breadth, "
+            "or growth. These readings can lag and do not predict market direction.")
     elif risk or caution >= 2:
         posture, tone = "Cautious", "caution"
         headline = (
@@ -279,6 +287,12 @@ def build_briefing(sections):
         "tone": tone,
         "headline": headline,
         "cards": cards,
+        "coverage": {
+            "available_groups": available_groups,
+            "expected_groups": expected_groups,
+            "available_labels": [c["label"] for c in cards if c["tone"] != "muted"],
+            "missing_labels": [c["label"] for c in cards if c["tone"] == "muted"],
+        },
         "disclaimer": (
-            "Read of this board's own data. Not a forecast and not investment advice."),
+            "Descriptive signals from this board's available data, not a forecast or investment advice."),
     }

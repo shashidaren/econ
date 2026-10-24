@@ -135,6 +135,30 @@ h2:after{content:"";flex:1;height:1px;background:var(--line)}
 footer{margin-top:36px;color:var(--muted);font-size:12px;border-top:1px solid var(--line);
   padding-top:14px}
 .warn-inline{color:var(--warn);font-size:11px}
+.freshness{display:flex;flex-wrap:wrap;align-items:center;gap:7px;background:var(--panel);
+  border:1px solid var(--line);border-radius:9px;padding:9px 12px;margin:0 0 16px}
+.freshness-label{font-size:11px;color:var(--muted);margin-right:3px}
+.status-pill{display:inline-flex;align-items:center;gap:5px;border:1px solid var(--line);
+  border-radius:999px;padding:2px 8px;font-size:10px;font-weight:650;white-space:nowrap}
+.status-fresh{color:var(--up);border-color:#27685e;background:#10221f}
+.status-partial,.status-delayed,.status-stale{color:var(--warn);border-color:#78631e;background:#211d10}
+.status-unavailable{color:var(--muted);border-color:var(--line);background:var(--panel2)}
+.status-inline{margin-left:auto;color:var(--muted);font-size:10px}
+.brief-coverage{font-size:11px;color:var(--muted);margin:0 0 8px}
+@media(max-width:640px){
+  body{padding:12px 12px 28px;font-size:14px}
+  header{gap:7px;align-items:flex-start;flex-direction:column}
+  header h1{font-size:20px}
+  nav.tabs{position:sticky;top:0;z-index:5;background:var(--bg);padding:8px 0;margin-bottom:12px}
+  nav.tabs a{padding:7px 11px}
+  .grid,.stock-grid{grid-template-columns:1fr;gap:9px}
+  .cols{grid-template-columns:1fr;gap:12px}
+  .bar-row{grid-template-columns:minmax(95px,34%) 1fr 54px;gap:6px}
+  .brief{grid-template-columns:1fr}
+  .freshness{gap:6px}
+  .status-inline{width:100%;margin-left:0}
+  .stock-week-grid{grid-template-columns:repeat(2,minmax(0,1fr))}
+}
 """
 
 PAGE = """<!doctype html>
@@ -386,7 +410,18 @@ def briefing_html(brief):
   <p>{esc(c.get("text") or "")}</p>
 </div>"""
         )
-    return '<div class="brief">' + "".join(cards) + "</div>"
+    coverage = brief.get("coverage") or {}
+    coverage_text = ""
+    if coverage:
+        available = int(coverage.get("available_groups") or 0)
+        expected = int(coverage.get("expected_groups") or 0)
+        missing = coverage.get("missing_labels") or []
+        missing_text = f' · waiting on: {esc(", ".join(missing))}' if missing else ""
+        coverage_text = (
+            f'<p class="brief-coverage">Signals available: {available}/{expected} groups'
+            f'{missing_text}. Each indicator is descriptive; inputs can have different release dates.</p>'
+        )
+    return coverage_text + '<div class="brief">' + "".join(cards) + "</div>"
 
 
 
@@ -400,6 +435,49 @@ def tabs(active):
             + link("/stocks", "stocks", "Stocks")
             + "</nav>")
 
+
+
+def _status_badge(meta, *, compact=False):
+    if not isinstance(meta, dict):
+        return '<span class="status-pill status-unavailable">Awaiting data</span>'
+    state = str(meta.get("status") or "unavailable")
+    allowed = {"fresh", "partial", "delayed", "stale", "unavailable"}
+    if state not in allowed:
+        state = "unavailable"
+    label = esc(meta.get("label") or state.title())
+    coverage = ""
+    if meta.get("expected"):
+        coverage = f' {int(meta.get("available") or 0)}/{int(meta["expected"])}'
+    age = meta.get("cache_age_seconds")
+    age_text = ""
+    if isinstance(age, (int, float)):
+        age_text = f' · checked {max(0, int(age // 60))}m ago'
+    title = esc("; ".join(meta.get("issues") or []))
+    title_attr = f' title="{title}"' if title else ""
+    suffix = coverage if compact else coverage + age_text
+    return f'<span class="status-pill status-{state}"{title_attr}>{label}{esc(suffix)}</span>'
+
+
+def _freshness_strip(sections):
+    statuses = sections.get("data_status") or {}
+    if not statuses:
+        return ""
+    labels = (("indices", "Indices"), ("commodities", "Commodities"),
+              ("fx", "FX"), ("macro", "Macro"), ("rates", "Rates"))
+    items = "".join(
+        f'<span class="freshness-label">{name}</span>{_status_badge(statuses.get(key), compact=True)}'
+        for key, name in labels
+    )
+    return ('<div class="freshness" aria-label="Data freshness by section">'
+            '<span class="freshness-label"><b>Data status</b></span>'
+            + items + '<span class="status-inline">Status reflects cache/provider health; '
+            'card dates show the observation date.</span></div>')
+
+
+def _section_heading(title, source, section, sections):
+    meta = (sections.get("data_status") or {}).get(section)
+    return (f'<h2>{esc(title)} <span class="src">· {esc(source)} '
+            f'{_status_badge(meta)}</span></h2>')
 
 
 def inflation_gauge(value, label="10y breakeven"):
@@ -552,6 +630,15 @@ def build_summary_page(sections, *, demo=False, generated_at=None, refresh=300):
         for c in cards)
     posture = esc(brief.get("posture") or "Awaiting data")
     headline = esc(brief.get("headline") or "Not enough series loaded to summarize.")
+    brief_coverage = brief.get("coverage") or {}
+    signal_coverage = ""
+    if brief_coverage:
+        signal_coverage = (
+            f'<p class="meta">Signals available: '
+            f'{int(brief_coverage.get("available_groups") or 0)}/'
+            f'{int(brief_coverage.get("expected_groups") or 0)} groups. '
+            'Inputs have different release dates; this is a descriptive snapshot.</p>'
+        )
 
     missing = sum(1 for q in (sections.get("indices") or []) if not q)
     cov = (f"{len(indices)} index cards, {len(commodities)} commodities, {len(fx)} FX crosses, "
@@ -564,12 +651,14 @@ def build_summary_page(sections, *, demo=False, generated_at=None, refresh=300):
   {banner}
 </header>
 {tabs("summary")}
+{_freshness_strip(sections)}
 <div class="sum">
   <section>
     <h3>Posture</h3>
     <p class="posture-name tone-{esc(brief.get("tone") or "muted")}">{posture}</p>
     <p>{headline}</p>
-    <p class="meta">{esc(brief.get("disclaimer") or "Read of this board. Not a forecast and not investment advice.")}</p>
+    {signal_coverage}
+    <p class="meta">{esc(brief.get("disclaimer") or "Descriptive signals from available data, not a forecast or investment advice.")}</p>
   </section>
   <section>
     <h3>What the board is saying</h3>
@@ -972,7 +1061,8 @@ def build_page(sections, *, demo=False, generated_at=None, refresh=300,
   <span class="updated">updated {esc(now.strftime("%Y-%m-%d %H:%M %Z"))}</span>
   {banner}
 </header>
-{tabs("board")}"""]
+{tabs("board")}
+{_freshness_strip(sections)}"""]
 
     brief = sections.get("briefing")
     if brief is None:
@@ -984,28 +1074,33 @@ def build_page(sections, *, demo=False, generated_at=None, refresh=300,
         body.append(briefing_html(brief))
 
     # --- Markets ------------------------------------------------------------
-    body.append('<h2>World indices <span class="src">· daily close (Yahoo / FRED / CNBC / Tencent / Sina / Stooq)</span></h2>')
+    body.append(_section_heading(
+        "World indices", "daily close (Yahoo / FRED / CNBC / Tencent / Sina / Stooq)",
+        "indices", sections))
     if sections["indices"]:
         body.append('<div class="grid">' + "".join(market_card(q) for q in sections["indices"]) + "</div>")
     else:
         body.append('<div class="section-empty">Fetching index history… first load takes '
                     'a few seconds (server warms its cache in the background).</div>')
 
-    body.append('<h2>Commodities <span class="src">· the pulse of the real economy</span></h2>')
+    body.append(_section_heading(
+        "Commodities", "the pulse of the real economy", "commodities", sections))
     if sections["commodities"]:
         body.append('<div class="grid">' + "".join(market_card(q) for q in sections["commodities"]) + "</div>")
     else:
         body.append('<div class="section-empty">Awaiting commodity data…</div>')
 
     # --- FX ------------------------------------------------------------------
-    body.append('<h2>Currencies <span class="src">· USD base · ECB reference rates</span></h2>')
+    body.append(_section_heading(
+        "Currencies", "ECB reference rates · 1 USD = shown amount", "fx", sections))
     if sections["fx"]:
         body.append('<div class="grid">' + "".join(market_card(q) for q in sections["fx"]) + "</div>")
     else:
         body.append('<div class="section-empty">Awaiting FX data…</div>')
 
     # --- Macro bars ----------------------------------------------------------
-    body.append('<h2>Macro — inflation &amp; growth <span class="src">· World Bank, annual</span></h2>')
+    body.append(_section_heading(
+        "Macro — inflation & growth", "World Bank, annual", "macro", sections))
     body.append('<div class="cols">'
                 '<div><div class="card"><div class="name">Inflation — CPI, % YoY</div>'
                 + bar_rows(sections["cpi"]) + "</div></div>"
@@ -1014,14 +1109,16 @@ def build_page(sections, *, demo=False, generated_at=None, refresh=300,
                 "</div>")
 
     # --- Policy rates --------------------------------------------------------
-    body.append('<h2>Central-bank policy rates <span class="src">· FRED / NY Fed / ECB</span></h2>')
+    body.append(_section_heading(
+        "Central-bank policy rates", "FRED / NY Fed / ECB", "rates", sections))
     body.append('<div class="grid">' +
                 rate_cards(sections["policy_pairs"], sections["policy_series"]) + "</div>")
 
     # --- Yield curve ---------------------------------------------------------
     sid, title, years = sections["curve_meta"]
     hist = sections["curve"]
-    body.append(f'<h2>Yield curve <span class="src">· {esc(sid)} · last {years}y</span></h2>')
+    body.append(_section_heading(
+        "Yield curve", f"{sid} · last {years}y", "rates", sections))
     if hist:
         vals = [v for _, v in hist]
         latest = next((v for v in reversed(vals) if v is not None), None)
@@ -1038,7 +1135,7 @@ def build_page(sections, *, demo=False, generated_at=None, refresh=300,
     # --- Breakeven inflation ---------------------------------------------------
     bsid, btitle = sections["breakeven_meta"]
     bhist = sections["breakeven"]
-    body.append(f'<h2>Breakeven inflation <span class="src">· {esc(bsid)}</span></h2>')
+    body.append(_section_heading("Breakeven inflation", bsid, "rates", sections))
     if bhist:
         bvals = [v for _, v in bhist]
         latest = next((v for v in reversed(bvals) if v is not None), None)
@@ -1052,7 +1149,8 @@ def build_page(sections, *, demo=False, generated_at=None, refresh=300,
     rmeta = sections.get("real_yield_meta") or ("DFII10", "US 10Y Real Yield")
     rsid, rtitle = rmeta
     rhist = sections.get("real_yield") or []
-    body.append(f'<h2>Real yield <span class="src">· {esc(rsid)} · gold macro driver</span></h2>')
+    body.append(_section_heading(
+        "Real yield", f"{rsid} · gold macro driver", "rates", sections))
     if rhist:
         rvals = [v for _, v in rhist]
         latest = next((v for v in reversed(rvals) if v is not None), None)
