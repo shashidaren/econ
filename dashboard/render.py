@@ -91,7 +91,13 @@ h2:after{content:"";flex:1;height:1px;background:var(--line)}
 .stock-rank{font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:1px}
 .stock-symbol{font-size:21px;font-weight:750;letter-spacing:.2px}
 .stock-name{color:var(--muted);font-size:12px}
-.stock-price{font-size:23px;font-weight:700;font-variant-numeric:tabular-nums}
+.stock-price{font-size:23px;font-weight:700;font-variant-numeric:tabular-nums;display:flex;align-items:baseline;flex-wrap:wrap;gap:6px}
+.quote-delay-pill{display:inline-block;border:1px solid #2c4f78;background:#101820;color:var(--accent);border-radius:999px;padding:1px 7px;font-size:10px;font-weight:650;letter-spacing:.2px;vertical-align:middle}
+.quote-delay-pill.warn{border-color:#78631e;background:#211d10;color:var(--warn)}
+.stock-intraday{font-size:12px;color:var(--muted);font-variant-numeric:tabular-nums;margin-top:2px}
+.stock-extended{font-size:11px;color:var(--muted);font-variant-numeric:tabular-nums;margin-top:1px}
+.stock-close-anchor{font-size:11px;color:var(--muted);font-variant-numeric:tabular-nums;margin-top:2px}
+.stock-quote-meta{font-size:10.5px;color:var(--muted);border-top:1px dashed var(--line);padding-top:6px}
 .stock-myr{color:var(--muted);font-size:11px;font-variant-numeric:tabular-nums}
 .stock-myr b{color:var(--text);font-size:12px}
 .stock-myr small{margin-left:4px}
@@ -1135,6 +1141,56 @@ def build_stocks_page(screen, *, demo=False, generated_at=None, refresh=300):
             'rel="noopener noreferrer">Moomoo Malaysia’s current U.S. fee schedule</a>.</p>'
         )
 
+    quotes = screen.get("quotes") if isinstance(screen.get("quotes"), dict) else {}
+    quotes_status = str(quotes.get("status") or "")
+    quotes_served_cached = bool(quotes.get("served_from_cache"))
+    quotes_note = ""
+    if quotes:
+        session_info = quotes.get("market_session") if isinstance(quotes.get("market_session"), dict) else {}
+        session_label = str(session_info.get("label") or "").strip()
+        session_prefix = f"{esc(session_label)} · " if session_label else ""
+        try:
+            q_interval_min = max(1, round(int(quotes.get("refresh_interval_seconds") or 300) / 60))
+        except (TypeError, ValueError):
+            q_interval_min = 5
+        q_next = quotes.get("next_check_in_seconds")
+        q_next_txt = ""
+        if isinstance(q_next, (int, float)) and q_next >= 0:
+            q_next_txt = (
+                " · next quote re-check due now"
+                if q_next < 60
+                else f" · next quote re-check in about {max(1, round(q_next / 60))} min"
+            )
+        if quotes_status == "disabled":
+            quotes_note = (
+                f'<p class="stock-currency-note">'
+                f'{esc(quotes.get("message") or "Delayed stock quotes are disabled.")}</p>'
+            )
+        elif quotes_status == "waiting":
+            quotes_note = (
+                f'<p class="stock-currency-note">Delayed quotes (~15m): '
+                f'{esc(quotes.get("message") or "Waiting for quote refresh.")} '
+                f'Checked every {q_interval_min} min; daily-close ranking is unaffected.</p>'
+            )
+        elif quotes_status in ("unavailable", "stale"):
+            quotes_note = (
+                f'<p class="stock-currency-note">Delayed quotes unavailable: '
+                f'{esc(quotes.get("message") or "no quote feed answered")} '
+                f'Showing settled daily closes; the stock screen is unaffected.</p>'
+            )
+        else:
+            q_cov = quotes.get("coverage") if isinstance(quotes.get("coverage"), dict) else {}
+            q_providers = ", ".join(str(p) for p in q_cov.get("providers") or [])
+            q_fetched = _myt_timestamp(quotes.get("fetched_at_utc"))
+            cached_tag = " (serving last-good cached quotes)" if quotes_served_cached else ""
+            quotes_note = (
+                f'<p class="stock-currency-note">Delayed quotes (~15m){esc(cached_tag)}: '
+                f'{session_prefix}{esc(quotes.get("message") or "")} '
+                f'Re-checked every {q_interval_min} min{esc(q_next_txt)} · '
+                f'sources: {esc(q_providers or "none")} · fetched {q_fetched}. '
+                'Overlay only — filters and rank order stay anchored to settled daily closes.</p>'
+            )
+
     news = screen.get("news") if isinstance(screen.get("news"), dict) else {}
     news_items = news.get("items") if isinstance(news.get("items"), dict) else {}
     news_errors = news.get("errors") if isinstance(news.get("errors"), dict) else {}
@@ -1177,20 +1233,135 @@ def build_stocks_page(screen, *, demo=False, generated_at=None, refresh=300):
         except (TypeError, ValueError):
             adv_text = "—"
         try:
-            price_text = f"${float(item.get('close')):,.2f}"
+            close_price_val = float(item.get("close"))
+            close_price_text = f"${close_price_val:,.2f}"
         except (TypeError, ValueError):
-            price_text = "—"
-        myr_price_html = ""
-        if currency_reference.get("available"):
+            close_price_val = None
+            close_price_text = "—"
+
+        quote = item.get("quote") if isinstance(item.get("quote"), dict) else None
+        quote_price_val = None
+        if quote is not None:
             try:
-                myr_price = float(item.get("close_myr_indicative"))
-                if math.isfinite(myr_price) and myr_price > 0:
-                    myr_price_html = (
-                        f'<div class="stock-myr">≈ <b>RM {myr_price:,.2f}</b> '
-                        "<small>indicative</small></div>"
+                qp = float(quote.get("price"))
+                if math.isfinite(qp) and qp > 0:
+                    quote_price_val = qp
+            except (TypeError, ValueError):
+                quote_price_val = None
+
+        intraday_html = ""
+        extended_html = ""
+        close_anchor_html = ""
+        quote_meta_html = ""
+        if quote_price_val is not None:
+            if demo or quote.get("demo"):
+                pill = '<span class="quote-delay-pill warn">DEMO quote</span>'
+            elif quotes_served_cached:
+                pill = '<span class="quote-delay-pill warn">cached ~15m quote</span>'
+            else:
+                delay_m = int(quote.get("delay_minutes") or 15)
+                pill = f'<span class="quote-delay-pill">~{delay_m}m delayed</span>'
+            price_text = f"${quote_price_val:,.2f} {pill}"
+            # Intraday $ / % move + day range
+            chg_val = quote.get("change")
+            chg_pct_val = quote.get("change_pct")
+            intraday_bits = []
+            try:
+                c_f = float(chg_val)
+                cp_f = float(chg_pct_val)
+                if math.isfinite(c_f) and math.isfinite(cp_f):
+                    cls = "up" if cp_f > 0 else ("down" if cp_f < 0 else "flat")
+                    sign_dollar = "+" if c_f > 0 else ("-" if c_f < 0 else "")
+                    intraday_bits.append(
+                        f'<span class="stock-pct {cls}">{sign_dollar}${abs(c_f):,.2f} '
+                        f'({cp_f:+.2f}%)</span> vs prev close'
                     )
             except (TypeError, ValueError):
                 pass
+            try:
+                d_low, d_high = float(quote.get("day_low")), float(quote.get("day_high"))
+                if math.isfinite(d_low) and math.isfinite(d_high) and d_low > 0 and d_high >= d_low:
+                    intraday_bits.append(f"day range ${d_low:,.2f}–${d_high:,.2f}")
+            except (TypeError, ValueError):
+                pass
+            if intraday_bits:
+                intraday_html = f'<div class="stock-intraday">{" · ".join(intraday_bits)}</div>'
+
+            # Optional extended-hours print when outside regular session
+            m_state = str(quote.get("market_status") or quote.get("market_state") or "").lower()
+            if m_state != "regular":
+                try:
+                    ext_p = float(quote.get("extended_price"))
+                    if math.isfinite(ext_p) and ext_p > 0:
+                        ext_lbl = esc(
+                            quote.get("extended_label")
+                            or ("Pre-market" if "pre" in m_state else "After-hours")
+                        )
+                        ext_pct = quote.get("extended_change_pct")
+                        ext_pct_str = ""
+                        try:
+                            ep_f = float(ext_pct)
+                            if math.isfinite(ep_f):
+                                ext_cls = "up" if ep_f > 0 else ("down" if ep_f < 0 else "flat")
+                                ext_pct_str = f' <span class="stock-pct {ext_cls}">({ep_f:+.2f}%)</span>'
+                        except (TypeError, ValueError):
+                            pass
+                        extended_html = (
+                            f'<div class="stock-extended">{ext_lbl}: ${ext_p:,.2f}{ext_pct_str}</div>'
+                        )
+                except (TypeError, ValueError):
+                    pass
+
+            # Indicative MYR from delayed quote price when FX reference is fresh
+            myr_price_html = ""
+            if currency_reference.get("available"):
+                try:
+                    myr_q = quote.get("price_myr_indicative")
+                    if myr_q is None and isinstance(currency_reference.get("rate"), (int, float)):
+                        myr_q = round(quote_price_val * float(currency_reference["rate"]), 2)
+                    myr_price = float(myr_q)
+                    if math.isfinite(myr_price) and myr_price > 0:
+                        myr_price_html = (
+                            f'<div class="stock-myr">≈ <b>RM {myr_price:,.2f}</b> '
+                            "<small>indicative</small></div>"
+                        )
+                except (TypeError, ValueError):
+                    pass
+
+            close_myr_suffix = ""
+            if currency_reference.get("available"):
+                try:
+                    c_myr = float(item.get("close_myr_indicative"))
+                    if math.isfinite(c_myr) and c_myr > 0:
+                        close_myr_suffix = f" · ≈ RM {c_myr:,.2f}"
+                except (TypeError, ValueError):
+                    pass
+            close_anchor_html = (
+                f'<div class="stock-close-anchor">Screen close {close_price_text} '
+                f'({esc(item.get("as_of") or "?")}{close_myr_suffix})</div>'
+            )
+            q_as_of_myt = (
+                _myt_timestamp(quote.get("as_of_utc"))
+                if quote.get("as_of_utc")
+                else esc(quote.get("as_of_display") or quote.get("as_of") or "recent")
+            )
+            q_src = esc(quote.get("source") or "public quote feed")
+            quote_meta_html = (
+                f'<div class="stock-quote-meta">Delayed quote as of {q_as_of_myt} · {q_src}</div>'
+            )
+        else:
+            price_text = close_price_text
+            myr_price_html = ""
+            if currency_reference.get("available"):
+                try:
+                    myr_price = float(item.get("close_myr_indicative"))
+                    if math.isfinite(myr_price) and myr_price > 0:
+                        myr_price_html = (
+                            f'<div class="stock-myr">≈ <b>RM {myr_price:,.2f}</b> '
+                            "<small>indicative</small></div>"
+                        )
+                except (TypeError, ValueError):
+                    pass
         try:
             score_text = f"{float(item.get('rank_score')):+.2f}"
         except (TypeError, ValueError):
@@ -1250,7 +1421,7 @@ def build_stocks_page(screen, *, demo=False, generated_at=None, refresh=300):
     </div>
     <span class="risk-badge risk-{risk_class}">{esc(risk)} risk</span>
   </div>
-  <div class="stock-head"><div><div class="stock-price">{price_text}</div>{myr_price_html}</div>
+  <div class="stock-head"><div><div class="stock-price">{price_text}</div>{intraday_html}{extended_html}{myr_price_html}{close_anchor_html}</div>
     <div class="stock-name">{esc(item.get("sector") or "")}</div>
   </div>
   {spark_html}
@@ -1265,6 +1436,7 @@ def build_stocks_page(screen, *, demo=False, generated_at=None, refresh=300):
   </div>
   <ul class="stock-reasons">{reasons}</ul>
   {news_html}
+  {quote_meta_html}
   <div class="stock-meta">{week_range}relative rank score {score_text} · U.S. daily-bar date {esc(item.get("as_of") or "?")} (Eastern Time) ·
     {esc(item.get("source") or "unknown source")} · quote age {quote_age} calendar {quote_age_unit}</div>
 </article>""")
@@ -1283,6 +1455,8 @@ def build_stocks_page(screen, *, demo=False, generated_at=None, refresh=300):
         diagnostics.append(f"Last refresh failed: {str(screen.get('refresh_error'))[:240]}")
     elif status in ("unavailable", "stale") and screen.get("fetch_error"):
         diagnostics.append(f"History fetch detail: {str(screen.get('fetch_error'))[:240]}")
+    if quotes.get("refresh_error"):
+        diagnostics.append(f"Quote refresh failed (using cached quotes): {str(quotes.get('refresh_error'))[:240]}")
     history_errors = screen.get("history_errors") or {}
     if isinstance(history_errors, dict):
         history_error_count = int(history_errors.get("count") or 0)
@@ -1298,9 +1472,15 @@ def build_stocks_page(screen, *, demo=False, generated_at=None, refresh=300):
             diagnostics.append(
                 f"{history_error_count} ticker(s) lacked usable history after the provider cascade.{suffix}"
             )
-    provider_issues = list(screen.get("provider_issues") or [])
-    for issue in provider_issues[:4]:
+    provider_issues = list(screen.get("provider_issues") or []) + list(quotes.get("provider_issues") or [])
+    seen_prov = set()
+    for issue in provider_issues:
         name = str(issue.get("provider") or "stock data provider")
+        if name in seen_prov:
+            continue
+        seen_prov.add(name)
+        if len(seen_prov) > 6:
+            break
         state = "cooling down" if issue.get("state") == "cooling" else "degraded"
         retry = int(issue.get("retry_in") or 0)
         detail = (str(issue.get("reason") or "").split(" | ")[0])[:120]
@@ -1327,7 +1507,7 @@ def build_stocks_page(screen, *, demo=False, generated_at=None, refresh=300):
 <section class="stock-intro">
   <h2>Short-term stock watchlist <span class="src">· U.S.-listed · every passer, up to {display_cap} names</span></h2>
   <p>Daily closing-price screen of a configured ticker universe. It looks for recent positive momentum and liquidity, then labels recent realized volatility/drawdown risk. Every ticker that clears all filters is listed, ranked by relative score. This is not a forecast, trade signal, or order recommendation.</p>
-  <p>Each card adds the last seven calendar days of price movement and recent third-party headlines. Both are context for your own research: neither is scored, and neither changes which tickers appear.</p>
+  <p>Each card overlays a ~15-minute-delayed quote (refreshed every 5 minutes), the last seven calendar days of price movement, and recent third-party headlines. All three are context for your own research: none of them are scored, and none change which tickers pass or how they rank.</p>
   <p class="stock-verification">This editable universe is not checked against Moomoo Malaysia’s live symbol availability or order eligibility. Verify each ticker in the app before relying on it; fractional-share eligibility is limited to selected U.S. securities and the list can change. See <a href="https://www.moomoo.com/my/support/topic9_193" target="_blank" rel="noopener noreferrer">Moomoo Malaysia’s fractional-share guide</a>.</p>
 </section>
 <div class="stock-status {state_class}">{cached_badge}<b>{message}</b><br>
@@ -1336,6 +1516,7 @@ def build_stocks_page(screen, *, demo=False, generated_at=None, refresh=300):
   {diagnostics_html}
 </div>
 {cadence_html}
+{quotes_note}
 {news_note}
 {currency_note}
 {week_html}
@@ -1350,6 +1531,7 @@ def build_stocks_page(screen, *, demo=False, generated_at=None, refresh=300):
     <li>Trend screen: positive 20-session return and latest close above its 20-day average. {esc(screen.get("method") or "The relative score is not a probability or expected return.")}</li>
     <li>Risk buckets: {esc(screen.get("risk_method") or "Not available.")}</li>
     <li>Display: every passing ticker is shown, ranked highest score first, up to {display_cap} names. Ranking is relative within this universe, so a longer list is a wider watchlist, not a stronger signal.</li>
+    <li>Delayed quotes (~15 min): key-less public quote cascade (Sina Finance → Nasdaq → Tencent → Yahoo) re-checked every 5 minutes for the displayed picks only. Quotes show intraday move, day range, U.S. session status, and indicative MYR conversion without re-screening or re-ranking the universe intraday.</li>
     <li>7-day movement: the change from the last close at or before seven calendar days before the latest bar (about five U.S. trading sessions) to the latest close. The strip above the cards averages that window across the displayed names; it is a description of past closes, not a forecast.</li>
     <li>Headlines: one key-less RSS search per displayed ticker (Google News → Bing News → Yahoo Finance headline feed), newest first, keeping only unduplicated items published inside the last {news_days} days whose title mentions the ticker or company. Headlines are third-party context, are not verified, and never change which tickers pass or how they rank. A ticker with no matching article says so.</li>
     <li>Excluded counts: {excluded_html}. Universe size: {universe_size} tickers.</li>
@@ -1357,7 +1539,7 @@ def build_stocks_page(screen, *, demo=False, generated_at=None, refresh=300):
   <p>{esc(screen.get("limitations") or "Technical data only; verify the quote and research the company before investing.")}</p>
   {error_html}
 </details>
-<footer>Data uses daily closes, not intraday prices. Headlines are third-party RSS links that may be delayed, syndicated or inaccurate; they are not verified and are not part of the screen. Short-term stock investing can lose money quickly. Check current price, bid/ask spread, upcoming earnings/news, company filings, and your broker’s execution details before acting. The screen does not personalize risk or guarantee performance.</footer>
+<footer>Screen and ranking use settled daily closes; overlaid quotes are ~15-minute delayed public feeds, not real-time NBBO execution prices. Headlines are third-party RSS links that may be delayed, syndicated or inaccurate; they are not verified and are not part of the screen. Short-term stock investing can lose money quickly. Check current price, bid/ask spread, upcoming earnings/news, company filings, and your broker’s execution details before acting. The screen does not personalize risk or guarantee performance.</footer>
 """
     return (PAGE.replace("__STYLE__", STYLE)
                 .replace("__REFRESH__", str(max(60, int(refresh))))

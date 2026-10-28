@@ -86,6 +86,73 @@ def stock_history_batch(symbols, vendor_symbols=None, days: int = 130):
     return out
 
 
+def stock_quotes_batch(symbols, *, now=None):
+    """Synthetic ~15-min-delayed quotes for offline preview only."""
+    import sources
+
+    moment = now or datetime.now(timezone.utc)
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=timezone.utc)
+    moment_utc = moment.astimezone(timezone.utc)
+    session = sources.us_market_session(moment_utc)
+    wanted = list(dict.fromkeys(
+        str(s).strip().upper() for s in (symbols or []) if str(s or "").strip()
+    ))
+    histories = stock_history_batch(wanted, days=130) if wanted else {}
+    items = {}
+    for sym in wanted:
+        rows = (histories.get(sym) or {}).get("rows") or []
+        prev_close = float(rows[-1][1]) if rows else 20.0
+        seed = _seed("quote:" + sym)
+        bump_pct = ((seed % 261) - 110) / 100.0  # -1.10% .. +1.50%
+        price = round(prev_close * (1.0 + bump_pct / 100.0), 2)
+        change = round(price - prev_close, 2)
+        change_pct = round((change / prev_close) * 100.0, 2) if prev_close else 0.0
+        low = round(min(prev_close, price) * 0.992, 2)
+        high = round(max(prev_close, price) * 1.008, 2)
+        items[sym] = {
+            "symbol": sym,
+            "price": price,
+            "prev_close": round(prev_close, 2),
+            "change": change,
+            "change_pct": change_pct,
+            "open": round(prev_close * 1.001, 2),
+            "day_high": high,
+            "day_low": low,
+            "volume": float(600_000 + (seed % 2_000_000)),
+            "extended_price": None,
+            "extended_change_pct": None,
+            "extended_label": None,
+            "as_of_utc": (moment_utc - timedelta(minutes=15)).isoformat(
+                timespec="seconds"
+            ),
+            "as_of_display": None,
+            "delayed": True,
+            "source": "DEMO synthetic",
+            "market_status": session["state"],
+            "demo": True,
+        }
+    return {
+        "status": "ok" if items else "waiting",
+        "message": (
+            "Synthetic demo quotes — not live or delayed market prices."
+            if items else "No demo candidates to quote."
+        ),
+        "delay_note": "Demo mode: synthetic quotes generated locally; not real market data.",
+        "market_session": session,
+        "fetched_at_utc": moment_utc.isoformat(timespec="seconds"),
+        "items": items,
+        "errors": {},
+        "quote_providers": [],
+        "coverage": {
+            "symbols": len(wanted),
+            "with_quotes": len(items),
+            "providers": ["DEMO synthetic"] if items else [],
+        },
+        "demo": True,
+    }
+
+
 def fx_latest(currencies, base: str = "USD"):
     rates = {}
     for c in currencies:

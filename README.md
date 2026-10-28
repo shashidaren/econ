@@ -112,11 +112,20 @@ Preview without a server (sample data): `ECON_DEMO=1 python3 dashboard/app.py`
   average. The screen ranks 5/20/60-session momentum after small volatility and
   drawdown penalties. Every passer is listed; the page shows the eligible count
   even when the display is capped.
-- **Update cadence:** the screen re-checks its providers at most once an hour
-  (`TTL["stocks"]`) on the dashboard's 5-minute cycle, and the page shows when
-  the next check is due. The underlying data is **daily closes**, so the list
-  itself only changes after the U.S. close (~04:00–05:00 Malaysia time) — it is
-  not intraday, and an unchanged list between closes is expected.
+- **Update cadence & ~15-minute-delayed quote overlay:** the daily-close screen
+  re-checks its history providers at most once an hour (`TTL["stocks"] = 3600`),
+  so the filter and ranking stay anchored to settled U.S. closes (~04:00–05:00
+  Malaysia time) rather than churning intraday. On top of those ranked picks,
+  the dashboard overlays **~15-minute-delayed keyless quotes** every **5
+  minutes** (`TTL["stock_quotes"] = 300`, Sina `hq.sinajs.cn` batch → Nasdaq
+  `/api/quote/{SYM}/info` → Tencent `qt.gtimg.cn` → Yahoo `v8/finance/chart`
+  meta): latest delayed USD price + indicative MYR conversion, intraday `$`/`%`
+  move vs previous close, day low–high range, optional pre-market/after-hours
+  print, U.S. session status, and quote timestamp in MYT, alongside the explicit
+  `Screen close` anchor. Delayed quotes are **overlay only** — they never alter
+  which tickers pass or how they rank, and if every quote feed fails the cards
+  cleanly fall back to daily closes (or recent <1h cached quotes). Configure
+  with `ECON_STOCK_QUOTES=0` (off) and `ECON_STOCK_QUOTE_TTL=300` (min 60s).
 - **Seven-day movement:** each card shows the change from the last close at or
   before seven calendar days before the latest bar (normally five U.S. trading
   sessions), a 12-session sparkline, and the 7-day high/low range. A strip above
@@ -134,9 +143,9 @@ Preview without a server (sample data): `ECON_DEMO=1 python3 dashboard/app.py`
 - Risk labels use 20-session annualized realized volatility and 60-session
   drawdown only. They are backward-looking, not a measure of total or future
   risk. The screen has no fundamentals, earnings calendar, analyst targets,
-  intraday prices, or trade execution, and its ranking ignores headlines. A
-  share price under $50 does not mean the stock is cheap; this is a research
-  shortlist, not a buy signal.
+  real-time NBBO execution prices, or trade execution, and its ranking ignores
+  both delayed quotes and headlines. A share price under $50 does not mean the
+  stock is cheap; this is a research shortlist, not a buy signal.
 - History sources: Sina US daily K, then Nasdaq's historical API, then Tencent
   K-lines (both hosts — WAF-blocked from the LXC since 2026-10-21, kept as
   best effort), one batched Yahoo Finance spark request, then Stooq. Every
@@ -184,6 +193,7 @@ python3 -m unittest discover -s tests -v
 | Central-bank policy rates (`DFF`, `ECBDFR`) | FRED public CSV (`fredgraph.csv?cosd=...`) | NY Fed Markets API (`markets.newyorkfed.org`) for `DFF`; ECB Data Portal (`data-api.ecb.europa.eu`) for `ECBDFR` |
 | US 10Y–2Y yield curve & 10Y breakeven | FRED public CSV (`T10Y2Y`, `T10YIE`) | Official US Treasury Daily Par & Real Yield Curve CSV (`home.treasury.gov`) |
 | Short-term US stock history | Sina US daily K (`stock.finance.sina.com.cn` JSONP) | Nasdaq historical API (`api.nasdaq.com`) → Tencent K-lines (both hosts, per-host breakers) → one Yahoo Finance `v7/finance/spark` batch → Stooq `.us` daily CSV; last good screen is served badged `cached · sources blocked · data as of …` if all fail |
+| Delayed US stock quotes (overlay only, every 5 min) | Sina US quote batch (`hq.sinajs.cn/list=gb_...`, 1 batched call) | Nasdaq quote API (`api.nasdaq.com/api/quote/{SYM}/info`) → Tencent quote batch (`qt.gtimg.cn/q=us...`) → Yahoo `v8/finance/chart` meta; falls back to <1h cached quotes or settled daily closes |
 | Stock headlines (context only) | Google News RSS (`news.google.com/rss/search`, 7-day query) | Bing News RSS (`format=RSS`) → Yahoo Finance headline RSS |
 
 ### Resilience

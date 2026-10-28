@@ -201,6 +201,17 @@ STOCK_MAX_RESULTS = int(os.environ.get("ECON_STOCK_MAX_RESULTS", "7"))
 # hammering keyless providers every five-minute dashboard refresh.
 TTL["stocks"] = 60 * 60
 
+# --- Delayed / intraday stock quotes (Stocks tab price overlay) --------------
+# Keyless ~15-min-delayed quotes (Sina hq.sinajs.cn -> Nasdaq quote info ->
+# Tencent qt.gtimg.cn -> Yahoo chart) refreshed every 5 min on the board cycle
+# for the *displayed* picks only. Overlay only: never alters filters or rank.
+STOCK_QUOTES_ENABLED = os.environ.get("ECON_STOCK_QUOTES", "1") not in ("0", "false", "no")
+try:
+    STOCK_QUOTE_TTL = max(60, int(os.environ.get("ECON_STOCK_QUOTE_TTL", "300")))
+except ValueError:
+    STOCK_QUOTE_TTL = 300
+TTL["stock_quotes"] = STOCK_QUOTE_TTL
+
 # --- Stock headlines (Stocks tab) --------------------------------------------
 # Up to a few recent headlines per *displayed* ticker, from key-less public RSS
 # (Google News -> Bing News -> Yahoo Finance headline feed). Headlines are

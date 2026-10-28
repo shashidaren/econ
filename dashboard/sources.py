@@ -45,6 +45,7 @@ import json
 import math
 import os
 import random
+import re
 import shutil
 import socket
 import subprocess
@@ -55,6 +56,7 @@ import urllib.parse
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 BROWSER_UA = (
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
@@ -1794,6 +1796,749 @@ def stock_history_batch(symbols, vendor_symbols=None, days: int = 130):
     return out
 
 
+# --------------------------------------------------------------------------
+# US stock delayed / intraday quotes — Sina -> Nasdaq -> Tencent -> Yahoo
+#
+# Keyless ~15-min-delayed quote overlay for the displayed watchlist picks.
+# Refreshed on the 5-minute dashboard cycle without touching the 1-hour daily
+# screen's filters, momentum metrics, or ranking. Dedicated `stock_quote:*`
+# breaker keys prevent quote hiccups from disabling index or history breakers.
+# --------------------------------------------------------------------------
+
+SINA_US_QUOTE_KEY = "stock_quote:sina"
+NASDAQ_US_QUOTE_KEY = "stock_quote:nasdaq"
+TENCENT_US_QUOTE_KEY = "stock_quote:tencent"
+STOCK_QUOTE_REQUEST_BUDGET = 32
+_CST_TZ = timezone(timedelta(hours=8))
+_ET_TZ = ZoneInfo("America/New_York")
+
+
+def us_market_session(now: datetime | None = None) -> dict:
+    """U.S. Eastern equity session window (clock-based; exchange holidays excluded)."""
+    moment = now or datetime.now(timezone.utc)
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=timezone.utc)
+    eastern = moment.astimezone(_ET_TZ)
+    tz_abbr = eastern.strftime("%Z") or "ET"
+    if eastern.weekday() >= 5:
+        return {
+            "state": "closed",
+            "is_open": False,
+            "label": f"U.S. market closed (weekend · {tz_abbr})",
+        }
+    minutes = eastern.hour * 60 + eastern.minute
+    if 4 * 60 <= minutes < 9 * 60 + 30:
+        return {
+            "state": "pre_market",
+            "is_open": False,
+            "label": f"U.S. pre-market (04:00–09:30 {tz_abbr})",
+        }
+    if 9 * 60 + 30 <= minutes < 16 * 60:
+        return {
+            "state": "regular",
+            "is_open": True,
+            "label": f"U.S. regular session (09:30–16:00 {tz_abbr})",
+        }
+    if 16 * 60 <= minutes < 20 * 60:
+        return {
+            "state": "after_hours",
+            "is_open": False,
+            "label": f"U.S. after-hours (16:00–20:00 {tz_abbr})",
+        }
+    return {
+        "state": "closed",
+        "is_open": False,
+        "label": f"U.S. market closed (overnight · {tz_abbr})",
+    }
+
+
+def _finite_float(raw) -> float | None:
+    if raw is None:
+        return None
+    text = str(raw).strip()
+    if not text:
+        return None
+    if text.upper() in ("UNCH", "UNCHANGED"):
+        return 0.0
+    cleaned = text.replace("$", "").replace("%", "").replace(",", "").strip()
+    try:
+        value = float(cleaned)
+    except ValueError:
+        return None
+    return value if math.isfinite(value) else None
+
+
+def _pos_float(raw) -> float | None:
+    value = _finite_float(raw)
+    return value if (value is not None and value > 0) else None
+
+
+def _parse_cst_timestamp(raw: str) -> tuple[str | None, str | None]:
+    """Parse Sina's UTC+8 (Beijing/MYT) quote timestamp into UTC ISO."""
+    text = (raw or "").strip()
+    if not text:
+        return None, None
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M"):
+        try:
+            dt = datetime.strptime(text, fmt).replace(tzinfo=_CST_TZ)
+            return dt.astimezone(timezone.utc).isoformat(timespec="seconds"), None
+        except ValueError:
+            continue
+    try:
+        day = date.fromisoformat(text[:10]).isoformat()
+        return None, f"{day} (UTC+8)"
+    except ValueError:
+        return None, text[:48]
+
+
+_ET_DATE_TIME_RE = re.compile(
+    r"([A-Za-z]{3,9}\s+\d{1,2},\s*\d{4})"
+    r"(?:.*?\b(\d{1,2}:\d{2}(?::\d{2})?\s*(?:AM|PM)))?",
+    re.IGNORECASE,
+)
+_ET_TIME_FIRST_RE = re.compile(
+    r"(\d{1,2}:\d{2}(?::\d{2})?\s*(?:AM|PM)).*?"
+    r"([A-Za-z]{3,9}\s+\d{1,2},\s*\d{4})",
+    re.IGNORECASE,
+)
+
+
+def _parse_et_timestamp(raw: str) -> tuple[str | None, str | None]:
+    """Parse U.S. Eastern quote timestamps (Nasdaq prose or ISO-like strings)."""
+    text = re.sub(r"\s+", " ", (raw or "")).strip()
+    if not text:
+        return None, None
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M"):
+        try:
+            dt = datetime.strptime(text[:19], fmt).replace(tzinfo=_ET_TZ)
+            return dt.astimezone(timezone.utc).isoformat(timespec="seconds"), None
+        except ValueError:
+            continue
+
+    date_part, time_part = None, None
+    m_first = _ET_TIME_FIRST_RE.search(text)
+    if m_first:
+        time_part, date_part = m_first.group(1), m_first.group(2)
+    else:
+        m_dt = _ET_DATE_TIME_RE.search(text)
+        if m_dt:
+            date_part, time_part = m_dt.group(1), m_dt.group(2)
+
+    if date_part:
+        norm_date = re.sub(r",\s*", ", ", date_part.strip())
+        parsed_day = None
+        for dfmt in ("%b %d, %Y", "%B %d, %Y"):
+            try:
+                parsed_day = datetime.strptime(norm_date, dfmt).date()
+                break
+            except ValueError:
+                continue
+        if parsed_day is not None:
+            if time_part:
+                norm_time = re.sub(r"\s+", " ", time_part.strip().upper())
+                if " " not in norm_time and norm_time.endswith(("AM", "PM")):
+                    norm_time = norm_time[:-2] + " " + norm_time[-2:]
+                for tfmt in ("%I:%M:%S %p", "%I:%M %p"):
+                    try:
+                        tm = datetime.strptime(norm_time, tfmt).time()
+                        dt = datetime.combine(parsed_day, tm, tzinfo=_ET_TZ)
+                        return dt.astimezone(timezone.utc).isoformat(timespec="seconds"), None
+                    except ValueError:
+                        continue
+            return None, f"{parsed_day.isoformat()} (U.S. Eastern)"
+    return None, text[:64]
+
+
+def _sina_us_code(symbol: str) -> str:
+    clean = str(symbol or "").strip().lower().replace(".", "$").replace("-", "$")
+    return f"gb_{clean}"
+
+
+def _sina_us_quotes_url(symbols) -> str:
+    codes = [_sina_us_code(s) for s in symbols if str(s or "").strip()]
+    return "https://hq.sinajs.cn/list=" + ",".join(dict.fromkeys(codes))
+
+
+def _parse_sina_us_quotes_payload(
+    text: str,
+    code_to_symbol: dict[str, str] | None = None,
+    *,
+    session_state: str = "regular",
+) -> dict[str, dict]:
+    """Parse Sina `var hq_str_gb_<sym>="..."` lines into normalized quote dicts."""
+    out: dict[str, dict] = {}
+    for chunk in (text or "").split(";"):
+        if '="' not in chunk:
+            continue
+        left, _, right = chunk.partition('="')
+        code = left.strip().split("hq_str_", 1)[-1].strip()
+        if not code.startswith("gb_"):
+            continue
+        symbol = (code_to_symbol or {}).get(code)
+        if not symbol:
+            symbol = code[3:].replace("$", ".").upper()
+        body = right.split('"', 1)[0]
+        fields = body.split(",")
+        if len(fields) < 5:
+            continue
+        price = _pos_float(fields[1])
+        if price is None:
+            continue
+        change_pct = _finite_float(fields[2])
+        change = _finite_float(fields[4])
+        p26 = _pos_float(fields[26]) if len(fields) > 26 else None
+        p_implied = (round(price - change, 4)
+                     if (change is not None and price - change > 0) else None)
+        if p26 is not None and (
+            p_implied is None or abs(p26 - p_implied) <= max(0.05, price * 0.01)
+        ):
+            prev_close = round(p26, 4)
+        else:
+            prev_close = p_implied
+        if change is None and prev_close:
+            change = round(price - prev_close, 4)
+        if change_pct is None and prev_close:
+            change_pct = round((price / prev_close - 1.0) * 100.0, 2)
+
+        open_p = _pos_float(fields[5]) if len(fields) > 5 else None
+        day_high = _pos_float(fields[6]) if len(fields) > 6 else None
+        day_low = _pos_float(fields[7]) if len(fields) > 7 else None
+        if day_low is not None and day_high is not None and day_low > day_high:
+            day_low, day_high = day_high, day_low
+        vol_raw = _finite_float(fields[10]) if len(fields) > 10 else None
+        volume = vol_raw if (vol_raw is not None and vol_raw >= 0) else None
+        as_of_utc, as_of_display = _parse_cst_timestamp(fields[3])
+
+        ext_price = None
+        ext_pct = None
+        ext_label = None
+        if session_state != "regular" and len(fields) > 24:
+            cand_ext = _pos_float(fields[21])
+            ext_stamp = fields[24].strip()
+            if cand_ext is not None and ext_stamp:
+                ext_price = round(cand_ext, 4)
+                ext_pct = _finite_float(fields[22])
+                upper_stamp = ext_stamp.upper()
+                if "AM" in upper_stamp:
+                    ext_label = "Pre-market"
+                elif "PM" in upper_stamp:
+                    ext_label = "After-hours"
+                else:
+                    ext_label = "Extended hours"
+
+        out[symbol] = {
+            "symbol": symbol,
+            "price": round(price, 4),
+            "prev_close": prev_close,
+            "change": round(change, 4) if change is not None else None,
+            "change_pct": round(change_pct, 2) if change_pct is not None else None,
+            "open": round(open_p, 4) if open_p is not None else None,
+            "day_high": round(day_high, 4) if day_high is not None else None,
+            "day_low": round(day_low, 4) if day_low is not None else None,
+            "volume": volume,
+            "extended_price": ext_price,
+            "extended_change_pct": (round(ext_pct, 2)
+                                    if ext_pct is not None else None),
+            "extended_label": ext_label,
+            "as_of_utc": as_of_utc,
+            "as_of_display": as_of_display,
+            "delayed": True,
+            "source": "Sina US quote",
+            "market_status": session_state,
+        }
+    return out
+
+
+def _sina_us_quotes_batch(
+    symbols,
+    *,
+    session_state: str = "regular",
+    budget: _RequestBudget | None = None,
+) -> dict[str, dict]:
+    """Fetch delayed/intraday US quotes for multiple tickers in ONE Sina call."""
+    wanted = [str(s).strip().upper() for s in symbols if str(s or "").strip()]
+    if not wanted:
+        return {}
+    code_map = {_sina_us_code(s): s for s in wanted}
+    url = _sina_us_quotes_url(wanted)
+    text = _stock_host_get(
+        url, SINA_US_QUOTE_KEY, headers=SINA_KLINE_HEADERS,
+        timeout=8, budget=budget,
+    )
+    parsed = _parse_sina_us_quotes_payload(
+        text, code_map, session_state=session_state,
+    )
+    if parsed:
+        note_provider_ok(SINA_US_QUOTE_KEY)
+        return parsed
+    raise _SymbolMiss("Sina returned no usable US stock quotes")
+
+
+def _nasdaq_quote_url(symbol: str) -> str:
+    sym = urllib.parse.quote(str(symbol).strip().upper(), safe="")
+    return f"https://api.nasdaq.com/api/quote/{sym}/info?assetclass=stocks"
+
+
+def _map_nasdaq_market_status(raw: str | None, fallback: str) -> str:
+    norm = re.sub(r"[^a-z]+", " ", (raw or "").lower()).strip()
+    if not norm:
+        return fallback
+    if "pre" in norm:
+        return "pre_market"
+    if "after" in norm:
+        return "after_hours"
+    if "open" in norm:
+        return "regular"
+    if "close" in norm:
+        return "closed"
+    return fallback
+
+
+def _parse_nasdaq_quote_payload(
+    payload,
+    symbol: str | None = None,
+    *,
+    session_state: str = "regular",
+) -> dict | None:
+    """Parse Nasdaq `/api/quote/<SYM>/info` JSON into a normalized quote dict."""
+    if isinstance(payload, str):
+        try:
+            payload = json.loads(payload)
+        except (TypeError, ValueError):
+            return None
+    if not isinstance(payload, dict):
+        return None
+    data = payload.get("data")
+    if not isinstance(data, dict):
+        return None
+    primary = data.get("primaryData")
+    if not isinstance(primary, dict):
+        return None
+    price = _pos_float(primary.get("lastSalePrice"))
+    if price is None:
+        return None
+    resolved_symbol = str(symbol or data.get("symbol") or "").strip().upper()
+    change = _finite_float(primary.get("netChange"))
+    change_pct = _finite_float(primary.get("percentageChange"))
+    prev_close = (round(price - change, 4)
+                  if (change is not None and price - change > 0) else None)
+    if change_pct is None and prev_close:
+        change_pct = round((price / prev_close - 1.0) * 100.0, 2)
+    vol_raw = _finite_float(primary.get("volume"))
+    volume = vol_raw if (vol_raw is not None and vol_raw >= 0) else None
+
+    day_low, day_high = None, None
+    key_stats = data.get("keyStats")
+    if isinstance(key_stats, dict):
+        day_range = key_stats.get("dayrange")
+        if isinstance(day_range, dict) and day_range.get("value"):
+            parts = str(day_range["value"]).split("-")
+            if len(parts) == 2:
+                lo, hi = _pos_float(parts[0]), _pos_float(parts[1])
+                if lo is not None and hi is not None:
+                    day_low, day_high = (lo, hi) if lo <= hi else (hi, lo)
+
+    as_of_utc, as_of_display = _parse_et_timestamp(
+        primary.get("lastTradeTimestamp") or ""
+    )
+    market_status = _map_nasdaq_market_status(
+        data.get("marketStatus"), session_state
+    )
+
+    ext_price, ext_pct, ext_label = None, None, None
+    secondary = data.get("secondaryData")
+    if isinstance(secondary, dict) and market_status != "regular":
+        sec_stamp = str(secondary.get("lastTradeTimestamp") or "").upper()
+        pri_stamp = str(primary.get("lastTradeTimestamp") or "").upper()
+        if "AFTER" in sec_stamp or "PRE" in sec_stamp:
+            cand = _pos_float(secondary.get("lastSalePrice"))
+            if cand is not None:
+                ext_price = round(cand, 4)
+                ext_pct = _finite_float(secondary.get("percentageChange"))
+                ext_label = "Pre-market" if "PRE" in sec_stamp else "After-hours"
+        elif ("AFTER" in pri_stamp or "PRE" in pri_stamp) and "CLOSE" in sec_stamp:
+            reg_close = _pos_float(secondary.get("lastSalePrice"))
+            if reg_close is not None:
+                ext_price = round(price, 4)
+                ext_pct = round(change_pct, 2) if change_pct is not None else None
+                ext_label = "Pre-market" if "PRE" in pri_stamp else "After-hours"
+                price = reg_close
+                sec_chg = _finite_float(secondary.get("netChange"))
+                sec_pct = _finite_float(secondary.get("percentageChange"))
+                change = sec_chg
+                change_pct = sec_pct
+                prev_close = (round(price - sec_chg, 4)
+                              if (sec_chg is not None and price - sec_chg > 0)
+                              else prev_close)
+                as_of_utc, as_of_display = _parse_et_timestamp(
+                    secondary.get("lastTradeTimestamp") or ""
+                )
+
+    return {
+        "symbol": resolved_symbol,
+        "price": round(price, 4),
+        "prev_close": prev_close,
+        "change": round(change, 4) if change is not None else None,
+        "change_pct": round(change_pct, 2) if change_pct is not None else None,
+        "open": None,
+        "day_high": round(day_high, 4) if day_high is not None else None,
+        "day_low": round(day_low, 4) if day_low is not None else None,
+        "volume": volume,
+        "extended_price": ext_price,
+        "extended_change_pct": (round(ext_pct, 2)
+                                if ext_pct is not None else None),
+        "extended_label": ext_label,
+        "as_of_utc": as_of_utc,
+        "as_of_display": as_of_display,
+        "delayed": True,
+        "source": "Nasdaq quote",
+        "market_status": market_status,
+    }
+
+
+def _nasdaq_us_quote(
+    symbol: str,
+    *,
+    session_state: str = "regular",
+    budget: _RequestBudget | None = None,
+) -> dict:
+    """Fetch delayed/NLS quote for one US ticker via Nasdaq's quote info API."""
+    text = _stock_host_get(
+        _nasdaq_quote_url(symbol), NASDAQ_US_QUOTE_KEY,
+        headers=NASDAQ_HEADERS, timeout=8, budget=budget,
+    )
+    quote = _parse_nasdaq_quote_payload(
+        text, symbol=symbol, session_state=session_state,
+    )
+    if not quote:
+        raise _SymbolMiss(f"no Nasdaq quote for {symbol}")
+    note_provider_ok(NASDAQ_US_QUOTE_KEY)
+    return quote
+
+
+def _tencent_us_quotes_url(symbols) -> str:
+    codes = [f"us{str(s).strip().upper()}" for s in symbols if str(s or "").strip()]
+    return "https://qt.gtimg.cn/q=" + ",".join(dict.fromkeys(codes))
+
+
+def _parse_tencent_us_quotes_payload(
+    text: str,
+    *,
+    session_state: str = "regular",
+) -> dict[str, dict]:
+    """Parse `v_us<SYM>="..."` lines from `qt.gtimg.cn` into quote dicts."""
+    out: dict[str, dict] = {}
+    for chunk in (text or "").split(";"):
+        if '="' not in chunk:
+            continue
+        left, _, right = chunk.partition('="')
+        code = left.strip().split("v_", 1)[-1].strip()
+        if code == "pv_none_match" or not code.startswith("us"):
+            continue
+        symbol = code[2:].split(".", 1)[0].upper()
+        fields = right.split('"', 1)[0].split("~")
+        if len(fields) < 6 or not symbol:
+            continue
+        price = _pos_float(fields[3])
+        if price is None:
+            continue
+        prev_close = _pos_float(fields[4])
+        open_p = _pos_float(fields[5])
+        vol_raw = _finite_float(fields[6]) if len(fields) > 6 else None
+        volume = vol_raw if (vol_raw is not None and vol_raw >= 0) else None
+        change = _finite_float(fields[31]) if len(fields) > 31 else None
+        change_pct = _finite_float(fields[32]) if len(fields) > 32 else None
+        if change is None and prev_close:
+            change = round(price - prev_close, 4)
+        if change_pct is None and prev_close:
+            change_pct = round((price / prev_close - 1.0) * 100.0, 2)
+        day_high = _pos_float(fields[33]) if len(fields) > 33 else None
+        day_low = _pos_float(fields[34]) if len(fields) > 34 else None
+        if day_low is not None and day_high is not None and day_low > day_high:
+            day_low, day_high = day_high, day_low
+        as_of_utc, as_of_display = _parse_et_timestamp(
+            fields[30] if len(fields) > 30 else ""
+        )
+        out[symbol] = {
+            "symbol": symbol,
+            "price": round(price, 4),
+            "prev_close": round(prev_close, 4) if prev_close is not None else None,
+            "change": round(change, 4) if change is not None else None,
+            "change_pct": round(change_pct, 2) if change_pct is not None else None,
+            "open": round(open_p, 4) if open_p is not None else None,
+            "day_high": round(day_high, 4) if day_high is not None else None,
+            "day_low": round(day_low, 4) if day_low is not None else None,
+            "volume": volume,
+            "extended_price": None,
+            "extended_change_pct": None,
+            "extended_label": None,
+            "as_of_utc": as_of_utc,
+            "as_of_display": as_of_display,
+            "delayed": True,
+            "source": "Tencent US quote",
+            "market_status": session_state,
+        }
+    return out
+
+
+def _tencent_us_quotes_batch(
+    symbols,
+    *,
+    session_state: str = "regular",
+    budget: _RequestBudget | None = None,
+) -> dict[str, dict]:
+    wanted = [str(s).strip().upper() for s in symbols if str(s or "").strip()]
+    if not wanted:
+        return {}
+    text = _stock_host_get(
+        _tencent_us_quotes_url(wanted), TENCENT_US_QUOTE_KEY,
+        headers=TENCENT_KLINE_HEADERS, timeout=8, budget=budget,
+    )
+    parsed = _parse_tencent_us_quotes_payload(text, session_state=session_state)
+    if parsed:
+        note_provider_ok(TENCENT_US_QUOTE_KEY)
+        return parsed
+    raise _SymbolMiss("Tencent returned no matching US stock quotes")
+
+
+def _yahoo_us_quote(symbol: str, *, session_state: str = "regular") -> dict:
+    """Last-resort intraday quote from Yahoo v8 chart metadata (skipped on 429)."""
+    if not provider_available("yahoo"):
+        raise RuntimeError("yahoo: cooling down after recent 429/failures")
+    sym = str(symbol).strip().upper()
+    enc = urllib.parse.quote(sym, safe="")
+    crumb = _yahoo_session_crumb()
+    crumb_param = f"&crumb={urllib.parse.quote(crumb, safe='')}" if crumb else ""
+    url = (
+        f"https://query1.finance.yahoo.com/v8/finance/chart/{enc}"
+        f"?range=1d&interval=5m&includePrePost=true{crumb_param}"
+    )
+    _yahoo_pace()
+    try:
+        j = _get_json(url, timeout=8, headers=_yahoo_headers())
+    except Exception as exc:
+        unreachable, limited = _classify(exc)
+        note_provider_failure("yahoo", exc, rate_limited=limited, unreachable=unreachable)
+        raise RuntimeError(f"yahoo({sym}): {exc}") from exc
+    result = ((j.get("chart") or {}).get("result") or [None])[0] or {}
+    meta = result.get("meta") or {}
+    price = _pos_float(meta.get("regularMarketPrice"))
+    if price is None:
+        raise _SymbolMiss(f"no Yahoo quote price for {sym}")
+    prev_close = _pos_float(
+        meta.get("chartPreviousClose") or meta.get("previousClose")
+    )
+    change = round(price - prev_close, 4) if prev_close else None
+    change_pct = (round((price / prev_close - 1.0) * 100.0, 2)
+                  if prev_close else None)
+    day_high = _pos_float(meta.get("regularMarketDayHigh"))
+    day_low = _pos_float(meta.get("regularMarketDayLow"))
+    vol_raw = _finite_float(meta.get("regularMarketVolume"))
+    volume = vol_raw if (vol_raw is not None and vol_raw >= 0) else None
+    as_of_utc = None
+    ts = meta.get("regularMarketTime")
+    try:
+        if ts:
+            as_of_utc = datetime.fromtimestamp(
+                int(ts), tz=timezone.utc
+            ).isoformat(timespec="seconds")
+    except (TypeError, ValueError, OverflowError, OSError):
+        as_of_utc = None
+    note_provider_ok("yahoo")
+    return {
+        "symbol": sym,
+        "price": round(price, 4),
+        "prev_close": round(prev_close, 4) if prev_close is not None else None,
+        "change": change,
+        "change_pct": change_pct,
+        "open": None,
+        "day_high": round(day_high, 4) if day_high is not None else None,
+        "day_low": round(day_low, 4) if day_low is not None else None,
+        "volume": volume,
+        "extended_price": None,
+        "extended_change_pct": None,
+        "extended_label": None,
+        "as_of_utc": as_of_utc,
+        "as_of_display": None,
+        "delayed": True,
+        "source": "Yahoo Finance",
+        "market_status": session_state,
+    }
+
+
+def stock_quotes_batch(symbols, *, now: datetime | None = None) -> dict:
+    """Fetch ~15-min-delayed US quotes for displayed stock picks.
+
+    Cascade:
+      1. Sina `hq.sinajs.cn/list=gb_...` (ONE batched HTTP call)
+      2. Nasdaq `/api/quote/<SYM>/info` (paced per-symbol for misses)
+      3. Tencent `qt.gtimg.cn/q=us...` (ONE batched HTTP call for misses)
+      4. Yahoo `v8/finance/chart` meta (skipped when Yahoo breaker is cooling)
+
+    Never raises to the caller: a partial or total quote outage returns a
+    structured status dict (`ok` | `partial` | `unavailable` | `waiting`) so
+    the daily-close stock screen is never disrupted.
+    """
+    moment = now or datetime.now(timezone.utc)
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=timezone.utc)
+    moment_utc = moment.astimezone(timezone.utc)
+    session = us_market_session(moment_utc)
+    session_state = session["state"]
+    delay_note = (
+        "Keyless public quotes (typically real-time Nasdaq Last Sale to ~15 min "
+        "delayed). Price overlay only — never alters screen filters or ranking."
+    )
+
+    wanted = list(dict.fromkeys(
+        str(s).strip().upper() for s in (symbols or []) if str(s or "").strip()
+    ))
+    base = {
+        "delay_note": delay_note,
+        "market_session": session,
+        "fetched_at_utc": moment_utc.isoformat(timespec="seconds"),
+    }
+    if not wanted:
+        return {
+            **base,
+            "status": "waiting",
+            "message": "Waiting for screened stock picks before looking up delayed quotes.",
+            "items": {},
+            "errors": {},
+            "quote_providers": [],
+            "coverage": {"symbols": 0, "with_quotes": 0, "providers": []},
+        }
+
+    items: dict[str, dict] = {}
+    symbol_errors: dict[str, list[str]] = {}
+    providers_used: list[str] = []
+    quote_providers: list[str] = ["stock_quote:sina"]
+    budget = _RequestBudget(STOCK_QUOTE_REQUEST_BUDGET)
+
+    def note_source(label: str) -> None:
+        if label and label not in providers_used:
+            providers_used.append(label)
+
+    def add_err(sym: str, label: str, reason) -> None:
+        symbol_errors.setdefault(sym, []).append(f"{label}: {str(reason)[:140]}")
+
+    # 1. Sina US quote batch (1 request for all displayed tickers)
+    try:
+        sina_got = _sina_us_quotes_batch(
+            wanted, session_state=session_state, budget=budget,
+        )
+        for sym in wanted:
+            if sym in sina_got:
+                items[sym] = sina_got[sym]
+                note_source(sina_got[sym]["source"])
+            else:
+                add_err(sym, "Sina US quote", "symbol missing from batch response")
+    except Exception as exc:  # noqa: BLE001 — cascade continues
+        for sym in wanted:
+            add_err(sym, "Sina US quote", exc)
+
+    # 2. Nasdaq quote info for any remaining tickers
+    missing = [sym for sym in wanted if sym not in items]
+    if missing:
+        quote_providers.append("stock_quote:nasdaq")
+        workers = max(1, min(4, len(missing)))
+        with ThreadPoolExecutor(max_workers=workers,
+                                thread_name_prefix="quotes-nasdaq") as pool:
+            futures = {
+                pool.submit(
+                    _nasdaq_us_quote, sym,
+                    session_state=session_state, budget=budget,
+                ): sym
+                for sym in missing
+            }
+            for future, sym in futures.items():
+                try:
+                    q = future.result()
+                    items[sym] = q
+                    note_source(q["source"])
+                except Exception as exc:  # noqa: BLE001
+                    add_err(sym, "Nasdaq quote", exc)
+
+    # 3. Tencent US quote batch for any still-missing tickers
+    missing = [sym for sym in wanted if sym not in items]
+    if missing:
+        quote_providers.append("stock_quote:tencent")
+        try:
+            tencent_got = _tencent_us_quotes_batch(
+                missing, session_state=session_state, budget=budget,
+            )
+            for sym in missing:
+                if sym in tencent_got:
+                    items[sym] = tencent_got[sym]
+                    note_source(tencent_got[sym]["source"])
+                else:
+                    add_err(sym, "Tencent US quote", "symbol missing from response")
+        except Exception as exc:  # noqa: BLE001
+            for sym in missing:
+                add_err(sym, "Tencent US quote", exc)
+
+    # 4. Yahoo chart meta (skipped at ~0 ms when Yahoo's IP breaker is cooling)
+    missing = [sym for sym in wanted if sym not in items]
+    if missing:
+        quote_providers.append("yahoo")
+        for sym in missing:
+            if not provider_available("yahoo"):
+                add_err(sym, "Yahoo Finance", "provider cooling down")
+                continue
+            if not budget.take():
+                add_err(sym, "Yahoo Finance", "request budget exhausted")
+                continue
+            try:
+                q = _yahoo_us_quote(sym, session_state=session_state)
+                items[sym] = q
+                note_source(q["source"])
+            except Exception as exc:  # noqa: BLE001
+                add_err(sym, "Yahoo Finance", exc)
+
+    errors_out = {
+        sym: "; ".join(reasons)
+        for sym, reasons in symbol_errors.items()
+        if sym not in items or len(reasons) > 0
+    }
+    coverage = {
+        "symbols": len(wanted),
+        "with_quotes": len(items),
+        "providers": providers_used,
+    }
+    if items and len(items) == len(wanted):
+        status = "ok"
+        message = (
+            f"Delayed quotes (~15 min) loaded for all {len(wanted)} displayed "
+            f"stock(s) · {session['label']}."
+        )
+    elif items:
+        status = "partial"
+        missed = len(wanted) - len(items)
+        message = (
+            f"Delayed quotes (~15 min) loaded for {len(items)} of {len(wanted)} "
+            f"displayed stock(s); {missed} fell back to the daily close."
+        )
+    else:
+        status = "unavailable"
+        sample_reason = next(iter(errors_out.values()), "")
+        first_part = sample_reason.split(";")[0] if sample_reason else ""
+        message = (
+            "Delayed stock quotes are unavailable"
+            + (f" ({first_part})" if first_part else "")
+            + "; showing latest daily closes."
+        )
+    return {
+        **base,
+        "status": status,
+        "message": message,
+        "items": items,
+        "errors": errors_out,
+        "quote_providers": quote_providers,
+        "quote_requests": budget.used,
+        "coverage": coverage,
+    }
+
+
 def quote_from_history(name: str, hist, source: str | None = None,
                        max_age_days: int | None = None,
                        symbol: str | None = None):
@@ -2342,6 +3087,44 @@ def _doctor_stock_history(run_checks):
     run_checks(checks, width=28)
 
 
+def _doctor_stock_quotes(run_checks):
+    """Probe every US delayed-quote host for PFE with HTTP status + body head."""
+    reset_breakers("stock_quote")
+
+    def probe_quote(url, headers, extract):
+        try:
+            body = _get(url, timeout=10, headers=headers, capture_error_body=True)
+        except HttpStatusError as exc:
+            raise RuntimeError(f"HTTP {exc.status} body[:120]={exc.body[:120]!r}")
+        item = extract(body)
+        if not item:
+            raise RuntimeError(
+                f"HTTP 200 but no quote parsed; body[:120]={body[:120]!r}")
+        stamp = item.get("as_of_utc") or item.get("as_of_display") or "no timestamp"
+        return (f"HTTP 200, price={item['price']} ({item.get('change_pct')}%) "
+                f"@ {stamp} | body[:120]={body[:120]!r}")
+
+    def cascade_probe():
+        out = stock_quotes_batch(["PFE"])
+        q = (out.get("items") or {}).get("PFE")
+        if not q:
+            raise RuntimeError(out.get("message") or "no quote returned")
+        return f"{q['source']}, price={q['price']} ({q.get('change_pct')}%)"
+
+    run_checks([
+        ("sina US quote PFE", lambda: probe_quote(
+            _sina_us_quotes_url(["PFE"]), SINA_KLINE_HEADERS,
+            lambda body: _parse_sina_us_quotes_payload(body).get("PFE"))),
+        ("nasdaq quote PFE", lambda: probe_quote(
+            _nasdaq_quote_url("PFE"), NASDAQ_HEADERS,
+            lambda body: _parse_nasdaq_quote_payload(body, symbol="PFE"))),
+        ("tencent US quote PFE", lambda: probe_quote(
+            _tencent_us_quotes_url(["PFE"]), TENCENT_KLINE_HEADERS,
+            lambda body: _parse_tencent_us_quotes_payload(body).get("PFE"))),
+        ("quote cascade PFE", cascade_probe),
+    ], width=28)
+
+
 def fetch_news(candidates, *, days=7, per_symbol=3):
     """Headlines for the displayed stock picks (see news.py for the rules).
 
@@ -2430,6 +3213,8 @@ if __name__ == "__main__":
             ("quote:xauusd", lambda: stooq_history("xauusd", days=30)[-1]),
             ("stock:PFE", lambda: stock_history_batch(
                 ["PFE"], {"PFE": "usPFE.N"}, days=130)["PFE"]["source"]),
+            ("stock_quote:PFE", lambda: stock_quotes_batch(
+                ["PFE"])["items"]["PFE"]["source"]),
         ])
         print("provider breakers:")
         _print_breakers()
@@ -2441,7 +3226,7 @@ if __name__ == "__main__":
         print(f"curl: {CURL_BIN or 'NOT FOUND (urllib only)'} | yahoo pace "
               f"{YAHOO_MIN_INTERVAL}s | yahoo cookie {'on' if YAHOO_USE_COOKIE else 'off'}")
 
-        print("\n[1/10] FX & macro")
+        print("\n[1/11] FX & macro")
         _run_checks([
             ("frankfurter.app", lambda: _get_json(
                 "https://api.frankfurter.app/latest?from=USD&to=EUR,JPY")["date"]),
@@ -2455,7 +3240,7 @@ if __name__ == "__main__":
                 ["US", "MY"], "NE.TRD.GNFS.ZS", "trade")),
         ], width=26)
 
-        print("\n[2/10] Rates, curve & their official fallbacks")
+        print("\n[2/11] Rates, curve & their official fallbacks")
         _run_checks([
             ("fred DFF", lambda: fred_series("DFF", years=1)[-1]),
             ("fred ECBDFR", lambda: fred_series("ECBDFR", years=1)[-1]),
@@ -2467,7 +3252,7 @@ if __name__ == "__main__":
             ("ustreasury breakeven", lambda: _ustreasury_breakeven_series(years=1)[-1]),
         ], width=24)
 
-        print("\n[3/10] FRED quote series (mapped to board cards, including fallbacks)")
+        print("\n[3/11] FRED quote series (mapped to board cards, including fallbacks)")
         mapped_fred = {sid for sid, _age in FRED_QUOTE_MAP.values()}
         mapped_fred.update(
             sid for fallbacks in FRED_QUOTE_FALLBACKS.values()
@@ -2478,7 +3263,7 @@ if __name__ == "__main__":
             for sid in sorted(mapped_fred)
         ], width=24)
 
-        print("\n[4/10] FRED candidate series (not wired in yet)")
+        print("\n[4/11] FRED candidate series (not wired in yet)")
         if FRED_PROBE_CANDIDATES:
             _run_checks([
                 (f"fred {sid}", lambda s=sid: _fred_probe(s, monthly=s.endswith("USDM")))
@@ -2487,13 +3272,13 @@ if __name__ == "__main__":
         else:
             print("  (no unverified candidates)")
 
-        print("\n[5/10] Yahoo Finance (cookie + crumb handshake, charts, spark batch)")
+        print("\n[5/11] Yahoo Finance (cookie + crumb handshake, charts, spark batch)")
         _doctor_yahoo(_run_checks)
 
-        print("\n[6/10] CNBC quote candidates (international indices)")
+        print("\n[6/11] CNBC quote candidates (international indices)")
         _doctor_cnbc(_run_checks)
 
-        print("\n[7/10] Stooq & CoinGecko")
+        print("\n[7/11] Stooq & CoinGecko")
         checks = []
         for scheme, domain, tag in (("https", "stooq.com", ""),
                                     ("https", "stooq.pl", ""),
@@ -2505,7 +3290,7 @@ if __name__ == "__main__":
                            lambda c=coin, s=sym: _coingecko_history(s, days=30)[-1]))
         _run_checks(checks, width=24)
 
-        print("\n[8/10] Tencent / Sina (indices FRED does not publish)")
+        print("\n[8/11] Tencent / Sina (indices FRED does not publish)")
         reset_breakers("tencent")
         reset_breakers("sina")
         clear_asia_cache()
@@ -2521,10 +3306,10 @@ if __name__ == "__main__":
             ("euro stoxx ^stx", lambda: _asia_probe("^stx")),
         ], width=24)
 
-        print("\n[9/10] US stock history (Stocks tab; Sina -> Nasdaq -> Tencent hosts, PFE probe)")
+        print("\n[9/11] US stock history (Stocks tab; Sina -> Nasdaq -> Tencent hosts, PFE probe)")
         _doctor_stock_history(_run_checks)
 
-        print("\n[10/10] Stock headline feeds (Stocks tab; Google -> Bing -> Yahoo)")
+        print("\n[10/11] Stock headline feeds (Stocks tab; Google -> Bing -> Yahoo)")
         import news
         reset_breakers("google_news")
         reset_breakers("bing_news")
@@ -2543,6 +3328,9 @@ if __name__ == "__main__":
                 return f"{len(items)} item(s), newest {stamp}"
             probe_checks.append((label, _probe))
         _run_checks(probe_checks, width=24)
+
+        print("\n[11/11] US stock delayed quotes (Stocks tab; Sina -> Nasdaq -> Tencent, PFE probe)")
+        _doctor_stock_quotes(_run_checks)
 
         print("\nProvider breakers after the probe:")
         _print_breakers()

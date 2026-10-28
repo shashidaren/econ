@@ -781,6 +781,50 @@ class TestStockHistoryDoctor(TransportCase):
             self.assertIn(family, resets)
 
 
+class TestStockQuoteDoctor(TransportCase):
+    """--doctor section [11/11] probes delayed stock quote hosts and resets quote breakers."""
+
+    def test_quote_doctor_probes_hosts_and_resets_stock_quote_breakers(self):
+        results = {}
+        resets = []
+        real_reset = sources.reset_breakers
+
+        def fake_get(url, timeout=None, **kwargs):
+            self.assertTrue(kwargs.get("capture_error_body"))
+            if "hq.sinajs.cn" in url:
+                return 'var hq_str_gb_pfe="Pfizer,26.40,2.33,2026-10-29 22:15:00,0.60,25.95,26.55,25.82";'
+            if "api.nasdaq.com/api/quote/PFE/info" in url:
+                return json.dumps({"data": {"primaryData": {"lastSalePrice": "$26.40"}}})
+            if "qt.gtimg.cn" in url:
+                return 'v_usPFE="200~Pfizer~PFE.N~26.40~25.80~25.90";'
+            raise AssertionError(f"unexpected URL {url}")
+
+        def runner(checks, width=18):
+            for label, fn in checks:
+                try:
+                    results[label] = ("ok", fn())
+                except Exception as exc:  # noqa: BLE001
+                    results[label] = ("fail", str(exc))
+
+        canned = {
+            "status": "ok",
+            "items": {"PFE": {"price": 26.40, "change_pct": 2.33, "source": "Sina Finance (~15m delayed)"}},
+        }
+        with mock.patch.object(sources, "_get", side_effect=fake_get), \
+                mock.patch.object(sources, "stock_quotes_batch", return_value=canned), \
+                mock.patch.object(sources, "reset_breakers",
+                                  side_effect=lambda p=None: (resets.append(p), real_reset(p))):
+            sources._doctor_stock_quotes(runner)
+
+        self.assertEqual(
+            sorted(results),
+            ["nasdaq quote PFE", "quote cascade PFE", "sina US quote PFE", "tencent US quote PFE"],
+        )
+        for label in results:
+            self.assertEqual(results[label][0], "ok")
+        self.assertIn("stock_quote", resets)
+
+
 
 class TestUSTreasuryErrors(TransportCase):
     def test_breakeven_accepts_both_10yr_header_spellings(self):
