@@ -159,6 +159,19 @@ def economy_history():
     }
 
 
+def _displayed_stock_symbols() -> list[str]:
+    """Ticker symbols currently shown by the cached stock screen (up to 7)."""
+    entry = cache_get("stock_screen") or {}
+    screen = entry.get("data")
+    if not isinstance(screen, dict):
+        return []
+    return [
+        str(c.get("symbol")).strip().upper()
+        for c in (screen.get("candidates") or [])
+        if isinstance(c, dict) and str(c.get("symbol") or "").strip()
+    ]
+
+
 def build_registry():
     reg = []  # (key, fn, ttl)
 
@@ -263,7 +276,72 @@ def build_registry():
         return screen
     reg.append(("stock_screen", stock_screen_data, config.TTL["stocks"]))
 
-    # 6. Economy 101 tab: annual World Bank series for the US and Malaysia.
+    # 6. Delayed / intraday stock quotes (~15-min delayed keyless overlay for
+    # the displayed stock picks, refreshed every 5 min on the board cycle).
+    def stock_quotes_data():
+        if not config.STOCK_QUOTES_ENABLED:
+            return {
+                "status": "disabled",
+                "message": "Delayed stock quotes are disabled (ECON_STOCK_QUOTES=0).",
+                "items": {},
+                "errors": {},
+                "quote_providers": [],
+                "coverage": {"symbols": 0, "with_quotes": 0, "providers": []},
+            }
+        symbols = _displayed_stock_symbols()
+        if not symbols or not hasattr(backend, "stock_quotes_batch"):
+            return {
+                "status": "waiting",
+                "message": (
+                    "Waiting for screened stock picks before looking up "
+                    "delayed quotes."
+                ),
+                "items": {},
+                "errors": {},
+                "quote_providers": [],
+                "coverage": {"symbols": 0, "with_quotes": 0, "providers": []},
+            }
+        try:
+            result = backend.stock_quotes_batch(symbols)
+        except Exception as exc:  # noqa: BLE001 — never crash the refresher
+            result = {
+                "status": "unavailable",
+                "message": (
+                    f"Delayed stock quote lookup failed: "
+                    f"{type(exc).__name__}: {exc}"
+                )[:240],
+                "items": {},
+                "errors": {},
+                "quote_providers": [],
+                "coverage": {"symbols": len(symbols), "with_quotes": 0,
+                             "providers": []},
+            }
+        # On a transient 5-minute quote outage, keep recently fetched quotes
+        # (< 1 h old) badged as cached rather than dropping straight to daily
+        # closes; older cached quotes expire cleanly back to daily closes.
+        if result.get("status") == "unavailable":
+            prev_entry = cache_get("stock_quotes") or {}
+            prev = prev_entry.get("data")
+            prev_at = prev_entry.get("at") or 0
+            if (isinstance(prev, dict) and prev.get("items")
+                    and (time.time() - float(prev_at)) < 3600):
+                degraded = dict(prev)
+                degraded["status"] = "cached"
+                degraded["served_from_cache"] = True
+                degraded["refresh_error"] = str(
+                    result.get("message") or "quote refresh failed"
+                )[:240]
+                degraded["quote_providers"] = (
+                    result.get("quote_providers")
+                    or prev.get("quote_providers")
+                    or []
+                )
+                return degraded
+        return result
+    reg.append(("stock_quotes", stock_quotes_data,
+                config.TTL.get("stock_quotes", 300)))
+
+    # 7. Economy 101 tab: annual World Bank series for the US and Malaysia.
     # Same provider as the macro panel; one cached payload on a daily TTL.
     reg.append(("economy_history", economy_history, config.TTL.get(
         "economy", 24 * 60 * 60)))
@@ -309,14 +387,41 @@ def warm_all(force=False):
             except Exception:  # pragma: no cover — pre-flight is best effort
                 traceback.print_exc()
 
+    # If `stock_screen` is refreshing in this cycle, run `stock_quotes` after
+    # the worker pool finishes so cold boots and hourly screen updates quote
+    # the newly selected watchlist picks rather than an empty or stale list.
+    screen_refreshing = any(k == "stock_screen" for k, _, _ in todo)
+    if screen_refreshing:
+        pool_todo = [item for item in todo if item[0] != "stock_quotes"]
+        deferred_quotes = [item for item in todo if item[0] == "stock_quotes"]
+    else:
+        pool_todo = todo
+        deferred_quotes = []
+
     workers = 1 if config.DEMO else 4
-    with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="warm") as pool:
-        futures = [pool.submit(fetch_into_cache, key, fn, ttl) for key, fn, ttl in todo]
-        for fut in futures:
-            try:
-                fut.result()
-            except Exception:
-                traceback.print_exc()
+    if pool_todo:
+        with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="warm") as pool:
+            futures = [pool.submit(fetch_into_cache, key, fn, ttl)
+                       for key, fn, ttl in pool_todo]
+            for fut in futures:
+                try:
+                    fut.result()
+                except Exception:
+                    traceback.print_exc()
+
+    if screen_refreshing and not deferred_quotes and config.STOCK_QUOTES_ENABLED:
+        # Screen refreshed while quotes were still inside their 5-min TTL:
+        # re-fetch quotes only if a newly ranked ticker lacks a quote.
+        existing = ((cache_get("stock_quotes") or {}).get("data") or {}).get("items") or {}
+        needed = _displayed_stock_symbols()
+        if needed and any(sym not in existing for sym in needed):
+            deferred_quotes = [item for item in REGISTRY if item[0] == "stock_quotes"]
+
+    for key, fn, ttl in deferred_quotes:
+        try:
+            fetch_into_cache(key, fn, ttl)
+        except Exception:
+            traceback.print_exc()
     return []
 
 
@@ -473,6 +578,134 @@ def _stock_provider_issues(providers, screen=None):
     return stock_names
 
 
+def _stock_quote_provider_issues(providers, quotes=None):
+    """Scope quote-provider breaker warnings to stages the quote refresh touched."""
+    scope = (quotes or {}).get("quote_providers")
+    scope = {str(name) for name in scope} if scope is not None else None
+    out = []
+    for item in providers or []:
+        name = str(item.get("provider") or "")
+        if not (name.startswith("stock_quote:") or name == "yahoo"):
+            continue
+        if scope is not None and name not in scope:
+            continue
+        if name == "yahoo" and scope is None:
+            continue
+        out.append(dict(item))
+    return out
+
+
+def _with_stock_quotes(screen, quotes_entry, *, providers=None, now=None):
+    """Attach ~15-min-delayed quotes to displayed candidates without re-ranking.
+
+    Daily-screen fields (`close`, `as_of`, `ret1_pct`, `rank_score`, `risk`,
+    etc.) remain intact so the filter and rank order stay anchored to settled
+    daily closes. Each candidate gets a `quote` dict when a fresh quote is
+    available, or `None` when quotes are disabled/warming/unavailable.
+    """
+    view = dict(screen or {})
+    interval = int(config.TTL.get("stock_quotes") or 300)
+    now_dt = now or datetime.now(timezone.utc)
+    if isinstance(now_dt, (int, float)):
+        now_dt = datetime.fromtimestamp(float(now_dt), timezone.utc)
+    elif now_dt.tzinfo is None:
+        now_dt = now_dt.replace(tzinfo=timezone.utc)
+    now_dt = now_dt.astimezone(timezone.utc)
+    now_ts = now_dt.timestamp()
+
+    raw_quotes = (quotes_entry or {}).get("data")
+    if not config.STOCK_QUOTES_ENABLED:
+        quotes_view = {
+            "status": "disabled",
+            "message": "Delayed stock quotes are disabled (ECON_STOCK_QUOTES=0).",
+            "items": {},
+            "errors": {},
+            "refresh_interval_seconds": interval,
+            "provider_issues": [],
+        }
+    elif not isinstance(raw_quotes, dict):
+        quotes_view = {
+            "status": "waiting",
+            "message": "Waiting for the 5-minute delayed-quote refresh.",
+            "items": {},
+            "errors": {},
+            "refresh_interval_seconds": interval,
+            "provider_issues": [],
+        }
+    else:
+        quotes_view = dict(raw_quotes)
+        quotes_view["refresh_interval_seconds"] = interval
+        at = (quotes_entry or {}).get("at")
+        try:
+            at_f = float(at)
+        except (TypeError, ValueError):
+            at_f = None
+        if at_f is not None:
+            quotes_view["checked_at_utc"] = datetime.fromtimestamp(
+                at_f, timezone.utc
+            ).isoformat(timespec="minutes")
+            quotes_view["next_check_in_seconds"] = max(
+                0, int(at_f + interval - now_ts)
+            )
+            # Disk-restored quotes older than 6 hours without a fresh refresh
+            # are suppressed so stale quotes never masquerade as intraday data.
+            if (now_ts - at_f) > 6 * 3600 and not quotes_view.get("demo"):
+                quotes_view["status"] = "stale"
+                quotes_view["message"] = (
+                    "Cached delayed quotes are older than 6 hours; showing "
+                    "latest daily closes until the next quote refresh."
+                )
+        quotes_view["provider_issues"] = _stock_quote_provider_issues(
+            providers, quotes_view
+        )
+
+    items_map = (
+        quotes_view.get("items")
+        if quotes_view.get("status") in ("ok", "partial", "cached")
+        and isinstance(quotes_view.get("items"), dict)
+        else {}
+    )
+    candidates = []
+    for cand in view.get("candidates") or []:
+        if not isinstance(cand, dict):
+            continue
+        item = dict(cand)
+        sym = str(item.get("symbol") or "").strip().upper()
+        raw_q = items_map.get(sym)
+        attached = None
+        if isinstance(raw_q, dict):
+            try:
+                price_val = float(raw_q.get("price"))
+            except (TypeError, ValueError):
+                price_val = None
+            if price_val is not None and math.isfinite(price_val) and price_val > 0:
+                q_copy = dict(raw_q)
+                as_of_utc = q_copy.get("as_of_utc")
+                age_sec = None
+                if as_of_utc:
+                    try:
+                        raw_iso = str(as_of_utc)
+                        if raw_iso.endswith("Z"):
+                            raw_iso = raw_iso[:-1] + "+00:00"
+                        q_dt = datetime.fromisoformat(raw_iso)
+                        if q_dt.tzinfo is None:
+                            q_dt = q_dt.replace(tzinfo=timezone.utc)
+                        age_sec = max(0, int((now_dt - q_dt).total_seconds()))
+                    except (TypeError, ValueError, OverflowError):
+                        age_sec = None
+                q_copy["age_seconds"] = age_sec
+                # Guard against an upstream returning an ancient suspended print.
+                max_age_sec = 7 * 86400
+                if age_sec is None or age_sec <= max_age_sec:
+                    attached = q_copy
+        item["quote"] = attached
+        candidates.append(item)
+
+    view["candidates"] = candidates
+    view["quotes"] = quotes_view
+    return view
+
+
 def _with_stock_refresh_meta(screen, entry, *, now=None):
     """Tell the page how often this screen re-checks providers, and when next.
 
@@ -566,6 +799,17 @@ def _with_indicative_myr(screen, fx_entry, *, demo=False, now=None):
             and math.isfinite(float(item["close"]))
             else None
         )
+        if isinstance(item.get("quote"), dict):
+            q_copy = dict(item["quote"])
+            q_price = q_copy.get("price")
+            q_copy["price_myr_indicative"] = (
+                round(float(q_price) * rate, 2)
+                if reference["available"] and rate is not None
+                and isinstance(q_price, (int, float))
+                and math.isfinite(float(q_price))
+                else None
+            )
+            item["quote"] = q_copy
     view["candidates"] = candidates
     view["currency_reference"] = reference
     return view
@@ -582,6 +826,7 @@ def summary():
     fx_entry = cache_get("fx") or {}
     fx_quotes = fx_entry.get("data") or []
     stock_entry = cache_get("stock_screen") or {}
+    quotes_entry = cache_get("stock_quotes") or {}
     stock_error = stock_entry.get("err")
     stock_screen_data = stock_entry.get("data")
     if stock_screen_data is None:
@@ -614,6 +859,8 @@ def summary():
             stock_screen_data["served_from_cache"] = True
             stock_screen_data["sources_blocked"] = True
     stock_screen_data = _with_stock_refresh_meta(stock_screen_data, stock_entry)
+    stock_screen_data = _with_stock_quotes(
+        stock_screen_data, quotes_entry, providers=providers)
     stock_screen_data = _with_indicative_myr(
         stock_screen_data, fx_entry, demo=config.DEMO)
     stock_screen_data["provider_issues"] = _stock_provider_issues(
@@ -715,6 +962,7 @@ class Handler(BaseHTTPRequestHandler):
             elif path == "/api/status":
                 s = summary()
                 stock = s.get("stock_screen") or {}
+                quotes = stock.get("quotes") or {}
                 payload = {
                     "generated_at_utc": s.get("generated_at_utc"),
                     "sections": s.get("data_status") or {},
@@ -726,6 +974,14 @@ class Handler(BaseHTTPRequestHandler):
                         "checked_at_utc": stock.get("checked_at_utc"),
                         "next_check_in_seconds": stock.get("next_check_in_seconds"),
                         "served_from_cache": bool(stock.get("served_from_cache")),
+                    },
+                    "stock_quotes": {
+                        "status": quotes.get("status"),
+                        "market_session": (quotes.get("market_session") or {}).get("state"),
+                        "checked_at_utc": quotes.get("checked_at_utc"),
+                        "next_check_in_seconds": quotes.get("next_check_in_seconds"),
+                        "served_from_cache": bool(quotes.get("served_from_cache")),
+                        "coverage": quotes.get("coverage") or {},
                     },
                 }
                 body = json.dumps(payload, default=str, indent=1).encode()
