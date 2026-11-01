@@ -95,6 +95,7 @@ h2:after{content:"";flex:1;height:1px;background:var(--line)}
 .quote-delay-pill{display:inline-block;border:1px solid #2c4f78;background:#101820;color:var(--accent);border-radius:999px;padding:1px 7px;font-size:10px;font-weight:650;letter-spacing:.2px;vertical-align:middle}
 .quote-delay-pill.warn{border-color:#78631e;background:#211d10;color:var(--warn)}
 .stock-intraday{font-size:12px;color:var(--muted);font-variant-numeric:tabular-nums;margin-top:2px}
+.stock-move-alert{display:inline-block;border:1px solid #27685e;background:#10221f;color:var(--up);border-radius:999px;padding:3px 8px;margin-top:5px;font-size:10px;font-weight:750;letter-spacing:.35px;text-transform:uppercase}
 .stock-extended{font-size:11px;color:var(--muted);font-variant-numeric:tabular-nums;margin-top:1px}
 .stock-close-anchor{font-size:11px;color:var(--muted);font-variant-numeric:tabular-nums;margin-top:2px}
 .stock-quote-meta{font-size:10.5px;color:var(--muted);border-top:1px dashed var(--line);padding-top:6px}
@@ -1250,6 +1251,7 @@ def build_stocks_page(screen, *, demo=False, generated_at=None, refresh=300):
                 quote_price_val = None
 
         intraday_html = ""
+        move_alert_html = ""
         extended_html = ""
         close_anchor_html = ""
         quote_meta_html = ""
@@ -1271,6 +1273,12 @@ def build_stocks_page(screen, *, demo=False, generated_at=None, refresh=300):
                 cp_f = float(chg_pct_val)
                 if math.isfinite(c_f) and math.isfinite(cp_f):
                     cls = "up" if cp_f > 0 else ("down" if cp_f < 0 else "flat")
+                    if cp_f >= 3.0:
+                        move_alert_html = (
+                            f'<div class="stock-move-alert" role="status">'
+                            f'Sharp intraday rise · {cp_f:+.2f}% vs previous close · delayed quote'
+                            f'</div>'
+                        )
                     sign_dollar = "+" if c_f > 0 else ("-" if c_f < 0 else "")
                     intraday_bits.append(
                         f'<span class="stock-pct {cls}">{sign_dollar}${abs(c_f):,.2f} '
@@ -1421,7 +1429,7 @@ def build_stocks_page(screen, *, demo=False, generated_at=None, refresh=300):
     </div>
     <span class="risk-badge risk-{risk_class}">{esc(risk)} risk</span>
   </div>
-  <div class="stock-head"><div><div class="stock-price">{price_text}</div>{intraday_html}{extended_html}{myr_price_html}{close_anchor_html}</div>
+  <div class="stock-head"><div><div class="stock-price">{price_text}</div>{move_alert_html}{intraday_html}{extended_html}{myr_price_html}{close_anchor_html}</div>
     <div class="stock-name">{esc(item.get("sector") or "")}</div>
   </div>
   {spark_html}
@@ -1507,7 +1515,7 @@ def build_stocks_page(screen, *, demo=False, generated_at=None, refresh=300):
 <section class="stock-intro">
   <h2>Short-term stock watchlist <span class="src">· U.S.-listed · every passer, up to {display_cap} names</span></h2>
   <p>Daily closing-price screen of a configured ticker universe. It looks for recent positive momentum and liquidity, then labels recent realized volatility/drawdown risk. Every ticker that clears all filters is listed, ranked by relative score. This is not a forecast, trade signal, or order recommendation.</p>
-  <p>Each card overlays a ~15-minute-delayed quote (refreshed every 5 minutes), the last seven calendar days of price movement, and recent third-party headlines. All three are context for your own research: none of them are scored, and none change which tickers pass or how they rank.</p>
+  <p>Each card overlays a ~15-minute-delayed quote (refreshed every 5 minutes), the last seven calendar days of price movement, and recent third-party headlines. A +3% or greater intraday move versus the previous close is highlighted as a sharp rise; it is an observed, delayed move, not a forecast. These overlays are context for your own research: none are scored, and none change which tickers pass or how they rank.</p>
   <p class="stock-verification">This editable universe is not checked against Moomoo Malaysia’s live symbol availability or order eligibility. Verify each ticker in the app before relying on it; fractional-share eligibility is limited to selected U.S. securities and the list can change. See <a href="https://www.moomoo.com/my/support/topic9_193" target="_blank" rel="noopener noreferrer">Moomoo Malaysia’s fractional-share guide</a>.</p>
 </section>
 <div class="stock-status {state_class}">{cached_badge}<b>{message}</b><br>
