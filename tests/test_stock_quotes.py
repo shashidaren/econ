@@ -334,6 +334,8 @@ class AppQuoteOverlayTests(unittest.TestCase):
         self.assertIn("$25.67", page)
         self.assertIn("~15m delayed", page)
         self.assertIn("day range $25.50–$25.95", page)
+        self.assertIn("Sharp intraday rise · +3.86% vs previous close · delayed quote", page)
+        self.assertEqual(page.count('class="stock-move-alert"'), 1)
         self.assertIn("Screen close $25.80", page)
         self.assertIn(f"RM {round(25.67 * 4.35, 2):,.2f}", page)
         self.assertIn("Delayed quotes (~15m):", page)

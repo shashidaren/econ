@@ -122,7 +122,9 @@ Preview without a server (sample data): `ECON_DEMO=1 python3 dashboard/app.py`
   meta): latest delayed USD price + indicative MYR conversion, intraday `$`/`%`
   move vs previous close, day low–high range, optional pre-market/after-hours
   print, U.S. session status, and quote timestamp in MYT, alongside the explicit
-  `Screen close` anchor. Delayed quotes are **overlay only** — they never alter
+  `Screen close` anchor. A **+3% or greater intraday rise** versus previous close
+  gets a visible badge; this is a delayed observed move, not a forecast. Delayed
+  quotes are **overlay only** — they never alter
   which tickers pass or how they rank, and if every quote feed fails the cards
   cleanly fall back to daily closes (or recent <1h cached quotes). Configure
   with `ECON_STOCK_QUOTES=0` (off) and `ECON_STOCK_QUOTE_TTL=300` (min 60s).
