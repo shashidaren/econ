@@ -9,9 +9,15 @@ WorkingDirectory=__APP_DIR__
 ExecStart=/usr/bin/python3 __APP_DIR__/dashboard/app.py
 Environment=ECON_PORT=__PORT__
 Environment=PYTHONUNBUFFERED=1
+# Optional local settings/secrets; ignored by git and preserved by code updates.
+# Install.sh restricts an existing .env to mode 0600.
+EnvironmentFile=-__APP_DIR__/.env
+# Persistent notification dedupe lives outside the unit's PrivateTmp namespace.
+StateDirectory=econ
+StateDirectoryMode=0700
 Restart=always
 RestartSec=5
-# light hardening — plenty for a stdlib-only app with no write needs
+# Light hardening; persistent notification state is scoped to /var/lib/econ.
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectHome=true

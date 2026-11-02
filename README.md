@@ -9,7 +9,8 @@ explains the US and Malaysian economies in plain English, and a **Stocks** tab t
 screens a fixed US watchlist and lists every short-term technical candidate
 under $50 that passes (up to seven, ranked) with backward-looking
 low/medium/high risk labels. Served
-by a **Python-stdlib-only app** (no pip, no venv, no Docker, no CDN, no API keys).
+by a **Python-stdlib-only app** (no pip, no venv, no Docker, no CDN). Market data
+needs no API keys; optional Telegram notifications need your own bot token.
 
 **Start here → [`handoff.md`](handoff.md)** — project state, decisions, ops runbook,
 and the session log. It is updated on every change session.
@@ -128,6 +129,8 @@ Preview without a server (sample data): `ECON_DEMO=1 python3 dashboard/app.py`
   which tickers pass or how they rank, and if every quote feed fails the cards
   cleanly fall back to daily closes (or recent <1h cached quotes). Configure
   with `ECON_STOCK_QUOTES=0` (off) and `ECON_STOCK_QUOTE_TTL=300` (min 60s).
+  The threshold is configurable with `ECON_STOCK_ALERT_THRESHOLD=3`. Optional
+  [Telegram delivery](#telegram-stock-alerts) uses the same rise threshold.
 - **Seven-day movement:** each card shows the change from the last close at or
   before seven calendar days before the latest bar (normally five U.S. trading
   sessions), a 12-session sparkline, and the 7-day high/low range. A strip above
@@ -184,7 +187,117 @@ Run the offline test suite (no network, faked transport):
 python3 -m unittest discover -s tests -v
 ```
 
-## Data sources & automatic fallbacks (all free, no keys)
+## Telegram stock alerts
+
+Telegram delivery extends the existing **sharp intraday rise** badge. It is
+**off by default**, uses the same **+3% versus previous close** threshold, and
+monitors only the tickers currently displayed on `/stocks` (up to seven by
+default), not the entire hidden watch universe. It does not alert on falls,
+seven-day returns, or extended-hours percentage moves.
+
+The background refresher checks the existing public quotes every five minutes.
+Quotes may already be about 15 minutes delayed. Telegram alerts additionally
+require a regular U.S. session, a valid quote timestamp no more than 30 minutes
+old, and a fresh provider fetch. Demo, undated, stale, and cached outage quotes
+never send alerts. The dashboard badge remains available outside those stricter
+notification rules.
+
+A message includes the ticker/company, observed percentage rise, delayed USD
+price, previous close when available, quote time in MYT, and provider. Multiple
+new movements in one refresh are batched. Each ticker alerts **once per U.S.
+trading session**, even if it stays above the threshold, dips and rises again,
+or the service restarts. This is an observed-move notification, not a buy signal.
+
+### Configure on the LXC
+
+Deploy this code first (merges to `main` auto-deploy; see above). Then:
+
+1. In Telegram, open the official **@BotFather**, send `/newbot`, and follow its
+   prompts. Keep the resulting token private. Do not paste it into this chat,
+   commit it, or put it in a command-line argument.
+2. Create the server-local settings file without overwriting existing settings:
+
+   ```bash
+   sudo touch /opt/econ/.env
+   sudo chmod 600 /opt/econ/.env
+   sudo nano /opt/econ/.env
+   ```
+
+   Add the following, replacing the token only inside that file. Leave alerts
+   disabled and the chat ID empty until the connection test succeeds:
+
+   ```dotenv
+   ECON_TELEGRAM_ENABLED=0
+   ECON_TELEGRAM_BOT_TOKEN=YOUR_BOT_TOKEN
+   ECON_TELEGRAM_CHAT_ID=
+   ```
+
+   Use one `KEY=value` per line, with comments on separate lines. `.env` is
+   git-ignored, loaded by systemd, and preserved by the updater's hard reset.
+3. Send your new bot a private message (press **Start** or send `/start`). For a
+   group, add the bot and send `/start@YourBotUsername`. Then discover the chat:
+
+   ```bash
+   sudo python3 /opt/econ/tools/telegram_alert.py --discover-chats
+   ```
+
+   Put the intended numeric ID in `ECON_TELEGRAM_CHAT_ID` in `.env`. Group IDs
+   are commonly negative; keep the minus sign. If no group appears, adjust the
+   bot's privacy setting in BotFather and send another group message. The helper
+   reads recent chat metadata, not message contents, and does not delete a
+   webhook. If the bot already uses webhooks, obtain the chat ID through that
+   existing integration instead.
+4. Validate and explicitly send a test message:
+
+   ```bash
+   sudo python3 /opt/econ/tools/telegram_alert.py --check
+   sudo python3 /opt/econ/tools/telegram_alert.py --test
+   ```
+
+   `--check` is offline. `--test` sends one real message even while automatic
+   alerts are disabled; it does not change alert dedupe state.
+5. Change `ECON_TELEGRAM_ENABLED=1` in `.env`, then restart:
+
+   ```bash
+   sudo systemctl restart econ-dashboard
+   curl -s http://localhost:8080/api/status | python3 -c 'import json,sys; print(json.load(sys.stdin)["telegram"])'
+   journalctl -u econ-dashboard -n 30 --no-pager
+   ```
+
+   The status reports enabled/configured flags, threshold, last attempt/success,
+   and a credential-free last error. It never returns the token or chat ID.
+   `last_success_utc` starts empty after a restart; persisted dedupe still lives
+   in `/var/lib/econ/telegram-state.json` (mode 0600, directory mode 0700).
+
+Optional settings (restart after changes):
+
+| Environment variable | Default | Meaning |
+|---|---|---|
+| `ECON_STOCK_ALERT_THRESHOLD` | `3` | Positive percent move vs previous close; shared with the badge; clamped to 0.1–100 |
+| `ECON_TELEGRAM_MAX_QUOTE_AGE` | `1800` | Maximum quote age in seconds; clamped to 60–3600 |
+| `ECON_TELEGRAM_STATE_FILE` | `/var/lib/econ/telegram-state.json` | Persistent per-chat/session dedupe and retry cooldown |
+
+To pause notifications, set `ECON_TELEGRAM_ENABLED=0` and restart. Disabling
+`ECON_STOCK_QUOTES` also stops movement alerts. `ECON_DEMO=1` always suppresses
+automatic Telegram delivery. If the token leaks, revoke it with BotFather and
+replace it in `.env`; rotating the token does not replay already sent alerts.
+
+**Delivery limitations:** the LXC must reach `https://api.telegram.org` over
+HTTPS. Requests have a 10-second timeout; network/server failures cool down for
+60 seconds, configuration/permission failures for 15 minutes, and HTTP 429
+honors Telegram's `retry_after`. There is no immediate POST retry after an
+ambiguous timeout. A still-eligible, unacknowledged movement can be retried on a
+later refresh; movements that disappear during an outage are not replayed from
+old quotes. A crash between Telegram accepting a message and recording its state
+can produce a duplicate. Telegram receives the alert's stock names, prices, and
+timestamps; use a private chat/group you control. Notification errors do not
+change screening, ranking, or dashboard availability.
+
+The implementation and failure handling are covered by
+`tests/test_telegram_alerts.py` using faked transport. A live bot/chat and an
+LXC connectivity test are still required before claiming live delivery.
+
+## Data sources & automatic fallbacks (market data free, no keys)
 
 | Panel | Primary | Automatic Fallback(s) |
 |---|---|---|
@@ -197,6 +310,7 @@ python3 -m unittest discover -s tests -v
 | Short-term US stock history | Sina US daily K (`stock.finance.sina.com.cn` JSONP) | Nasdaq historical API (`api.nasdaq.com`) → Tencent K-lines (both hosts, per-host breakers) → one Yahoo Finance `v7/finance/spark` batch → Stooq `.us` daily CSV; last good screen is served badged `cached · sources blocked · data as of …` if all fail |
 | Delayed US stock quotes (overlay only, every 5 min) | Sina US quote batch (`hq.sinajs.cn/list=gb_...`, 1 batched call) | Nasdaq quote API (`api.nasdaq.com/api/quote/{SYM}/info`) → Tencent quote batch (`qt.gtimg.cn/q=us...`) → Yahoo `v8/finance/chart` meta; falls back to <1h cached quotes or settled daily closes |
 | Stock headlines (context only) | Google News RSS (`news.google.com/rss/search`, 7-day query) | Bing News RSS (`format=RSS`) → Yahoo Finance headline RSS |
+| Optional Telegram alerts (not a market-data source) | Telegram Bot API (`api.telegram.org`); your bot token stays in server-local `.env` | Persistent dedupe/cooldown; failed delivery never changes the screen; no stale-quote replay |
 
 ### Resilience
 

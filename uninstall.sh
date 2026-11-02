@@ -6,4 +6,6 @@ rm -f /etc/systemd/system/econ-dashboard.service
 rm -f /etc/cron.d/econ-update          # stop unattended updates too
 systemctl daemon-reload
 echo "econ-dashboard removed (service + auto-update cron). App files and"
-echo "/var/log/econ-update.log remain in the repo checkout."
+echo "/var/log/econ-update.log remain. The checkout's .env may still contain a"
+echo "bot token; /var/lib/econ may still contain notification state. These are"
+echo "kept intentionally. Revoke the token in BotFather if decommissioning."
