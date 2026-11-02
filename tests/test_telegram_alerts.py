@@ -8,6 +8,7 @@ import importlib.util
 import io
 import json
 import os
+import shutil
 import stat
 import subprocess
 import sys
@@ -392,12 +393,21 @@ class SetupTests(unittest.TestCase):
 
     def test_default_check_is_offline_and_systemd_loads_env_and_persistent_state(self):
         env = {k: v for k, v in os.environ.items() if not k.startswith("ECON_TELEGRAM_")}
-        result = subprocess.run(
-            [sys.executable, str(ROOT / "tools/telegram_alert.py"), "--check"],
-            env=env, capture_output=True, text=True, timeout=10,
-        )
+        # Never let this offline test read the deployment's real .env: on the LXC
+        # the gate runs inside /opt/econ, where .env holds live credentials, so a
+        # server-side configuration problem must not fail a unit test (see
+        # DeploymentCheckoutTests). The default path is still ROOT/.env.
+        with tempfile.TemporaryDirectory() as tmp:
+            empty_env = Path(tmp) / "empty.env"
+            empty_env.write_text("")
+            result = subprocess.run(
+                [sys.executable, str(ROOT / "tools/telegram_alert.py"), "--check",
+                 "--env-file", str(empty_env)],
+                env=env, capture_output=True, text=True, timeout=10,
+            )
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("No network request", result.stdout)
+        self.assertEqual(self.cli.ROOT / ".env", ROOT / ".env")
         unit = (ROOT / "systemd/econ-dashboard.service").read_text()
         self.assertIn("EnvironmentFile=-__APP_DIR__/.env", unit)
         self.assertIn("StateDirectory=econ", unit)
@@ -454,6 +464,91 @@ class SetupTests(unittest.TestCase):
         result = subprocess.run([sys.executable, "-c", code], cwd=ROOT / "dashboard",
                                 env=env, capture_output=True, text=True, timeout=10)
         self.assertEqual(result.stdout.strip(), "True 4.5 60")
+
+
+class DeploymentCheckoutTests(unittest.TestCase):
+    """The updater's gate runs this suite inside /opt/econ, which has a real .env.
+
+    `.env` is production configuration, not code: a server-side credential or
+    syntax problem must never fail the offline suite and roll a good revision
+    back. Reproduced 2026-11-02 — with `/opt/econ/.env` present, an
+    enabled-but-incomplete or shell-style `.env` failed one test and
+    `tools/auto_update.sh` restored the previous checkout, while the same commit
+    in a `git archive` copy (no `.env`) passed 202/202.
+    """
+
+    VALID_ENV = (f"ECON_TELEGRAM_ENABLED=1\nECON_TELEGRAM_BOT_TOKEN={TOKEN}\n"
+                 f"ECON_TELEGRAM_CHAT_ID={CHAT}\n")
+
+    @staticmethod
+    def _clean_env():
+        return {k: v for k, v in os.environ.items() if not k.startswith("ECON_")}
+
+    def _deployment_checkout(self, root: Path) -> Path:
+        """Mirror the deployed layout: code + ignored .env in one directory."""
+        shutil.copytree(ROOT / "dashboard", root / "dashboard",
+                        ignore=shutil.ignore_patterns("__pycache__"))
+        (root / "tools").mkdir()
+        shutil.copy2(ROOT / "tools/telegram_alert.py", root / "tools/telegram_alert.py")
+        (root / "tests").mkdir()
+        shutil.copy2(ROOT / "tests/test_telegram_alerts.py",
+                     root / "tests/test_telegram_alerts.py")
+        (root / "systemd").mkdir()
+        shutil.copy2(ROOT / "systemd/econ-dashboard.service",
+                     root / "systemd/econ-dashboard.service")
+        shutil.copy2(ROOT / "install.sh", root / "install.sh")
+        return root
+
+    def test_offline_suite_passes_with_a_real_env_file_in_the_checkout(self):
+        variants = {
+            "enabled but chat id still empty": (f"ECON_TELEGRAM_ENABLED=1\n"
+                                                f"ECON_TELEGRAM_BOT_TOKEN={TOKEN}\n"
+                                                f"ECON_TELEGRAM_CHAT_ID=\n"),
+            "shell-style export line": f"export ECON_TELEGRAM_BOT_TOKEN={TOKEN}\n",
+            "inline comment after a quoted value": f'ECON_TELEGRAM_BOT_TOKEN="{TOKEN}"  # bot\n',
+            "fully valid enabled config": self.VALID_ENV,
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._deployment_checkout(Path(tmp) / "opt-econ")
+            env_file = root / ".env"
+            env_file.touch()
+            env_file.chmod(0o600)
+            for label, body in variants.items():
+                with self.subTest(env_file=label):
+                    env_file.write_text(body)
+                    result = subprocess.run(
+                        [sys.executable, "-m", "unittest",
+                         "tests.test_telegram_alerts.SetupTests"],
+                        cwd=root, env=self._clean_env(),
+                        capture_output=True, text=True, timeout=120,
+                    )
+                    self.assertEqual(result.returncode, 0,
+                                     f"{label}: {result.stdout}{result.stderr}")
+
+    def test_check_cli_still_validates_the_server_env_without_leaking_secrets(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._deployment_checkout(Path(tmp) / "opt-econ")
+            env_file = root / ".env"
+
+            def check():
+                return subprocess.run(
+                    [sys.executable, "tools/telegram_alert.py", "--check"],
+                    cwd=root, env=self._clean_env(), capture_output=True, text=True, timeout=10,
+                )
+
+            env_file.write_text(f"ECON_TELEGRAM_ENABLED=1\nECON_TELEGRAM_BOT_TOKEN={TOKEN}\n"
+                                f"ECON_TELEGRAM_CHAT_ID=\n")
+            result = check()
+            self.assertEqual(result.returncode, 1)
+            self.assertIn("Telegram chat ID is missing or invalid", result.stdout)
+            self.assertNotIn(TOKEN, result.stdout + result.stderr)
+
+            env_file.write_text(self.VALID_ENV)
+            result = check()
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("valid format", result.stdout)
+            self.assertNotIn(TOKEN, result.stdout + result.stderr)
+            self.assertNotIn(CHAT, result.stdout + result.stderr)
 
 
 if __name__ == "__main__":

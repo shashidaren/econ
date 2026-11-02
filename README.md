@@ -65,6 +65,48 @@ How it behaves:
   test before restarting. If installation itself fails, the updater restores
   and attempts to reinstall the previous revision.
 
+### If the updater reports "test gate failed"
+
+The gate output (the Python traceback) is in the run log, so the failing test name
+is always recoverable — read-only, no service change:
+
+```bash
+sudo grep -nE '^(FAIL|ERROR):|^Ran [0-9]+ tests|^(OK|FAILED)' /var/log/econ-update.log | tail -20
+sudo grep -n -A25 "test gate failed" /var/log/econ-update.log | tail -40
+```
+
+The gate runs inside `/opt/econ`, not in a pristine export, so **server-local
+state participates**: the ignored `.env`, `__pycache__`, and any untracked
+leftovers. Reproduce it faithfully in a throwaway copy (this copies `.env`
+without printing it; delete the copy afterwards because it contains credentials):
+
+```bash
+sudo install -d -m 700 /tmp/econ-gate
+sudo cp -a /opt/econ /tmp/econ-gate/econ
+cd /tmp/econ-gate/econ && python3 -m py_compile dashboard/*.py tests/*.py
+cd /tmp/econ-gate/econ && python3 -m unittest discover -s tests -v
+cd / && sudo rm -rf /tmp/econ-gate      # do not leave a copy of .env behind
+```
+
+Then compare against the committed revision only — if this passes, the failure
+came from local state, not the release:
+
+```bash
+mkdir -p /tmp/econ-pristine && cd /tmp/econ-pristine
+git -C /opt/econ archive <commit> | tar -x
+python3 -m unittest discover -s tests
+```
+
+Useful read-only checks: `sudo python3 /opt/econ/tools/telegram_alert.py --check`
+(reports enabled/credential *format* only — never the token or chat ID),
+`sudo git -C /opt/econ status --porcelain --ignored | head -20` (what local,
+ignored state exists), and `sudo find /opt/econ -name '__pycache__' -o -name '*.pyc'`
+(stale bytecode; `python3 -m compileall -q` or a fresh copy invalidates it).
+
+`.env` is production configuration, not code, and the offline suite never reads
+it: tests always pass an explicit `--env-file`. A credential or syntax problem
+there is reported by `--check` and never by the auto-updater's gate.
+
 Preview without a server (sample data): `ECON_DEMO=1 python3 dashboard/app.py`
 
 ## Economy 101 — US vs Malaysia, in plain English
