@@ -31,6 +31,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlparse
 
+import alerts
 import briefing
 import config
 import economy
@@ -422,6 +423,24 @@ def warm_all(force=False):
             fetch_into_cache(key, fn, ttl)
         except Exception:
             traceback.print_exc()
+
+    # Notifications are a background-refresh side effect, never a page-view
+    # side effect. Only a quote fetch attempted this cycle can notify; cached
+    # payloads are independently rejected by alerts.eligible_movements().
+    quote_refresh_attempted = (
+        any(key == "stock_quotes" for key, _, _ in todo)
+        or any(key == "stock_quotes" for key, _, _ in deferred_quotes)
+    )
+    if quote_refresh_attempted and config.TELEGRAM_ENABLED and not config.DEMO:
+        try:
+            alerts.process_stock_alerts(
+                (cache_get("stock_screen") or {}).get("data"),
+                cache_get("stock_quotes"),
+            )
+        except Exception as exc:
+            # Do not print a raw exception: transport errors may contain the
+            # token-bearing URL. Notification failure cannot stop the board.
+            print(f"[telegram] notification cycle skipped ({type(exc).__name__})", flush=True)
     return []
 
 
@@ -983,6 +1002,7 @@ class Handler(BaseHTTPRequestHandler):
                         "served_from_cache": bool(quotes.get("served_from_cache")),
                         "coverage": quotes.get("coverage") or {},
                     },
+                    "telegram": alerts.status(),
                 }
                 body = json.dumps(payload, default=str, indent=1).encode()
                 self._send(200, body, "application/json")
@@ -1008,6 +1028,12 @@ def main():
     mode = "DEMO (sample data)" if config.DEMO else "LIVE (multi-source free APIs)"
     print(f"econ dashboard listening on http://{config.HOST}:{config.PORT}  [{mode}]",
           flush=True)
+    if config.TELEGRAM_ENABLED:
+        issue = alerts.credentials_error()
+        state = "suppressed in DEMO" if config.DEMO else (issue or "configured")
+        print(f"[telegram] stock-movement alerts enabled: {state}", flush=True)
+    else:
+        print("[telegram] stock-movement alerts disabled (opt-in)", flush=True)
     httpd.serve_forever()
 
 

@@ -12,7 +12,9 @@ from zoneinfo import ZoneInfo
 
 from charts import dual_line_chart, line_chart, sparkline
 
+import alerts
 import briefing
+import config
 
 STYLE = """
 :root{
@@ -1142,6 +1144,19 @@ def build_stocks_page(screen, *, demo=False, generated_at=None, refresh=300):
             'rel="noopener noreferrer">Moomoo Malaysia’s current U.S. fee schedule</a>.</p>'
         )
 
+    alert_threshold = f"{config.STOCK_ALERT_THRESHOLD_PCT:g}"
+    telegram_note = ""
+    if config.TELEGRAM_ENABLED:
+        telegram_state = (
+            "suppressed in DEMO mode" if demo or config.DEMO else
+            ("awaiting bot token/chat ID" if alerts.credentials_error() else "enabled")
+        )
+        telegram_note = (
+            f'<p class="stock-currency-note">Telegram sharp-rise alerts: {telegram_state} · '
+            f'+{alert_threshold}% threshold · displayed picks only · fresh regular-session quotes · '
+            'once per ticker per U.S. session. Delivery status: <a href="/api/status">API status</a>.</p>'
+        )
+
     quotes = screen.get("quotes") if isinstance(screen.get("quotes"), dict) else {}
     quotes_status = str(quotes.get("status") or "")
     quotes_served_cached = bool(quotes.get("served_from_cache"))
@@ -1273,7 +1288,7 @@ def build_stocks_page(screen, *, demo=False, generated_at=None, refresh=300):
                 cp_f = float(chg_pct_val)
                 if math.isfinite(c_f) and math.isfinite(cp_f):
                     cls = "up" if cp_f > 0 else ("down" if cp_f < 0 else "flat")
-                    if cp_f >= 3.0:
+                    if cp_f >= config.STOCK_ALERT_THRESHOLD_PCT:
                         move_alert_html = (
                             f'<div class="stock-move-alert" role="status">'
                             f'Sharp intraday rise · {cp_f:+.2f}% vs previous close · delayed quote'
@@ -1515,7 +1530,7 @@ def build_stocks_page(screen, *, demo=False, generated_at=None, refresh=300):
 <section class="stock-intro">
   <h2>Short-term stock watchlist <span class="src">· U.S.-listed · every passer, up to {display_cap} names</span></h2>
   <p>Daily closing-price screen of a configured ticker universe. It looks for recent positive momentum and liquidity, then labels recent realized volatility/drawdown risk. Every ticker that clears all filters is listed, ranked by relative score. This is not a forecast, trade signal, or order recommendation.</p>
-  <p>Each card overlays a ~15-minute-delayed quote (refreshed every 5 minutes), the last seven calendar days of price movement, and recent third-party headlines. A +3% or greater intraday move versus the previous close is highlighted as a sharp rise; it is an observed, delayed move, not a forecast. These overlays are context for your own research: none are scored, and none change which tickers pass or how they rank.</p>
+  <p>Each card overlays a ~15-minute-delayed quote (refreshed every 5 minutes), the last seven calendar days of price movement, and recent third-party headlines. A +{alert_threshold}% or greater intraday move versus the previous close is highlighted as a sharp rise; it is an observed, delayed move, not a forecast. These overlays are context for your own research: none are scored, and none change which tickers pass or how they rank.</p>
   <p class="stock-verification">This editable universe is not checked against Moomoo Malaysia’s live symbol availability or order eligibility. Verify each ticker in the app before relying on it; fractional-share eligibility is limited to selected U.S. securities and the list can change. See <a href="https://www.moomoo.com/my/support/topic9_193" target="_blank" rel="noopener noreferrer">Moomoo Malaysia’s fractional-share guide</a>.</p>
 </section>
 <div class="stock-status {state_class}">{cached_badge}<b>{message}</b><br>
@@ -1525,6 +1540,7 @@ def build_stocks_page(screen, *, demo=False, generated_at=None, refresh=300):
 </div>
 {cadence_html}
 {quotes_note}
+{telegram_note}
 {news_note}
 {currency_note}
 {week_html}

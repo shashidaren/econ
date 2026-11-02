@@ -6,6 +6,8 @@ venv/
 
 # secrets / local env (never commit keys)
 .env
+.env.*
+!.env.example
 
 # editor / OS
 *.swp

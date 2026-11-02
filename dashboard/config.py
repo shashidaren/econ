@@ -4,6 +4,7 @@ Everything here is plain data: symbol lists, country lists, cache lifetimes.
 No logic lives in this file on purpose, so it is safe to tweak freely.
 """
 
+import math
 import os
 
 # --- Server -----------------------------------------------------------------
@@ -211,6 +212,30 @@ try:
 except ValueError:
     STOCK_QUOTE_TTL = 300
 TTL["stock_quotes"] = STOCK_QUOTE_TTL
+
+# --- Stock-movement notifications -------------------------------------------
+# One threshold shared by the Stocks badge and Telegram. Only positive moves
+# are alerted, matching the existing sharp-rise badge. Notifications are opt-in;
+# credentials belong in the server's ignored .env, never in this source file.
+try:
+    STOCK_ALERT_THRESHOLD_PCT = float(os.environ.get("ECON_STOCK_ALERT_THRESHOLD", "3"))
+    if not math.isfinite(STOCK_ALERT_THRESHOLD_PCT):
+        STOCK_ALERT_THRESHOLD_PCT = 3.0
+    STOCK_ALERT_THRESHOLD_PCT = max(0.1, min(100.0, STOCK_ALERT_THRESHOLD_PCT))
+except ValueError:
+    STOCK_ALERT_THRESHOLD_PCT = 3.0
+TELEGRAM_ENABLED = os.environ.get("ECON_TELEGRAM_ENABLED", "0") in ("1", "true", "yes")
+TELEGRAM_BOT_TOKEN = os.environ.get("ECON_TELEGRAM_BOT_TOKEN", "").strip()
+TELEGRAM_CHAT_ID = os.environ.get("ECON_TELEGRAM_CHAT_ID", "").strip()
+TELEGRAM_STATE_FILE = os.environ.get(
+    "ECON_TELEGRAM_STATE_FILE", "/var/lib/econ/telegram-state.json"
+)
+try:
+    TELEGRAM_MAX_QUOTE_AGE = max(60, min(3600, int(
+        os.environ.get("ECON_TELEGRAM_MAX_QUOTE_AGE", "1800")
+    )))
+except ValueError:
+    TELEGRAM_MAX_QUOTE_AGE = 1800
 
 # --- Stock headlines (Stocks tab) --------------------------------------------
 # Up to a few recent headlines per *displayed* ticker, from key-less public RSS
