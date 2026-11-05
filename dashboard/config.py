@@ -250,3 +250,53 @@ try:
     STOCK_NEWS_PER_SYMBOL = max(1, min(int(os.environ.get("ECON_STOCK_NEWS_PER_SYMBOL", "3")), 5))
 except ValueError:
     STOCK_NEWS_PER_SYMBOL = 3
+
+# --- Best-pick planner (Pick tab) --------------------------------------------
+# A separate, *decision-shaped* view of the same daily bars and delayed quotes
+# the Stocks tab already fetches. No new upstream provider. Every number it
+# prints is a range derived from how far this ticker has recently travelled —
+# a plan for position sizing, entry and exit, not a forecast and not advice.
+PICK_ENABLED = os.environ.get("ECON_PICK", "1") not in ("0", "false", "no")
+# Candidate ranking weights: reward a pullback entry (buy the dip inside an
+# uptrend) and quiet, liquid names; penalise stretched, volatile, illiquid ones.
+PICK_WEIGHTS = {
+    "trend": 0.35,        # 5/20/60-session momentum mix
+    "entry": 0.25,        # how close the buy zone is to the last close
+    "calm": 0.20,         # inverse realized volatility
+    "drawdown": 0.10,     # inverse 60-session drawdown
+    "liquidity": 0.10,    # log-scaled 20-session dollar volume
+}
+# Volatility multiplier for the buy zone (entry) and the two sell targets.
+# 0.6σ below the close for entry, 1.0σ / 2.0σ above for take-profit 1 and 2.
+PICK_ENTRY_SIGMA = float(os.environ.get("ECON_PICK_ENTRY_SIGMA", "0.6"))
+PICK_TARGET_SIGMAS = (1.4, 2.3)      # reward multiples of the plan width
+# Minimum stop width. Two σ is below 1% a day for many quiet large caps, so a
+# floor keeps ordinary intraday noise from ending the trade for no reason.
+try:
+    PICK_MIN_STOP_PCT = max(1.0, min(10.0, float(
+        os.environ.get("ECON_PICK_MIN_STOP_PCT", "2.5"))))
+except ValueError:
+    PICK_MIN_STOP_PCT = 2.5
+# Hard stop: the further of (1.5σ below entry) and (entry below the 20-day
+# average by 0.75σ). Never below this fraction of the entry price.
+try:
+    PICK_STOP_MAX_LOSS_PCT = max(2.0, min(20.0, float(
+        os.environ.get("ECON_PICK_MAX_STOP_PCT", "8"))))
+except ValueError:
+    PICK_STOP_MAX_LOSS_PCT = 8.0
+# Which local time the "when to buy" block is written for. Malaysia is the
+# owner's timezone; the U.S. Eastern clock is always shown beside it.
+PICK_LOCAL_TZ = os.environ.get("ECON_PICK_TZ", "Asia/Kuala_Lumpur")
+try:
+    PICK_HOLD_SESSIONS = max(5, min(60, int(
+        os.environ.get("ECON_PICK_HOLD_SESSIONS", "20"))))
+except ValueError:
+    PICK_HOLD_SESSIONS = 20
+# Estimated round-trip friction (commission + spread + FX conversion) used to
+# show a NET take-profit percentage beside the gross one. Moomoo Malaysia's
+# current schedule decides the real number; this is a labelled estimate.
+try:
+    PICK_COST_PCT = max(0.0, min(5.0, float(
+        os.environ.get("ECON_PICK_COST_PCT", "0.35"))))
+except ValueError:
+    PICK_COST_PCT = 0.35

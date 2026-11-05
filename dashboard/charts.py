@@ -227,3 +227,86 @@ def dual_line_chart(pairs, *, labels=("Series A", "Series B"), width=600, height
     parts.append("</svg>")
     return "".join(parts)
 
+
+
+def plan_chart(bars, plan, *, width=640, height=230):
+    """Price line (last N daily closes) with the buy zone, stop and targets.
+
+    `plan` carries `buy_zone_low`, `buy_zone_high`, `stop` and `targets`
+    ([{price, label}]). Anything missing is simply not drawn — the chart is a
+    picture of the printed numbers, never an extra source of them.
+    """
+    pts_in = [(str(day)[:10], close) for day, close in (bars or [])
+              if isinstance(close, (int, float))]
+    vals = [v for _d, v in pts_in if v is not None]
+    levels = []
+    for key in ("buy_zone_low", "buy_zone_high", "stop"):
+        v = plan.get(key) if isinstance(plan, dict) else None
+        if isinstance(v, (int, float)):
+            levels.append(float(v))
+    target_list = []
+    for target in (plan or {}).get("targets") or []:
+        price = target.get("price")
+        if isinstance(price, (int, float)):
+            levels.append(float(price))
+            target_list.append((float(price), target.get("label") or "target"))
+    if len(vals) < 2 or not levels:
+        return '<div class="chart-empty">not enough data to draw the plan</div>'
+
+    lo = min(min(vals), min(levels))
+    hi = max(max(vals), max(levels))
+    span = (hi - lo) or 1.0
+    lo, hi = lo - span * 0.06, hi + span * 0.06
+    span = hi - lo
+
+    pad_l, pad_r, pad_t, pad_b = 8, 78, 12, 18
+    inner_w = width - pad_l - pad_r
+    inner_h = height - pad_t - pad_b
+
+    def y_of(value):
+        return pad_t + inner_h * (1.0 - (value - lo) / span)
+
+    n = len(vals)
+    pts = [(pad_l + i * inner_w / (n - 1), y_of(v)) for i, v in enumerate(vals)]
+    poly = " ".join(f"{round(x, 1)},{round(y, 1)}" for x, y in pts)
+
+    parts = [f'<svg class="chart" viewBox="0 0 {width} {height}" role="img" '
+             f'preserveAspectRatio="xMidYMid meet">']
+
+    # Buy zone band
+    zone_low = plan.get("buy_zone_low")
+    zone_high = plan.get("buy_zone_high")
+    if isinstance(zone_low, (int, float)) and isinstance(zone_high, (int, float)):
+        y1, y2 = y_of(float(zone_high)), y_of(float(zone_low))
+        parts.append(
+            f'<rect x="{pad_l}" y="{min(y1, y2):.1f}" width="{inner_w}" '
+            f'height="{max(2.0, abs(y2 - y1)):.1f}" fill="#4a9eff" opacity="0.16"/>')
+        parts.append(
+            f'<text x="{pad_l + 4}" y="{min(y1, y2) - 4:.1f}" fill="#4a9eff" '
+            f'font-size="10">buy zone {zone_low:,.2f}–{zone_high:,.2f}</text>')
+
+    def hline(value, color, label, dash="5 4"):
+        y = y_of(value)
+        parts.append(f'<line x1="{pad_l}" y1="{y:.1f}" x2="{width - pad_r}" '
+                     f'y2="{y:.1f}" stroke="{color}" stroke-width="1.2" '
+                     f'stroke-dasharray="{dash}" opacity="0.9"/>')
+        parts.append(f'<text x="{width - pad_r + 5}" y="{y + 3.5:.1f}" '
+                     f'fill="{color}" font-size="10.5">{label}</text>')
+
+    for value, label in target_list:
+        hline(value, "#26a69a", f"{label} {value:,.2f}")
+    if isinstance(plan.get("stop"), (int, float)):
+        hline(float(plan["stop"]), "#ef5350", f"stop {float(plan['stop']):,.2f}")
+
+    parts.append(f'<polyline points="{poly}" fill="none" stroke="#e6e9f0" '
+                 f'stroke-width="1.8" stroke-linejoin="round"/>')
+    last_x, last_y = pts[-1]
+    parts.append(f'<circle cx="{last_x:.1f}" cy="{last_y:.1f}" r="3.2" '
+                 f'fill="#e6e9f0"/>')
+    if pts_in:
+        parts.append(f'<text x="{pad_l}" y="{height - 5}" fill="#8b93a7" '
+                     f'font-size="9.5">{pts_in[0][0]}</text>')
+        parts.append(f'<text x="{width - pad_r - 58}" y="{height - 5}" '
+                     f'fill="#8b93a7" font-size="9.5">{pts_in[-1][0]}</text>')
+    parts.append("</svg>")
+    return "".join(parts)

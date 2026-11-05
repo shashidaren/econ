@@ -12,9 +12,11 @@ Endpoints:  /             the dashboard
             /summary      prose summary
             /economies    Economy 101 (US vs Malaysia explainer)
             /stocks       short-term stock screen
+            /pick         best-pick planner (price, MYT timing, sell plan)
             /api/summary  data as JSON
             /api/economies Economy 101 view as JSON
             /api/stocks   stock screen as JSON
+            /api/pick     best-pick plan as JSON
             /api/status   compact freshness probe
             /healthz      liveness probe
 """
@@ -35,6 +37,7 @@ import alerts
 import briefing
 import config
 import economy
+import pick as pick_planner
 import render
 import sources
 import stocks as stock_screener
@@ -834,6 +837,32 @@ def _with_indicative_myr(screen, fx_entry, *, demo=False, now=None):
     return view
 
 
+def build_pick(screen, *, demo=False, now=None):
+    """Plan view over the stock screen that is already in the cache.
+
+    Pure derivation: no new fetch, no new cache key. `pick.build_pick_view`
+    ranks the displayed candidates for buyability and turns the top one into a
+    buy zone, a stop, two sell targets and a Malaysian-time window.
+    """
+    if not getattr(config, "PICK_ENABLED", True):
+        return {
+            "status": "disabled",
+            "message": "The Pick tab is disabled (ECON_PICK=0).",
+            "picks": [], "top": None, "session": {},
+        }
+    moment = now or datetime.now(timezone.utc)
+    screen = screen if isinstance(screen, dict) else {}
+    currency = screen.get("currency_reference") or {}
+    rate = currency.get("rate") if currency.get("available") else None
+    return pick_planner.build_pick_view(
+        screen,
+        now=moment,
+        currency_rate=rate,
+        demo=demo,
+        max_stop_pct=getattr(config, "PICK_STOP_MAX_LOSS_PCT", 8.0),
+    )
+
+
 def summary():
     curve_sid, curve_title, curve_years = config.FRED_CURVE
     be_sid, be_title = config.FRED_BREAKEVEN
@@ -905,6 +934,7 @@ def summary():
         "stock_screen": stock_screen_data,
         "economy_history": get_data("economy_history") or {},
     }
+    out["pick"] = build_pick(stock_screen_data, demo=config.DEMO)
     out["briefing"] = briefing.build_briefing(out)
     out["economy"] = economy.build_economy(out)
     return out
@@ -970,6 +1000,19 @@ class Handler(BaseHTTPRequestHandler):
                     refresh=config.REFRESH_SECONDS,
                 )
                 self._send(200, page.encode(), "text/html; charset=utf-8")
+            elif path == "/pick":
+                s = summary()
+                page = render.build_pick_page(
+                    s.get("pick"),
+                    demo=config.DEMO,
+                    generated_at=datetime.now(timezone.utc).astimezone(),
+                    refresh=config.REFRESH_SECONDS,
+                )
+                self._send(200, page.encode(), "text/html; charset=utf-8")
+            elif path == "/api/pick":
+                s = summary()
+                body = json.dumps(s.get("pick") or {}, default=str, indent=1).encode()
+                self._send(200, body, "application/json")
             elif path == "/api/stocks":
                 s = summary()
                 body = json.dumps(s.get("stock_screen") or {}, default=str, indent=1).encode()
@@ -1001,6 +1044,16 @@ class Handler(BaseHTTPRequestHandler):
                         "next_check_in_seconds": quotes.get("next_check_in_seconds"),
                         "served_from_cache": bool(quotes.get("served_from_cache")),
                         "coverage": quotes.get("coverage") or {},
+                    },
+                    "pick": {
+                        "status": (s.get("pick") or {}).get("status"),
+                        "symbol": ((s.get("pick") or {}).get("top") or {}).get("symbol"),
+                        "now_tag": ((s.get("pick") or {}).get("top") or {}).get("now_tag"),
+                        "verdict": ((s.get("pick") or {}).get("top") or {}).get("verdict"),
+                        "entry_window_myt": ((s.get("pick") or {}).get("session")
+                                             or {}).get("entry_window"),
+                        "state": ((s.get("pick") or {}).get("session")
+                                  or {}).get("state"),
                     },
                     "telegram": alerts.status(),
                 }
