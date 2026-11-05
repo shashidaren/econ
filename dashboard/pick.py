@@ -711,12 +711,14 @@ def _hold_estimate(item, levels, hold_sessions):
     high = max(low + 2, int(round(sessions * 1.75)))
     weeks_low = max(1, round(low / 5))
     weeks_high = max(weeks_low, round(high / 5))
+    weeks_text = (f"{weeks_low} week" if weeks_low == weeks_high
+                  else f"{weeks_low}–{weeks_high} weeks")
     return {
         "sessions": (low, high),
         "text": (f"At the current 20-session pace ({per_day:+.2f}% a session) the "
                  f"first target is about {low}–{high} U.S. sessions away (roughly "
-                 f"{weeks_low}–{weeks_high} week(s) of trading). The stop runs "
-                 f"every session in between."),
+                 f"{weeks_text} of trading). The stop runs every session in "
+                 f"between."),
     }
 
 
