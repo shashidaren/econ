@@ -229,6 +229,75 @@ Run the offline test suite (no network, faked transport):
 python3 -m unittest discover -s tests -v
 ```
 
+## Pick tab — what to buy, when (Malaysian time), and where to sell
+
+`/pick` (JSON: `/api/pick`, also `pick` in `/api/summary`) answers the questions
+the watchlist leaves open, **from the same daily bars and delayed quotes the
+Stocks tab already fetches**. No new provider, no new cache key, no broker
+connection.
+
+**1. Which one.** The displayed candidates are re-ranked for *buyability*:
+`0.35×trend + 0.25×buyable-now + 0.20×calm + 0.10×shallow drawdown +
+0.10×liquidity`. "Buyable now" is 1.0 when the latest price sits inside the
+planned buy zone and falls to 0 as it drifts away or breaks the invalidation
+line — so a great chart you can only buy by overpaying does not win. Trend and
+buyable-now are relative to the list; the three risk terms use **fixed bounds**
+(volatility 90%→30%, drawdown −30%→−5%, dollar volume $3M→$300M), so a wild
+outlier cannot win merely by being the only extreme value. Names above the
+`ECON_PICK_MAX_VOL` ceiling (120% annualized) get **no plan at all** and are
+counted on the page: a stop wide enough to survive that noise is a loss no
+normal position should carry. If the top-scoring name is a "wait", the hero card
+names the next name that is actually inside its zone.
+
+**2. At what price.** Everything scales off the ticker's own one-session
+volatility σ (20-session realized volatility ÷ √252):
+
+| Level | Rule |
+|---|---|
+| Buy zone | last close → close − 0.6σ (never below the 20-day average); reference = midpoint |
+| Plan width | 2σ, floored at 2.5% and capped at 8% of the entry |
+| Hard stop | reference − one plan width |
+| Take-profit 1 | reference + 1.4 plan widths (≈1.4:1 reward:risk) |
+| Take-profit 2 | reference + 2.3 plan widths (≈2.3:1) |
+| Do-not-chase | buy-zone top + half a plan width |
+| Setup invalid | below the zone bottom − half a plan width |
+
+Every level appears in USD, in indicative RM (existing ECB/Frankfurter
+USD/MYR), as a percentage, and net of an assumed `ECON_PICK_COST_PCT` (0.35%)
+round trip. A verdict sentence says whether the latest delayed quote is **inside
+the zone**, **above the no-chase line** (wait), or **past invalidation** (void).
+
+**3. When — on a Malaysian clock.** A U.S. listing only trades in U.S. hours:
+
+| Window | Summer (MYT) | U.S. standard time (MYT) |
+|---|---|---|
+| Regular session | 21:30–04:00 | 22:30–05:00 |
+| **Preferred entry (first 90 min)** | **21:30–23:00** | **22:30–00:00** |
+| Avoid (final 30 min) | 03:30–04:00 | 04:30–05:00 |
+
+The page converts the next weekday session into MYT every time it renders, says
+whether the market is open, pre-market, closed or at the weekend, names the
+concrete date, and counts down the hours. It notes the two U.S. clock states
+because the conversion shifts by an hour twice a year, and states that
+Malaysian/U.S. holidays are not modelled.
+
+**4. How long, and where to sell.** The hold estimate divides the first
+target's percentage by the current 20-session daily pace and widens it to a
+range (e.g. "5–12 U.S. sessions, roughly 1–2 weeks of trading"). The sell plan
+is always the same three exits: take-profit 1 (sell half or a third), take-profit
+2 (final target or trail the stop), or a daily close below the stop.
+
+Every candidate in the table carries the same buy/stop/target/hold numbers, so
+the selection stays the reader's choice; the top pick gets the full card and a
+chart with the zone, stop and targets drawn on the recent closes.
+
+Limitations, printed on the page: daily closes only, no intraday book, spread,
+fundamentals, earnings calendar or analyst targets; levels are arithmetic rules,
+not predictions; prices gap through stops; position sizing is yours. Disable
+with `ECON_PICK=0`. Tune with `ECON_PICK_MIN_STOP_PCT` (2.5), `ECON_PICK_MAX_STOP_PCT`
+(8), `ECON_PICK_COST_PCT` (0.35), `ECON_PICK_ENTRY_SIGMA` (0.6),
+`ECON_PICK_HOLD_SESSIONS` (20), `ECON_PICK_MAX_VOL` (120) and `ECON_PICK_TZ`.
+
 ## Telegram stock alerts
 
 Telegram delivery extends the existing **sharp intraday rise** badge. It is

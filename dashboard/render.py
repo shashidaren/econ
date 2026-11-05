@@ -10,7 +10,7 @@ import urllib.parse
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
-from charts import dual_line_chart, line_chart, sparkline
+from charts import dual_line_chart, line_chart, plan_chart, sparkline
 
 import alerts
 import briefing
@@ -136,6 +136,60 @@ h2:after{content:"";flex:1;height:1px;background:var(--line)}
 .stock-news a:hover{color:var(--accent);text-decoration:underline}
 .stock-news small{display:block;color:var(--muted);font-size:10.5px;margin-top:1px}
 .stock-news .news-empty{color:var(--muted);font-size:11.5px}
+.pick-intro{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:14px 16px;margin-bottom:12px}
+.pick-intro p{font-size:13px;color:var(--muted);margin-top:5px}
+.pick-intro p:first-child{margin-top:0}
+.pick-alert{border:1px solid var(--warn);background:#211d10;color:var(--warn);border-radius:8px;padding:9px 12px;font-size:12px;margin-bottom:10px}
+.pick-session-bar{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:8px;margin:12px 0}
+.pick-session-bar div{background:var(--panel);border:1px solid var(--line);border-radius:9px;padding:9px 12px}
+.pick-session-bar span{display:block;color:var(--muted);font-size:10px;text-transform:uppercase;letter-spacing:.7px}
+.pick-session-bar b{display:block;font-size:15px;margin-top:2px;font-variant-numeric:tabular-nums}
+.pick-hero{background:var(--panel);border:1px solid #2c4f78;border-radius:12px;padding:16px 18px;margin:12px 0}
+.pick-hero-head{display:flex;flex-wrap:wrap;gap:14px;justify-content:space-between;align-items:flex-start}
+.pick-kicker{font-size:10.5px;letter-spacing:1.2px;text-transform:uppercase;color:var(--muted)}
+.pick-symbol{font-size:28px;font-weight:750;letter-spacing:.3px;margin:3px 0 0;text-transform:none;display:block;color:var(--text)}
+.pick-symbol span{font-size:14px;font-weight:500;color:var(--muted);margin-left:8px}
+.pick-sub{color:var(--muted);font-size:12px;margin-top:3px}
+.pick-quote{text-align:right}
+.pick-quote-price{font-size:26px;font-weight:750;font-variant-numeric:tabular-nums}
+.pick-quote-sub{color:var(--muted);font-size:11px;max-width:260px}
+.pick-verdict{margin:11px 0 4px;padding:9px 12px;border-left:3px solid var(--accent);background:var(--panel2);border-radius:6px;font-size:13.5px}
+.pick-alt{margin-top:8px;padding:9px 12px;border:1px dashed var(--line);border-radius:7px;background:var(--panel);font-size:12.5px;color:var(--muted)}
+.pick-alt b{color:var(--text)}
+.pick-hero .chart{width:100%;height:auto;margin:10px 0 6px;background:var(--panel2);border-radius:8px}
+.pick-plan{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:9px;margin:12px 0}
+.pick-level{background:var(--panel2);border:1px solid var(--line);border-radius:9px;padding:10px 12px}
+.pick-level-label{font-size:10px;letter-spacing:.8px;text-transform:uppercase;color:var(--muted)}
+.pick-level-price{font-size:19px;font-weight:700;font-variant-numeric:tabular-nums;margin-top:3px}
+.pick-level-price small{font-size:11px;font-weight:500;color:var(--muted);display:block;margin-top:1px}
+.pick-level-sub{font-size:11px;color:var(--muted);margin-top:3px}
+.pick-level.buy{border-color:#2c4f78;background:#101820}
+.pick-level.target{border-color:#27685e}
+.pick-level.target .pick-level-price{color:var(--up)}
+.pick-level.stop{border-color:#773c3a}
+.pick-level.stop .pick-level-price{color:var(--down)}
+.pick-grid2{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:10px;margin-top:10px}
+.pick-box{background:var(--panel2);border-radius:9px;padding:12px 14px}
+.pick-box h4{font-size:11px;letter-spacing:1px;text-transform:uppercase;color:var(--muted);margin-bottom:7px}
+.pick-box p{font-size:12.5px;margin-top:6px}
+.pick-when{font-size:20px;font-weight:750;font-variant-numeric:tabular-nums;letter-spacing:.3px}
+.pick-small{color:var(--muted);font-size:11px}
+.pick-list{margin:0;padding-left:17px;color:var(--muted);font-size:12px}
+.pick-list li{margin:3px 0}
+.pick-parts{margin-top:10px;display:flex;flex-direction:column;gap:5px}
+.pick-part{display:grid;grid-template-columns:98px 1fr 30px;gap:8px;align-items:center;font-size:11px;color:var(--muted)}
+.pick-part b{text-align:right;color:var(--text);font-variant-numeric:tabular-nums}
+.pick-part-track{background:#0d1119;border-radius:4px;height:7px;overflow:hidden}
+.pick-part-track i{display:block;height:100%;background:var(--accent)}
+.pick-table-wrap{margin:16px 0}
+.pick-table-scroll{overflow-x:auto;border:1px solid var(--line);border-radius:10px}
+.pick-table{width:100%;border-collapse:collapse;font-size:12.5px;font-variant-numeric:tabular-nums}
+.pick-table th{text-align:left;font-size:10px;letter-spacing:.7px;text-transform:uppercase;color:var(--muted);padding:9px 10px;border-bottom:1px solid var(--line);white-space:nowrap}
+.pick-table td{padding:9px 10px;border-bottom:1px solid var(--line);vertical-align:top}
+.pick-table tr:last-child td{border-bottom:none}
+.pick-table .pick-rank{color:var(--muted)}
+.pick-table .pick-small{display:block;margin-top:1px}
+.pick-note{color:var(--muted);font-size:11.5px;margin-top:8px}
 .stock-method{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:13px 16px;margin-top:16px}
 .stock-method summary{cursor:pointer;font-weight:650;font-size:13px}
 .stock-method p,.stock-method li{color:var(--muted);font-size:12px;margin-top:6px}
@@ -213,6 +267,10 @@ footer{margin-top:36px;color:var(--muted);font-size:12px;border-top:1px solid va
   .freshness{gap:6px}
   .status-inline{width:100%;margin-left:0}
   .stock-week-grid{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .pick-hero{padding:12px 13px}
+  .pick-symbol{font-size:23px}
+  .pick-quote{text-align:left}
+  .pick-level-price{font-size:17px}
 }
 """
 
@@ -489,6 +547,7 @@ def tabs(active):
             + link("/summary", "summary", "Summary")
             + link("/economies", "economies", "Economy 101")
             + link("/stocks", "stocks", "Stocks")
+            + link("/pick", "pick", "Pick")
             + "</nav>")
 
 
@@ -700,6 +759,7 @@ def build_summary_page(sections, *, demo=False, generated_at=None, refresh=300):
     cov = (f"{len(indices)} index cards, {len(commodities)} commodities, {len(fx)} FX crosses, "
            f"{len(cpi)} CPI rows, {len(gdp)} GDP rows"
            + (f", {missing} index card(s) still empty" if missing else ""))
+
 
     body = f"""<header>
   <h1>ECON<span>.</span>world</h1>
@@ -990,6 +1050,7 @@ def build_economy_page(view, *, demo=False, generated_at=None, refresh=300):
     glossary = "".join(
         f'<dt>{esc(item.get("term"))}</dt><dd>{esc(item.get("text"))}</dd>'
         for item in view.get("glossary") or [])
+
 
     body = f"""<header>
   <h1>ECON<span>.</span>world</h1>
@@ -1521,6 +1582,7 @@ def build_stocks_page(screen, *, demo=False, generated_at=None, refresh=300):
         for key, value in exclusions.items() if value
     ) or "none"
 
+
     body = f"""<header>
   <h1>ECON<span>.</span>world</h1>
   <span class="updated">Page time · {_dual_market_time(now)}</span>
@@ -1531,6 +1593,7 @@ def build_stocks_page(screen, *, demo=False, generated_at=None, refresh=300):
   <h2>Short-term stock watchlist <span class="src">· U.S.-listed · every passer, up to {display_cap} names</span></h2>
   <p>Daily closing-price screen of a configured ticker universe. It looks for recent positive momentum and liquidity, then labels recent realized volatility/drawdown risk. Every ticker that clears all filters is listed, ranked by relative score. This is not a forecast, trade signal, or order recommendation.</p>
   <p>Each card overlays a ~15-minute-delayed quote (refreshed every 5 minutes), the last seven calendar days of price movement, and recent third-party headlines. A +{alert_threshold}% or greater intraday move versus the previous close is highlighted as a sharp rise; it is an observed, delayed move, not a forecast. These overlays are context for your own research: none are scored, and none change which tickers pass or how they rank.</p>
+  <p><b>Want a concrete plan instead of a watchlist?</b> The <a href="/pick">Pick tab</a> ranks these same names for buyability and turns the top one into a buy zone, a hard stop, two sell targets and a Malaysian-time window.</p>
   <p class="stock-verification">This editable universe is not checked against Moomoo Malaysia’s live symbol availability or order eligibility. Verify each ticker in the app before relying on it; fractional-share eligibility is limited to selected U.S. securities and the list can change. See <a href="https://www.moomoo.com/my/support/topic9_193" target="_blank" rel="noopener noreferrer">Moomoo Malaysia’s fractional-share guide</a>.</p>
 </section>
 <div class="stock-status {state_class}">{cached_badge}<b>{message}</b><br>
@@ -1569,6 +1632,358 @@ def build_stocks_page(screen, *, demo=False, generated_at=None, refresh=300):
                 .replace("__REFRESH__", str(max(60, int(refresh))))
                 .replace("__BODY__", body))
 
+
+# ---------------------------------------------------------------------------
+# Pick tab — "what would I buy, at what price, when, and where do I sell?"
+# ---------------------------------------------------------------------------
+
+def _usd(value):
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return "—"
+    return f"${number:,.2f}"
+
+
+def _rm(value):
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return f"RM {number:,.2f}"
+
+
+def _usd_rm(usd_value, myr_value):
+    """'$44.79 · ≈ RM 188.57' — the RM half is dropped when FX is missing."""
+    text = _usd(usd_value)
+    rm = _rm(myr_value)
+    return f"{text} <small>≈ {rm}</small>" if rm else text
+
+
+def _pfx(value, dec=1):
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return "—"
+    return f"{number:+.{dec}f}%"
+
+
+def _hold_text(row):
+    """"5–12 sessions", or "—" when the plan has no hold estimate."""
+    sessions = (row.get("hold") or {}).get("sessions") or []
+    if len(sessions) < 2:
+        return "—"
+    low, high = sessions[0], sessions[-1]
+    return f"{low}–{high}" if low != high else str(low)
+
+
+def _plan_row(label, price, myr, sub_html="", css=""):
+    return (f'<div class="pick-level {css}">'
+            f'<div class="pick-level-label">{esc(label)}</div>'
+            f'<div class="pick-level-price">{_usd_rm(price, myr)}</div>'
+            f'<div class="pick-level-sub">{sub_html}</div></div>')
+
+
+def build_pick_page(view, *, demo=False, generated_at=None, refresh=300,
+                    title="Pick — what to buy, when, and where to sell"):
+    """Render the Pick tab from ``pick.build_pick_view``.
+
+    The page answers four questions in order — which name, at what price, when
+    in Malaysian time, and where to sell — then shows its own rules, the cost
+    assumption and the runner-up plans so the choice stays the reader's.
+    """
+    now = generated_at or datetime.now(timezone.utc).astimezone()
+    view = view or {}
+    banner = ('<span class="badge demo">DEMO MODE — synthetic prices; '
+              'never trade from this page</span>' if demo else "")
+    session = view.get("session") or {}
+    top = view.get("top") or None
+    picks = list(view.get("picks") or [])
+    currency = view.get("currency_reference") or {}
+    status = str(view.get("status") or "waiting")
+
+    # --- honesty banners ----------------------------------------------------
+    caveats = []
+    if view.get("served_from_cache"):
+        caveats.append(f"Sources are blocked; this plan uses the last good "
+                       f"screen from {esc(view.get('data_date') or 'an earlier date')}.")
+    if view.get("refresh_error"):
+        caveats.append(f"Last refresh failed: {esc(str(view.get('refresh_error'))[:180])}")
+    if status in ("stale", "cached"):
+        caveats.append("The daily closes behind this plan are older than the "
+                       "freshness gate, so treat the prices as reference only.")
+    caveat_html = ("".join(f'<div class="pick-alert">{text}</div>' for text in caveats))
+
+    # --- hero: the pick, the price, the time --------------------------------
+    disabled = status == "disabled"
+    if not top:
+        if disabled:
+            opening = ("The Pick tab is switched off "
+                       f"({esc(view.get('message') or 'ECON_PICK=0')}). The Stocks "
+                       "tab is unaffected.")
+        else:
+            opening = ('No plan yet. The Pick tab reuses the Stocks screen, so it '
+                       'needs at least one ticker with a fresh daily close and '
+                       'enough history to measure volatility. '
+                       + esc(view.get("message")
+                             or "Waiting for the first stock refresh.")
+                       + (f" {int(view.get('skipped_count') or 0)} candidate(s) had "
+                          "no usable close or volatility."
+                          if view.get("skipped_count") else ""))
+        hero = f'<div class="section-empty">{opening}</div>'
+    else:
+        levels = top.get("levels") or {}
+        targets = levels.get("targets") or []
+        flags = top.get("flags") or []
+        parts = top.get("score_parts") or {}
+        quote_price = top.get("quote_price")
+        chart = plan_chart(
+            [b for b in (top.get("recent_bars") or []) if isinstance(b, (list, tuple))],
+            {"buy_zone_low": levels.get("buy_zone_low"),
+             "buy_zone_high": levels.get("buy_zone_high"),
+             "stop": levels.get("stop"),
+             "targets": [{"price": target.get("price"), "label": f"TP{index}"}
+                         for index, target in enumerate(targets, 1)]})
+
+        def part_bar(key, label):
+            value = parts.get(key)
+            try:
+                pct = max(0.0, min(100.0, float(value)))
+            except (TypeError, ValueError):
+                return ""
+            return (f'<div class="pick-part"><span>{esc(label)}</span>'
+                    f'<div class="pick-part-track"><i style="width:{pct:.0f}%"></i></div>'
+                    f'<b>{pct:.0f}</b></div>')
+
+        score_html = "".join(part_bar(key, label) for key, label in (
+            ("trend", "Trend"), ("entry", "Buyable now"), ("calm", "Calm"),
+            ("drawdown", "Shallow drawdown"), ("liquidity", "Liquidity")))
+
+        if not quote_price:
+            quote_line = ("No delayed quote yet — these are the last settled "
+                          "daily closes.")
+        else:
+            quote_rm = _rm(top.get("quote_price_myr"))
+            quote_line = (f"Latest delayed quote{f' · ≈ {quote_rm}' if quote_rm else ''}"
+                          f" · screen close {_usd(top.get('close'))}")
+
+        target_rows = "".join(
+            _plan_row(target.get("label") or "Take-profit",
+                      target.get("price"), target.get("price_myr"),
+                      f'{_pfx(target.get("move_pct"), 2)} gross · '
+                      f'{_pfx(target.get("net_move_pct"), 2)} after ≈cost · '
+                      f'{target.get("r_multiple")}× risk · '
+                      f'{esc(target.get("note") or "")}',
+                      css="target")
+            for target in targets)
+
+        buy_row = _plan_row(
+            "Buy zone", levels.get("buy_reference"), levels.get("buy_reference_myr"),
+            f'{_usd(levels.get("buy_zone_low"))} – {_usd(levels.get("buy_zone_high"))} '
+            f'· reference {_usd(levels.get("buy_reference"))}', css="buy")
+        stop_row = _plan_row(
+            "Hard stop", levels.get("stop"), levels.get("stop_myr"),
+            f'{_pfx(levels.get("stop_pct_from_entry"), 2)} from the reference · '
+            f'sell if it closes below', css="stop")
+        chase_row = _plan_row(
+            "Do not chase above", levels.get("chase_above"),
+            levels.get("chase_above_myr"),
+            "paying more makes the stop too tight", css="muted")
+        invalid_row = _plan_row(
+            "Setup invalid below", levels.get("invalidate_below"),
+            levels.get("invalidate_below_myr"),
+            "walk away and let the screen refresh", css="muted")
+
+        flags_html = ("".join(f"<li>{esc(flag)}</li>" for flag in flags)
+                      if flags else "<li>No extra caveats from the screen.</li>")
+        why_html = "".join(f"<li>{esc(line)}</li>" for line in top.get("why") or [])
+        hold = top.get("hold") or {}
+
+        alternative_html = ""
+        if top.get("alternative_symbol"):
+            alternative_html = (
+                '<div class="pick-alt">If you want something buyable today, the next '
+                f'best is <b>{esc(top.get("alternative_symbol"))}</b> '
+                f'({esc(top.get("alternative_name"))}) — buy ≈ '
+                f'{_usd(top.get("alternative_buy"))}, stop '
+                f'{_usd(top.get("alternative_stop"))}, first target '
+                f'{_usd(top.get("alternative_target"))}; '
+                f'{esc(top.get("alternative_tag"))}. Full numbers in the table below.</div>')
+
+        hero = f"""
+<section class="pick-hero">
+  <div class="pick-hero-head">
+    <div>
+      <div class="pick-kicker">Best candidate in today's screen</div>
+      <h2 class="pick-symbol">{esc(top.get("symbol"))} <span>{esc(top.get("name"))}</span></h2>
+      <div class="pick-sub">{esc(top.get("sector"))} · screen score {esc(fmt_num(top.get("pick_score"), 1))}/100
+        · {esc(top.get("risk"))} risk · daily bars to {esc(top.get("as_of") or "?")}</div>
+    </div>
+    <div class="pick-quote">
+      <div class="pick-quote-price">{_usd(quote_price or top.get("close"))}</div>
+      <div class="pick-quote-sub">{quote_line}</div>
+    </div>
+  </div>
+  <div class="pick-verdict">{esc(top.get("verdict") or "")}</div>
+  {alternative_html}
+  {chart}
+  <div class="pick-plan">
+    {buy_row}
+    {target_rows}
+    {stop_row}
+    {chase_row}
+    {invalid_row}
+  </div>
+  <div class="pick-grid2">
+    <div class="pick-box">
+      <h4>When to buy — Malaysian time</h4>
+      <div class="pick-when">{esc(session.get("entry_window") or "—")}</div>
+      <p>{esc(session.get("timing") or "")}</p>
+      <p class="pick-small">U.S. session: {esc(session.get("session_window_myt") or "—")}
+        ({esc(session.get("entry_window_et") or "—")}) ·
+        preferred date: {esc(session.get("entry_date_local_label") or "next weekday")} ·
+        avoid {esc(session.get("avoid_window_myt") or "—")}</p>
+    </div>
+    <div class="pick-box">
+      <h4>How long to hold</h4>
+      <div class="pick-when">{esc("–".join(str(n) for n in (hold.get("sessions") or []) ) or "—")} sessions</div>
+      <p>{esc(hold.get("text") or "")}</p>
+      <p class="pick-small">Sell plan: take-profit 1 near {_pfx((targets[0] or {}).get("move_pct") if targets else None, 2)},
+        take-profit 2 near {_pfx((targets[1] or {}).get("move_pct") if len(targets) > 1 else None, 2)},
+        or exit on a daily close below {_usd(levels.get("stop"))}.</p>
+    </div>
+  </div>
+  <div class="pick-grid2">
+    <div class="pick-box">
+      <h4>Why this one</h4>
+      <ul class="pick-list">{why_html}</ul>
+      <div class="pick-parts">{score_html}</div>
+    </div>
+    <div class="pick-box">
+      <h4>What could go wrong</h4>
+      <ul class="pick-list">{flags_html}</ul>
+    </div>
+  </div>
+</section>"""
+
+    # --- runner-up table ----------------------------------------------------
+    def rank_row(index, row):
+        row_levels = row.get("levels") or {}
+        row_targets = row_levels.get("targets") or []
+        t1 = row_targets[0] if row_targets else {}
+        return f"""<tr>
+  <td class="pick-rank">{index}</td>
+  <td><b>{esc(row.get("symbol"))}</b><div class="pick-small">{esc(row.get("name"))}</div></td>
+  <td>{esc(fmt_num(row.get("pick_score"), 1))}</td>
+  <td>{_usd_rm(row_levels.get("buy_reference"), row_levels.get("buy_reference_myr"))}</td>
+  <td>{_usd( row_levels.get("stop"))} <span class="pick-small">({_pfx(row_levels.get("stop_pct_from_entry"), 1)})</span></td>
+  <td>{_usd(t1.get("price"))} <span class="pick-small">({_pfx(t1.get("move_pct"), 1)})</span></td>
+  <td>{esc(fmt_num(row_levels.get("risk_reward"), 2))}:1</td>
+  <td>{esc(_pfx(row.get("ret20_pct"), 1))}</td>
+  <td>{esc(row.get("risk"))}</td>
+  <td>{esc(_hold_text(row))}</td>
+</tr>"""
+
+    table_rows = "".join(rank_row(i, row) for i, row in enumerate(picks, 1))
+    table_html = (f"""<section class="pick-table-wrap">
+  <h2>Full selection, ranked <span class="src">· same daily bars as the Stocks tab · buy price = midpoint of the buy zone</span></h2>
+  <div class="pick-table-scroll">
+  <table class="pick-table">
+    <thead><tr><th>#</th><th>Ticker</th><th>Score</th><th>Buy ≈</th><th>Stop</th>
+      <th>Target 1</th><th>Reward:risk</th><th>20-session</th><th>Risk</th><th>Hold</th></tr></thead>
+    <tbody>{table_rows}</tbody>
+  </table>
+  </div>
+  <p class="pick-small">Scores are min-max normalised inside this list only, so
+  they are not comparable with another day's list. A name can rank first and
+  still be a "do not buy now" — the verdict above says which.</p>
+</section>""" if picks else "")
+
+    # --- cost + FX note -----------------------------------------------------
+    fx_ok = currency.get("available")
+    cost_pct = view.get("cost_pct")
+    cost_html = (
+        f'<p class="pick-note">Net percentages subtract an estimated '
+        f'{esc(fmt_num(cost_pct, 2))}% round-trip friction (commission + spread + '
+        f'FX conversion). That is an assumption, not a quote — confirm the real '
+        f'fees on <a href="https://www.moomoo.com/my/support/topic9_136" '
+        f'target="_blank" rel="noopener noreferrer">Moomoo Malaysia’s fee '
+        f'schedule</a>. Market orders can fill away from every price here.</p>')
+    if fx_ok:
+        fx_html = (
+            f'<p class="pick-note">RM figures are indicative share-price '
+            f'conversions at USD/MYR {esc(fmt_num(currency.get("rate"), 4))} '
+            f'({esc(currency.get("source") or "ECB")} reference, '
+            f'{esc(currency.get("rate_date") or "date unknown")}). They exclude '
+            f'spread, stamp duty and FX conversion charges, and are not '
+            f'executable prices.</p>')
+    else:
+        fx_html = (f'<p class="pick-note">RM figures are omitted: '
+                   f'{esc(currency.get("reason") or "no fresh USD/MYR reference")}</p>')
+
+    method = view.get("method") or ""
+    level_method = view.get("level_method") or ""
+    limitations = view.get("limitations") or ""
+    weights = view.get("weights") or {}
+    weight_text = ", ".join(f"{esc(key)} {esc(fmt_num(value, 2))}"
+                            for key, value in weights.items())
+
+    rules_html = "".join(f"<li>{esc(rule)}</li>"
+                         for rule in (session.get("rules") or []))
+
+    session_bar = "" if disabled else f"""
+<div class="pick-session-bar">
+  <div><span>Now</span><b>{esc(session.get("runtime_myt") or "—")}</b></div>
+  <div><span>Next buy window</span><b>{esc(session.get("entry_window") or "—")}</b></div>
+  <div><span>U.S. session</span><b>{esc(session.get("session_window_myt") or "—")}</b></div>
+  <div><span>U.S. clock state</span><b>{esc((session.get("state") or "unknown").replace("_", " "))}</b></div>
+</div>"""
+
+    body = f"""<header>
+  <h1>ECON<span>.</span>world</h1>
+  <span class="updated">Pick · page time · {_dual_market_time(now)}</span>
+  {banner}
+</header>
+{tabs("pick")}
+<div class="pick-intro">
+  <p><b>What to buy, at what price, when in Malaysian time, and where to sell.</b>
+  This tab reuses the Stocks screen's daily closes and delayed quotes — it does
+  not fetch anything new. It ranks the same names for <i>buyability</i>, then
+  turns the top one into a concrete plan: a buy zone, a hard stop, two sell
+  targets, a holding estimate and a Malaysian clock for the U.S. session.</p>
+  <p>Every price is a rule computed from that stock's own recent volatility, not
+  a prediction. The plan is arithmetic you can check against the formulas below.</p>
+</div>
+{caveat_html}
+{session_bar}
+{hero}
+{table_html}
+<details class="stock-method" open>
+  <summary>How these numbers are calculated (and what they are not)</summary>
+  <ul>
+    <li><b>Selection:</b> {esc(method)}</li>
+    <li><b>Weights used today:</b> {weight_text}.</li>
+    <li><b>Buy zone, stop and targets:</b> {esc(level_method)}</li>
+    <li><b>Timing:</b><ul>{rules_html}</ul></li>
+    <li><b>Costs:</b> net figures subtract an assumed {esc(fmt_num(cost_pct, 2))}% round trip.</li>
+  </ul>
+  <p>{esc(limitations)}</p>
+</details>
+{cost_html}
+{fx_html}
+<footer>This is a rule-based plan generated from free daily closes and
+~15-minute-delayed public quotes. It is not investment advice, not a
+personalised recommendation, and not a guarantee. Prices gap; a stop is not a
+floor. Verify the live quote, the spread, upcoming earnings and your own
+position size before placing any order. Short-term trading can lose money
+quickly.</footer>
+"""
+    page_html = PAGE.replace("__STYLE__", STYLE)
+    page_html = page_html.replace("__REFRESH__", str(max(60, int(refresh))))
+    page_html = page_html.replace("__BODY__", body)
+    page_html = page_html.replace("<title>econ — world at a glance</title>",
+                                 f"<title>{esc(title)}</title>")
+    return page_html
 
 def build_page(sections, *, demo=False, generated_at=None, refresh=300,
                errors=None, providers=None):
