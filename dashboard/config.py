@@ -300,3 +300,8 @@ try:
         os.environ.get("ECON_PICK_COST_PCT", "0.35"))))
 except ValueError:
     PICK_COST_PCT = 0.35
+# Names whose 20-session annualized volatility is above this ceiling get no plan
+# at all: a stop wide enough to survive that noise is a loss a normal position
+# cannot carry, and a stop tight enough to be affordable is noise. They are
+# counted on the page rather than silently ranked last.
+PICK_MAX_VOL_PCT = float(os.environ.get("ECON_PICK_MAX_VOL", "120"))

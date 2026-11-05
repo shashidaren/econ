@@ -154,6 +154,8 @@ h2:after{content:"";flex:1;height:1px;background:var(--line)}
 .pick-quote-price{font-size:26px;font-weight:750;font-variant-numeric:tabular-nums}
 .pick-quote-sub{color:var(--muted);font-size:11px;max-width:260px}
 .pick-verdict{margin:11px 0 4px;padding:9px 12px;border-left:3px solid var(--accent);background:var(--panel2);border-radius:6px;font-size:13.5px}
+.pick-alt{margin-top:8px;padding:9px 12px;border:1px dashed var(--line);border-radius:7px;background:var(--panel);font-size:12.5px;color:var(--muted)}
+.pick-alt b{color:var(--text)}
 .pick-hero .chart{width:100%;height:auto;margin:10px 0 6px;background:var(--panel2);border-radius:8px}
 .pick-plan{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:9px;margin:12px 0}
 .pick-level{background:var(--panel2);border:1px solid var(--line);border-radius:9px;padding:10px 12px}
@@ -1666,6 +1668,15 @@ def _pfx(value, dec=1):
     return f"{number:+.{dec}f}%"
 
 
+def _hold_text(row):
+    """"5–12 sessions", or "—" when the plan has no hold estimate."""
+    sessions = (row.get("hold") or {}).get("sessions") or []
+    if len(sessions) < 2:
+        return "—"
+    low, high = sessions[0], sessions[-1]
+    return f"{low}–{high}" if low != high else str(low)
+
+
 def _plan_row(label, price, myr, sub_html="", css=""):
     return (f'<div class="pick-level {css}">'
             f'<div class="pick-level-label">{esc(label)}</div>'
@@ -1788,6 +1799,17 @@ def build_pick_page(view, *, demo=False, generated_at=None, refresh=300,
         why_html = "".join(f"<li>{esc(line)}</li>" for line in top.get("why") or [])
         hold = top.get("hold") or {}
 
+        alternative_html = ""
+        if top.get("alternative_symbol"):
+            alternative_html = (
+                '<div class="pick-alt">If you want something buyable today, the next '
+                f'best is <b>{esc(top.get("alternative_symbol"))}</b> '
+                f'({esc(top.get("alternative_name"))}) — buy ≈ '
+                f'{_usd(top.get("alternative_buy"))}, stop '
+                f'{_usd(top.get("alternative_stop"))}, first target '
+                f'{_usd(top.get("alternative_target"))}; '
+                f'{esc(top.get("alternative_tag"))}. Full numbers in the table below.</div>')
+
         hero = f"""
 <section class="pick-hero">
   <div class="pick-hero-head">
@@ -1803,6 +1825,7 @@ def build_pick_page(view, *, demo=False, generated_at=None, refresh=300,
     </div>
   </div>
   <div class="pick-verdict">{esc(top.get("verdict") or "")}</div>
+  {alternative_html}
   {chart}
   <div class="pick-plan">
     {buy_row}
@@ -1858,7 +1881,7 @@ def build_pick_page(view, *, demo=False, generated_at=None, refresh=300,
   <td>{esc(fmt_num(row_levels.get("risk_reward"), 2))}:1</td>
   <td>{esc(_pfx(row.get("ret20_pct"), 1))}</td>
   <td>{esc(row.get("risk"))}</td>
-  <td>{esc((row.get("hold") or {}).get("sessions", ["—"])[0] if (row.get("hold") or {}).get("sessions") else "—")}–{esc((row.get("hold") or {}).get("sessions", ["—", "—"])[-1] if (row.get("hold") or {}).get("sessions") else "—")}</td>
+  <td>{esc(_hold_text(row))}</td>
 </tr>"""
 
     table_rows = "".join(rank_row(i, row) for i, row in enumerate(picks, 1))

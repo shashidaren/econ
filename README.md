@@ -238,10 +238,16 @@ connection.
 
 **1. Which one.** The displayed candidates are re-ranked for *buyability*:
 `0.35×trend + 0.25×buyable-now + 0.20×calm + 0.10×shallow drawdown +
-0.10×liquidity`, each term min-max normalised inside the list. "Buyable now" is
-1.0 when the latest price sits inside the planned buy zone and falls to 0 as it
-drifts away or breaks the invalidation line — so a great chart you can only buy
-by overpaying does not win.
+0.10×liquidity`. "Buyable now" is 1.0 when the latest price sits inside the
+planned buy zone and falls to 0 as it drifts away or breaks the invalidation
+line — so a great chart you can only buy by overpaying does not win. Trend and
+buyable-now are relative to the list; the three risk terms use **fixed bounds**
+(volatility 90%→30%, drawdown −30%→−5%, dollar volume $3M→$300M), so a wild
+outlier cannot win merely by being the only extreme value. Names above the
+`ECON_PICK_MAX_VOL` ceiling (120% annualized) get **no plan at all** and are
+counted on the page: a stop wide enough to survive that noise is a loss no
+normal position should carry. If the top-scoring name is a "wait", the hero card
+names the next name that is actually inside its zone.
 
 **2. At what price.** Everything scales off the ticker's own one-session
 volatility σ (20-session realized volatility ÷ √252):
@@ -290,7 +296,7 @@ fundamentals, earnings calendar or analyst targets; levels are arithmetic rules,
 not predictions; prices gap through stops; position sizing is yours. Disable
 with `ECON_PICK=0`. Tune with `ECON_PICK_MIN_STOP_PCT` (2.5), `ECON_PICK_MAX_STOP_PCT`
 (8), `ECON_PICK_COST_PCT` (0.35), `ECON_PICK_ENTRY_SIGMA` (0.6),
-`ECON_PICK_HOLD_SESSIONS` (20) and `ECON_PICK_TZ`.
+`ECON_PICK_HOLD_SESSIONS` (20), `ECON_PICK_MAX_VOL` (120) and `ECON_PICK_TZ`.
 
 ## Telegram stock alerts
 

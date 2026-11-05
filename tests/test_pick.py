@@ -99,6 +99,26 @@ class SelectionTests(unittest.TestCase):
         self.assertIn("invalidation line", top["verdict"].lower())
         self.assertEqual(top["now_tag"], "void")
 
+    def test_a_wait_headline_names_the_next_buyable_name(self):
+        chasing = _candidate("CHASE", quote={"price": 36.0}, ret20_pct=12.0,
+                             ret60_pct=25.0)
+        steady = _candidate("STEADY", quote={"price": 29.8})
+        view = pick.build_pick_view(_screen(chasing, steady), now=NOW)
+        self.assertEqual(view["top"]["symbol"], "CHASE")
+        self.assertIn(view["top"]["now_tag"], ("wait", "slightly high"))
+        self.assertEqual(view["top"]["alternative_symbol"], "STEADY")
+        self.assertEqual(view["top"]["alternative_tag"], "in zone")
+        self.assertIsNotNone(view["top"]["alternative_buy"])
+
+    def test_no_alternative_line_when_the_top_pick_is_buyable(self):
+        view = pick.build_pick_view(
+            _screen(_candidate("AAA", quote={"price": 29.8}), _candidate("BBB")),
+            now=NOW)
+        self.assertEqual(view["top"]["now_tag"], "in zone")
+        self.assertNotIn("alternative_symbol", view["top"])
+        page = render.build_pick_page(view, generated_at=NOW)
+        self.assertNotIn('class="pick-alt"', page)
+
     def test_verdict_distinguishes_slightly_high_from_below_the_zone(self):
         levels = {"buy_zone_low": 29.70, "buy_zone_high": 30.00, "stop": 29.25,
                   "invalidate_below": 29.0, "chase_above": 30.42}
@@ -153,11 +173,21 @@ class LevelTests(unittest.TestCase):
         self.assertAlmostEqual(abs(levels["stop_pct_from_entry"]), 2.5, places=2)
 
     def test_jumpy_stock_is_capped_at_the_maximum_loss(self):
-        jumpy = _candidate("JUMP", vol20_annual_pct=180.0)
+        # 90% annualized is inside the volatility ceiling but wide enough that
+        # 2σ exceeds the maximum loss, so the cap must bind.
+        jumpy = _candidate("JUMP", vol20_annual_pct=90.0)
         view = pick.build_pick_view(_screen(jumpy), now=NOW,
                                     max_stop_pct=8.0, min_stop_pct=2.5)
         levels = view["top"]["levels"]
         self.assertAlmostEqual(abs(levels["stop_pct_from_entry"]), 8.0, places=2)
+
+    def test_names_above_the_volatility_ceiling_get_no_plan(self):
+        wild = _candidate("WILD", vol20_annual_pct=180.0)
+        view = pick.build_pick_view(_screen(_candidate("CALM"), wild), now=NOW,
+                                    max_vol_pct=120.0)
+        self.assertEqual([row["symbol"] for row in view["picks"]], ["CALM"])
+        self.assertEqual(view["too_volatile_count"], 1)
+        self.assertEqual(view["max_vol_pct"], 120.0)
 
     def test_net_figures_subtract_the_cost_assumption(self):
         view = pick.build_pick_view(_screen(_candidate()), now=NOW, cost_pct=0.5)

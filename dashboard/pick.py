@@ -40,10 +40,12 @@ METHOD = (
     "Score = 0.35×trend (0.2×5-session + 0.5×20-session + 0.3×60-session return) "
     "+ 0.25×buyable-now (1.0 when the current price sits inside the planned buy "
     "zone, falling to 0 as it moves away or under the invalidation line) + "
-    "0.20×calm (inverse 20-session realized volatility) + 0.10×shallow "
-    "drawdown (60-session) + 0.10×liquidity (log of 20-session dollar volume). "
-    "Each term is min-max normalised across the list, so a score is only "
-    "comparable inside the same list — never across days."
+    "0.20×calm (20-session realized volatility mapped 0→90% to 1→30%) + "
+    "0.10×shallow drawdown (60-session, 0→−30% to 1→−5%) + 0.10×liquidity "
+    "(log 20-session dollar volume, 0→$3M to 1→$300M). Trend and buyable-now "
+    "are relative to the list; the three risk terms use fixed bounds, so their "
+    "scores mean the same thing every day. Overall scores are still only "
+    "comparable inside the same list."
 )
 LEVEL_METHOD = (
     "One-session σ = 20-session realized volatility ÷ √252, in dollars at the "
@@ -53,7 +55,10 @@ LEVEL_METHOD = (
     "20-day average); the reference price is the zone midpoint. Hard stop = "
     "reference − one plan width. Take-profit 1 = reference + 1.4 plan widths, "
     "take-profit 2 = reference + 2.3 plan widths. Reward:risk, percentages and "
-    "RM values are all printed from those same numbers. Setup invalid = zone "
+    "RM values are all printed from those same numbers. Names above the "
+    "configured volatility ceiling get no plan at all, because a stop wide "
+    "enough to survive that noise is a loss no normal position should carry. "
+    "Setup invalid = zone "
     "bottom − 0.5 widths (never below the 20-day average − 1σ); do-not-chase = "
     "zone top + 0.5 widths."
 )
@@ -106,6 +111,31 @@ def _pct(a, b):
     if a_num is None or not b_num:
         return None
     return (a_num / b_num - 1.0) * 100.0
+
+
+def _log10(value):
+    number = _num(value)
+    if number is None or number <= 0:
+        return None
+    return math.log10(number)
+
+
+def _absolute_scale(value, worst, best, invert=False):
+    """Map a value onto 0..1 between two fixed, printed bounds.
+
+    Used for the risk terms so their scores mean the same thing in every list.
+    """
+    number = _num(value)
+    if number is None:
+        return 0.0
+    if invert:                       # lower is better (e.g. volatility)
+        hi, lo = worst, best         # `worst` is the larger number here
+        if hi == lo:
+            return 0.5
+        return max(0.0, min(1.0, (hi - number) / (hi - lo)))
+    if best == worst:
+        return 0.5
+    return max(0.0, min(1.0, (number - worst) / (best - worst)))
 
 
 def _normalise(values):
@@ -461,7 +491,7 @@ def _entry_score(item, levels):
 def build_pick_view(screen, *, now=None, currency_rate=None, demo=False,
                     entry_sigma=None, target_sigmas=None, max_stop_pct=None,
                     hold_sessions=None, weights=None, local_tz=None,
-                    cost_pct=None, min_stop_pct=None):
+                    cost_pct=None, min_stop_pct=None, max_vol_pct=None):
     """Rank the screened candidates and plan the top one.
 
     `screen` is the payload app.summary() already builds for the Stocks tab
@@ -484,6 +514,8 @@ def build_pick_view(screen, *, now=None, currency_rate=None, demo=False,
     cost_pct = (config.PICK_COST_PCT if cost_pct is None else cost_pct)
     min_stop_pct = (getattr(config, "PICK_MIN_STOP_PCT", 2.5)
                     if min_stop_pct is None else min_stop_pct)
+    max_vol_pct = (getattr(config, "PICK_MAX_VOL_PCT", 120.0)
+                   if max_vol_pct is None else max_vol_pct)
 
     screen = screen if isinstance(screen, dict) else {}
     session = session_plan(moment, local_tz=local_tz)
@@ -504,9 +536,14 @@ def build_pick_view(screen, *, now=None, currency_rate=None, demo=False,
 
     rows = []
     skipped = 0
+    too_volatile = 0
     for raw in screen.get("candidates") or []:
         if not isinstance(raw, dict):
             continue
+        vol = _num(raw.get("vol20_annual_pct"))
+        if vol is not None and vol > max_vol_pct:
+            too_volatile += 1
+            continue                   # a stop that survives this is unaffordable
         levels = _levels(raw, entry_sigma=entry_sigma,
                          target_sigmas=target_sigmas,
                          max_stop_pct=max_stop_pct, cost_pct=cost_pct,
@@ -540,6 +577,10 @@ def build_pick_view(screen, *, now=None, currency_rate=None, demo=False,
             "limitations": LIMITATIONS,
             "demo": bool(demo),
             "skipped_count": skipped,
+            "too_volatile_count": too_volatile,
+            "max_vol_pct": max_vol_pct,
+        "too_volatile_count": too_volatile,
+        "max_vol_pct": max_vol_pct,
             "generated_at": moment.isoformat(timespec="seconds"),
         }
 
@@ -555,19 +596,19 @@ def build_pick_view(screen, *, now=None, currency_rate=None, demo=False,
         item["quote_price"] = _num((item.get("quote") or {}).get("price")) or _num(
             item.get("close"))
     entry_raw = [_entry_score(item, levels) for item, levels in rows]
-    calm_raw = [-float(item.get("vol20_annual_pct") or 100.0) for item, _ in rows]
-    drawdown_raw = [float(item.get("drawdown60_pct") or -100.0) for item, _ in rows]
-    liquidity_raw = [
-        math.log10(max(_num(item.get("avg_dollar_volume20")) or 1.0, 1.0))
-        for item, _ in rows
-    ]
-
+    # Trend and buyability are relative to this list (they are the choice between
+    # names). The three risk terms are ABSOLUTE, so a violent outlier cannot win
+    # just by being the only extreme value in a small list.
     norm = {
         "trend": _normalise(trend_raw),
         "entry": _normalise(entry_raw),
-        "calm": _normalise(calm_raw),
-        "drawdown": _normalise(drawdown_raw),
-        "liquidity": _normalise(liquidity_raw),
+        "calm": [_absolute_scale(item.get("vol20_annual_pct"), 90.0, 30.0, invert=True)
+                 for item, _ in rows],
+        "drawdown": [_absolute_scale(item.get("drawdown60_pct"), -30.0, -5.0)
+                     for item, _ in rows],
+        "liquidity": [_absolute_scale(_log10(item.get("avg_dollar_volume20")),
+                                      6.5, 8.5)
+                      for item, _ in rows],
     }
     total_weight = sum(float(v or 0.0) for v in weights.values()) or 1.0
     ranked = []
@@ -600,6 +641,34 @@ def build_pick_view(screen, *, now=None, currency_rate=None, demo=False,
         row["hold"] = _hold_estimate(row, row_levels, hold_sessions)
         row["why"] = _why(row)
         row["verdict"], row["now_tag"] = _verdict(row, row_levels)
+    # If the top-scoring name is not buyable today, name the closest choice that
+    # is. The ranking stays honest (best setup first); this just stops a "wait"
+    # headline from hiding the actionable alternative in the table.
+    alternative = None
+    if top.get("now_tag") in ("wait", "void", "below zone", "slightly high"):
+        buyable = [row for row in ranked[1:] if row.get("now_tag") == "in zone"]
+        if buyable:
+            alternative = buyable[0]
+        else:
+            closer = sorted(ranked[1:],
+                            key=lambda r: -(r.get("score_parts") or {}).get("entry", 0))
+            alternative = closer[0] if closer else None
+    if alternative is not None:
+        top["alternative_symbol"] = alternative.get("symbol")
+        top["alternative_name"] = alternative.get("name")
+        top["alternative_tag"] = alternative.get("now_tag")
+        top["alternative_score"] = alternative.get("pick_score")
+        top["alternative_buy"] = (alternative.get("levels") or {}).get("buy_reference")
+        top["alternative_stop"] = (alternative.get("levels") or {}).get("stop")
+        top["alternative_target"] = (
+            ((alternative.get("levels") or {}).get("targets") or [{}])[0]
+        ).get("price")
+        top["alternative_note"] = (
+            f"{alternative.get('symbol')} scores "
+            f"{alternative.get('pick_score')} and is "
+            f"{'inside its buy zone' if alternative.get('now_tag') == 'in zone' else 'the next-closest to buyable'}."
+        )
+
     status = str(screen.get("status") or "ok")
     if status == "ok" or not status:
         status = "ok"
@@ -634,6 +703,8 @@ def build_pick_view(screen, *, now=None, currency_rate=None, demo=False,
         "demo": bool(demo),
         "candidate_count": len(ranked),
         "skipped_count": skipped,
+        "too_volatile_count": too_volatile,
+        "max_vol_pct": max_vol_pct,
     }
 
 
