@@ -10,14 +10,15 @@ three operational questions that screen leaves open:
    *decision* instead of pure momentum: uptrend, a pullback entry rather than
    chasing, calm volatility, contained drawdown, and liquidity.
 2. **At what price?** — a *buy zone* (not a single price) built from the
-   ticker's own realized volatility: the last close minus a fraction of one
-   daily standard deviation, bounded by the recent support level.
+   ticker's own realized volatility: the last close down to a fraction of one
+   daily standard deviation below it, never planned below the 20-day average.
 3. **When?** — because a U.S.-listed stock is bought during U.S. hours, "when"
    is a **Malaysian-time** window: the regular session is 21:30–04:00 MYT
    (22:30–05:00 when the U.S. is on standard time), and the tab names the
    specific MYT clock window it prefers inside it.
-4. **Sell where?** — two take-profit levels at fixed volatility multiples above
-   the entry, plus a hard stop, each with the MYR value and the holding horizon.
+4. **Sell where?** — two take-profit levels at fixed multiples of the plan
+   width above the entry, plus a hard stop, each with the MYR value, the
+   gross and net-of-cost percentages and the holding range.
 
 What it deliberately is not
 ---------------------------
@@ -33,7 +34,6 @@ Stocks tab renders) and returns plain dicts, so it can be unit-tested offline.
 
 from datetime import date, datetime, time, timedelta, timezone
 import math
-import statistics
 from zoneinfo import ZoneInfo
 
 METHOD = (
@@ -58,9 +58,8 @@ LEVEL_METHOD = (
     "RM values are all printed from those same numbers. Names above the "
     "configured volatility ceiling get no plan at all, because a stop wide "
     "enough to survive that noise is a loss no normal position should carry. "
-    "Setup invalid = zone "
-    "bottom − 0.5 widths (never below the 20-day average − 1σ); do-not-chase = "
-    "zone top + 0.5 widths."
+    "Setup invalid = zone bottom − 0.5 widths (never below the 20-day average "
+    "− 1σ); do-not-chase = zone top + 0.5 widths."
 )
 LIMITATIONS = (
     "Daily closes only: no intraday order book, bid/ask spread, fundamentals, "
