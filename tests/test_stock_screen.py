@@ -306,7 +306,7 @@ class StockScreenTests(unittest.TestCase):
         self.assertEqual(page.count('class="stock-card"'), 5)
         self.assertIn("up to 7 names", page)
         self.assertIn("Stocks", page)
-        self.assertNotIn("<script>", page)
+        self.assertEqual(page.count("<script>"), 1)  # untrusted content stays escaped
         self.assertIn("DEMO MODE — synthetic stock history", page)
         self.assertNotIn("RM 20.00", page)
         self.assertIn("MYR conversion is disabled for synthetic demo data", page)

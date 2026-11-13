@@ -444,3 +444,30 @@ each body, so a total stock outage names itself instead of looking like a blank 
 `/api/summary` includes the breaker state (`providers`) and per-section freshness (`data_status`). `/api/status` is a compact health/freshness view; `/healthz` remains a liveness-only probe.
 
 Not investment advice — it's a glance-board, not a trading terminal.
+
+## Reading controls and development checks
+
+Every tab has **Pause auto-refresh**, **Resume auto-refresh**, and **Refresh now**
+controls. The pause preference is remembered in this browser across tabs and
+reloads. Paused data can become stale; use the existing source timestamps and
+freshness badges before acting. Hidden browser tabs suspend their reload timer;
+returning to a tab starts a new refresh interval. With JavaScript disabled, the
+original timed page refresh remains available.
+
+Keyboard users can skip directly to dashboard content; the active navigation tab
+is announced to assistive technology, and navigation wraps on narrow screens.
+No external JavaScript, fonts, or build dependencies are required.
+
+Run the same offline checks used by CI before deploying:
+
+```bash
+python3 -m py_compile dashboard/*.py tests/*.py tools/*.py
+python3 -m unittest discover -s tests -v
+bash tests/test_auto_update.sh
+```
+
+GitHub Actions runs these checks on Python 3.10–3.13. Cache regression tests cover
+concurrent disk writes, corrupt-file recovery, invalid timestamps, and retention
+of the original data age after a failed refresh. HTTP tests cover liveness, HEAD,
+404s, and response security headers. These checks do not prove live market-feed
+availability; use `/api/status` on the deployed host to inspect provider health.

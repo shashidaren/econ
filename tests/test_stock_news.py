@@ -440,7 +440,7 @@ class StocksPageNewsTests(unittest.TestCase):
         }
         screen["candidates"] = screen["candidates"][:1]
         page = render.build_stocks_page(screen, generated_at=NOW)
-        self.assertNotIn("<script>", page)
+        self.assertEqual(page.count("<script>"), 1)  # untrusted content stays escaped
         self.assertNotIn("javascript:", page)
         self.assertIn("&lt;script&gt;", page)
         self.assertIn("&lt;b&gt;Bad Wire&lt;/b&gt;", page)
