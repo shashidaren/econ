@@ -890,3 +890,26 @@ Preview (no network needed): `ECON_DEMO=1 python3 dashboard/app.py` → sample d
 - Tested in sandbox: all 7 sections render, `/api/summary` OK, graceful per-source
   error handling in place. 27 inline SVG charts, dark wall-board UI, 5-min auto-refresh.
 - Merged PR #1 (`arena/4b243469-econ` → `main` at `b594350`).
+
+### 2026-11-13 — Reliability, accessibility, and release checks
+
+- Baseline: 234 offline Python tests passed.
+- Fixed failed refreshes resetting last-good `at`: retain the original data age,
+  record `attempted_at` separately, and retain hourly stock failure backoff.
+- Serialized disk snapshot/replacement and use unique, private temporary files,
+  fsync, atomic replace, and cleanup. Disk restore ignores unknown registry keys
+  and invalid/future/non-finite timestamp or TTL metadata.
+- Added shared refresh pause/resume/manual controls with browser persistence,
+  hidden-tab timer suspension, and no-JS timed-refresh fallback. No CDN/deps.
+- Added skip link, focus styling, main landmark, active-tab semantics, and mobile
+  navigation wrapping.
+- Added nosniff, no-referrer, restrictive resource policy (inline local CSS/JS
+  permitted), and HEAD support. Preview embedding remains supported.
+- Added GitHub Actions offline gates on Python 3.10–3.13 and seven regression tests.
+  Existing injection tests now permit exactly one bundled refresh script while
+  retaining assertions that untrusted content and links stay escaped/sanitized.
+- Validation: 241 Python tests; 22 updater shell assertions; py_compile; diff check;
+  all 11 HTML/API/health routes returned 200 in the local demo server and JSON
+  parsed successfully. Preview uses bundled sample data, not live quotes.
+- Live upstream market availability cannot be tested in the restricted sandbox;
+  verify `/api/status` on LXC after deployment. Trading logic is unchanged.

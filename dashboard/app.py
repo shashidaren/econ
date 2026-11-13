@@ -25,6 +25,7 @@ import json
 import math
 import os
 import threading
+import tempfile
 import time
 import traceback
 from concurrent.futures import ThreadPoolExecutor
@@ -53,6 +54,7 @@ else:
 
 CACHE: dict = {}
 LOCK = threading.Lock()
+DISK_LOCK = threading.Lock()
 
 
 def load_disk_cache():
@@ -67,7 +69,9 @@ def load_disk_cache():
         if isinstance(raw, dict):
             with LOCK:
                 for k, v in raw.items():
-                    if isinstance(v, dict) and v.get("data") is not None:
+                    if (k in {item[0] for item in REGISTRY}
+                            and isinstance(v, dict) and v.get("data") is not None
+                            and _valid_cache_metadata(v)):
                         CACHE[k] = v
             print(f"[cache] restored {len(CACHE)} entries from {config.CACHE_FILE}",
                   flush=True)
@@ -82,17 +86,40 @@ def save_disk_cache():
     try:
         p = Path(config.CACHE_FILE)
         p.parent.mkdir(parents=True, exist_ok=True)
-        with LOCK:
-            snap = {
-                k: {"data": v["data"], "at": v.get("at", 0), "ttl": v.get("ttl", 600), "err": None}
-                for k, v in CACHE.items()
-                if isinstance(v, dict) and v.get("data") is not None
-            }
-        tmp = p.with_suffix(".tmp")
-        tmp.write_text(json.dumps(snap), "utf-8")
-        os.replace(tmp, p)
-    except Exception:
-        pass
+        # Serialize snapshot + replace: an older worker must not overwrite a
+        # newer snapshot. Unique files also avoid collisions across processes.
+        with DISK_LOCK:
+            with LOCK:
+                snap = {
+                    k: {**v, "err": None}
+                    for k, v in CACHE.items()
+                    if isinstance(v, dict) and v.get("data") is not None
+                }
+            tmp = None
+            try:
+                with tempfile.NamedTemporaryFile(
+                        mode="w", encoding="utf-8", dir=p.parent,
+                        prefix=p.name + ".", suffix=".tmp", delete=False) as f:
+                    tmp = f.name
+                    json.dump(snap, f, allow_nan=False)
+                    f.flush()
+                    os.fsync(f.fileno())
+                os.replace(tmp, p)
+            finally:
+                if tmp and os.path.exists(tmp):
+                    os.unlink(tmp)
+    except Exception as exc:
+        print(f"[cache] disk save skipped: {exc}", flush=True)
+
+
+def _valid_cache_metadata(entry):
+    """Reject corrupt timestamps before they can break every page request."""
+    try:
+        at, ttl = float(entry["at"]), float(entry["ttl"])
+        return (math.isfinite(at) and math.isfinite(ttl)
+                and 0 <= at <= time.time() + 60 and ttl > 0)
+    except (KeyError, TypeError, ValueError, OverflowError):
+        return False
 
 
 def cache_get(key):
@@ -108,8 +135,9 @@ def cache_put(key, data, err=None, ttl=600):
 
 
 def cache_valid(entry) -> bool:
-    return bool(entry) and entry.get("data") is not None and \
-        (time.time() - entry["at"]) < entry.get("ttl", 600)
+    return bool(entry) and _valid_cache_metadata(entry) and not entry.get("err") and \
+        entry.get("data") is not None and \
+        (time.time() - float(entry["at"])) < float(entry["ttl"])
 
 
 def fetch_into_cache(key, fn, ttl):
@@ -122,7 +150,12 @@ def fetch_into_cache(key, fn, ttl):
     except Exception as exc:  # noqa: BLE001 — one bad source must never kill the board
         prev = cache_get(key) or {}
         keep = prev.get("data")
-        cache_put(key, keep, err=f"{type(exc).__name__}: {exc}", ttl=ttl)
+        with LOCK:
+            CACHE[key] = {
+                "data": keep, "at": prev.get("at", 0), "ttl": ttl,
+                "attempted_at": time.time(),
+                "err": f"{type(exc).__name__}: {exc}",
+            }
         print(f"[cache] {key}: FAILED {exc} (kept={'stale' if keep else 'nothing'})",
               flush=True)
 
@@ -370,7 +403,7 @@ def warm_all(force=False):
         # fails, honour its 1 h TTL even with no last-good cache so a 5 min board
         # refresh does not repeat the full stock-source cascade.
         if (not force and key == "stock_screen" and entry and entry.get("err")
-                and (time.time() - entry.get("at", 0)) < ttl):
+                and (time.time() - entry.get("attempted_at", entry.get("at", 0))) < ttl):
             continue
         todo.append((key, fn, ttl))
 
@@ -951,8 +984,18 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Referrer-Policy", "no-referrer")
+        self.send_header("Content-Security-Policy",
+                         "default-src 'none'; style-src 'unsafe-inline'; "
+                         "script-src 'unsafe-inline'; img-src 'self' data:; "
+                         "base-uri 'none'; form-action 'none'")
         self.end_headers()
-        self.wfile.write(body)
+        if self.command != "HEAD":
+            self.wfile.write(body)
+
+    def do_HEAD(self):  # noqa: N802
+        self.do_GET()
 
     def do_GET(self):  # noqa: N802 (stdlib naming)
         path = urlparse(self.path).path

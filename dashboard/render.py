@@ -22,13 +22,20 @@ STYLE = """
   --text:#e6e9f0; --muted:#8b93a7; --accent:#4a9eff;
   --up:#26a69a; --down:#ef5350; --warn:#e5a50a;
 }
+html{color-scheme:dark}
+:focus-visible{outline:3px solid var(--accent);outline-offset:4px}
+.skip-link{position:absolute;left:12px;top:-100px;background:var(--panel);padding:12px;z-index:20}
+.skip-link:focus{top:12px}
+.refresh-controls{display:flex;flex-wrap:wrap;align-items:center;gap:10px;margin:0 0 16px;color:var(--muted);font-size:12px}
+.refresh-controls button{background:var(--panel);color:var(--text);border:1px solid var(--line);border-radius:8px;padding:8px 12px;cursor:pointer;min-height:40px}
+@media(prefers-reduced-motion:reduce){*{scroll-behavior:auto!important}}
 *{box-sizing:border-box;margin:0;padding:0}
 body{background:var(--bg);color:var(--text);
   font:15px/1.45 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
   padding:20px 24px 40px}
 a{color:var(--accent);text-decoration:none}
 header{display:flex;flex-wrap:wrap;align-items:baseline;gap:12px;margin-bottom:8px}
-nav.tabs{display:flex;gap:8px;margin:0 0 18px}
+nav.tabs{display:flex;flex-wrap:wrap;gap:8px;margin:0 0 18px}
 nav.tabs a{font-size:13px;color:var(--muted);border:1px solid var(--line);border-radius:8px;padding:4px 10px}
 nav.tabs a.on{color:var(--text);border-color:var(--accent);background:#121a28}
 .sum{display:grid;gap:12px}
@@ -278,11 +285,46 @@ PAGE = """<!doctype html>
 <html lang="en"><head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta http-equiv="refresh" content="__REFRESH__">
+<noscript><meta http-equiv="refresh" content="__REFRESH__"></noscript>
 <title>econ — world at a glance</title>
 <style>__STYLE__</style>
 </head><body>
-__BODY__
+<a class="skip-link" href="#main-content">Skip to dashboard content</a>
+<div class="refresh-controls" aria-label="Refresh controls">
+<button type="button" id="refresh-toggle" aria-pressed="false">Pause auto-refresh</button>
+<button type="button" id="refresh-now">Refresh now</button>
+<span id="refresh-status" role="status">Auto-refresh enabled</span>
+</div>
+<main id="main-content" tabindex="-1">__BODY__</main>
+<script>
+(() => {
+  const interval = __REFRESH__ * 1000;
+  const toggle = document.getElementById('refresh-toggle');
+  const status = document.getElementById('refresh-status');
+  let paused = false;
+  try { paused = localStorage.getItem('econ-refresh-paused') === '1'; } catch (_) {}
+  let timer;
+  function schedule() {
+    clearTimeout(timer);
+    if (!paused && !document.hidden) timer = setTimeout(() => location.reload(), interval);
+  }
+  function update() {
+    toggle.textContent = paused ? 'Resume auto-refresh' : 'Pause auto-refresh';
+    toggle.setAttribute('aria-pressed', String(paused));
+    status.textContent = paused ? 'Auto-refresh paused — data may become stale' :
+      'Auto-refresh every ' + Math.round(interval / 60000) + ' min';
+    schedule();
+  }
+  toggle.addEventListener('click', () => {
+    paused = !paused;
+    try { localStorage.setItem('econ-refresh-paused', paused ? '1' : '0'); } catch (_) {}
+    update();
+  });
+  document.getElementById('refresh-now').addEventListener('click', () => location.reload());
+  document.addEventListener('visibilitychange', schedule);
+  update();
+})();
+</script>
 </body></html>"""
 
 
@@ -541,8 +583,9 @@ def briefing_html(brief):
 def tabs(active):
     def link(href, key, label):
         cls = "on" if active == key else ""
-        return f'<a class="{cls}" href="{href}">{label}</a>'
-    return ('<nav class="tabs">'
+        current = ' aria-current="page"' if active == key else ""
+        return f'<a class="{cls}" href="{href}"{current}>{label}</a>'
+    return ('<nav class="tabs" aria-label="Main navigation">'
             + link("/", "board", "Board")
             + link("/summary", "summary", "Summary")
             + link("/economies", "economies", "Economy 101")

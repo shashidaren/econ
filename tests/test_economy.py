@@ -302,9 +302,9 @@ class EconomyPageTests(unittest.TestCase):
             self.assertIn(needle, page)
         self.assertIn('href="/economies"', page)
         self.assertIn('class="on" href="/economies"', page)
-        # Charts are inline SVG (no CDN / JS), and the share of tabs is complete.
+        # Charts are inline SVG (no CDN); only bundled refresh controls use JS.
         self.assertIn("<svg", page)
-        self.assertNotIn("<script", page)
+        self.assertEqual(page.count("<script>"), 1)  # bundled refresh controls only
         self.assertIn("not investment advice", page)
 
     def test_awaiting_data_page_still_renders(self):
