@@ -668,6 +668,50 @@ def _yahoo_history(symbol: str, days: int = 150):
     raise RuntimeError(f"yahoo({ysym}): {last_err}")
 
 
+def index_drawdown_history(yahoo_symbol: str, fred_symbol: str | None):
+    """Full available Yahoo daily history; bounded FRED history as fallback."""
+    errors = []
+    if provider_available("yahoo"):
+        enc = urllib.parse.quote(yahoo_symbol, safe="")
+        headers = _yahoo_headers()
+        _yahoo_pace()
+        crumb = _yahoo_session_crumb()
+        crumb_param = f"&crumb={urllib.parse.quote(crumb, safe='')}" if crumb else ""
+        for host in ("query2.finance.yahoo.com", "query1.finance.yahoo.com"):
+            hkey = f"yahoo:{host}"
+            if not provider_available(hkey):
+                continue
+            try:
+                url = (f"https://{host}/v8/finance/chart/{enc}"
+                       f"?range=max&interval=1d&includePrePost=false{crumb_param}")
+                data = _get_json(url, timeout=10, headers=headers)
+                rows = _parse_chart_result(((data.get("chart") or {}).get("result") or [None])[0])
+                # Do not accept old/incomplete feeds as current; try FRED instead.
+                import drawdown
+                drawdown.from_history(yahoo_symbol, rows, "Yahoo")
+                note_provider_ok("yahoo")
+                note_provider_ok(hkey)
+                return rows, f"Yahoo Finance ({yahoo_symbol}, maximum available history)"
+            except Exception as exc:
+                errors.append(str(exc))
+                unreachable, limited = _classify(exc)
+                if limited:
+                    note_provider_failure("yahoo", exc, rate_limited=True)
+                    break
+                note_provider_failure(hkey, exc, unreachable=unreachable)
+    else:
+        errors.append("Yahoo cooling down")
+    if fred_symbol:
+        try:
+            rows = _fred_csv_series(fred_symbol, window_years=10)
+            import drawdown
+            drawdown.from_history(fred_symbol, rows, "FRED")
+            return rows, f"FRED ({fred_symbol}, up to 10 years)"
+        except Exception as exc:
+            errors.append(str(exc))
+    raise RuntimeError("index history unavailable: " + "; ".join(errors)[:250])
+
+
 def _yahoo_spark_batch(symbols, days: int = 150, *, include_volume: bool = False) -> dict[str, list]:
     """ONE request for many symbols via the v7 spark endpoint.
 

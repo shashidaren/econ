@@ -21,7 +21,7 @@ central-bank policy rates, and the US yield curve (recession indicator).
 | Server IP | `192.168.0.149` (LAN only) |
 | Access | root via SSH; web UI on LAN |
 | Repo | `shashidaren/econ` (this repo) |
-| Working branch | `arena/a1242f8e-econ` (branched from `main` at `48151c17`, the PR #20 merge that added Telegram alerts). This session diagnoses the post-merge auto-updater test-gate failure and fixes the offline-test hermeticity defect (D28); no product behavior change. D21 cron deploys `main` only. |
+| Working branch | `arena/62c27993-econ` (branched from `main` at `343a3ea`). Index drawdown tab; D21 cron deploys `main` only. |
 | Deploy model | server does `git fetch --all && git reset --hard origin/main && ./install.sh` — **now also automatic** (D21) |
 | Unattended updates | **`/etc/cron.d/econ-update`** → `root /opt/econ/tools/auto_update.sh` every **30 min** (schedule set at install time via `ECON_UPDATE_SCHEDULE='0 * * * *' ./install.sh`), log `/var/log/econ-update.log`, lock `/var/lock/econ-update.lock`. Installed by `install.sh` on every run; removed by `uninstall.sh` or `rm -f /etc/cron.d/econ-update` |
 | App dir on server | `/opt/econ` |
@@ -70,6 +70,8 @@ Data-source rules: market data stays free/key-less; every source fails independe
 "awaiting data"/stale badge, board never breaks); polite fetch cadence via cache TTLs.
 D27 exception: optional outbound Telegram delivery requires the owner's bot token,
 kept only in server-local `.env`; it adds no market-data provider.
+
+| D30 | Index drawdown tab | **`/drawdowns` and `/api/drawdowns`; latest daily value vs highest close in available history** | Yahoo max-history first; FRED up to 10 years for S&P 500, Nasdaq 100 and Dow; MSCI World USD price-return Yahoo only. History coverage is explicit, so no limited peak is falsely represented as a verified all-time or intraday record. Independent per-index hourly caches retain and flag stale readings. No ETF proxy. |
 
 ## 4. Architecture
 
@@ -226,6 +228,8 @@ Preview (no network needed): `ECON_DEMO=1 python3 dashboard/app.py` → sample d
 
 ## 6. Current status
 
+- [x] **Index drawdown tab implemented** on `arena/62c27993-econ`: four cards, per-index cache, Yahoo max-history and FRED fallback for US indices, `/api/drawdowns`, offline demo and tests. Live availability on LXC is unverified.
+
 - [ ] **Pick tab implemented on `arena/aaf28157-econ` (D29, Session 22) — not deployed, not live-verified.** `/pick` + `/api/pick` turn the cached Stocks screen into one ranked best pick with a buy zone, hard stop, two take-profits, a hold range and a Malaysian-time entry window. No new provider, no new cache key, no broker access; DEMO conversion to MYR stays disabled and cached/stale states are badged. **234/234** offline tests pass (30 new). Owner-side check after merge is listed in the Session 22 log.
 - [ ] **Auto-updater test-gate failure diagnosed and fixed on `arena/a1242f8e-econ` (D28, Session 21) — not yet merged/deployed.** Cause: the offline suite read the ignored `/opt/econ/.env` through `tools/telegram_alert.py --check`, so a server-local credential/syntax state failed a unit test and `auto_update.sh` rolled back to `d4de6d82` (service never restarted). Fix: hermetic `--env-file` in the test + `DeploymentCheckoutTests` (deployed-layout copy with four `.env` variants). **204/204** unit tests, **22/22** updater assertions, compile clean. No production code, updater logic, threshold, freshness, dedupe, or rendering change. Owner-side confirmation of the original failure mode is in `/var/log/econ-update.log` (README triage section).
 - [ ] **Telegram sharp-rise alerts implemented on `arena/a1242f8e-econ` (D27, Session 20) — not live-verified or configured with credentials.** Default off; same +3% rise trigger as the badge, displayed picks only, fresh regular-session quotes, once per ticker/session. New `dashboard/alerts.py`, `tools/telegram_alert.py`, 29 offline tests; **202/202** unit tests and **22/22** updater assertions pass. systemd unit verification passes. `.env` is now loaded by systemd and preserved outside tracked code; persistent dedupe lives in `/var/lib/econ`. **Owner action:** deploy via merge, create bot with BotFather, fill server `.env` privately, discover chat, send explicit test, enable and restart. See README §Telegram stock alerts. Sandbox cannot reach `api.telegram.org`; no claim of live delivery.
@@ -331,7 +335,9 @@ Preview (no network needed): `ECON_DEMO=1 python3 dashboard/app.py` → sample d
   sandbox. All local tests use faked transports; **live provider behavior must be verified on
   `root@econ`** (`--doctor` §[9/10] for the stock cascade).
 
-## 8. Next steps (current branch `arena/aaf28157-econ`; merges to `main` auto-deploy via cron — D21 ACTIVE)
+## 8. Next steps (current branch `arena/62c27993-econ`; merges to `main` auto-deploy via cron — D21 ACTIVE)
+
+0. **Live-verify `/drawdowns` and `/api/drawdowns` on the LXC after deployment.** The sandbox cannot reach Yahoo/FRED; Yahoo historically returned 429 there. Verify source, observation dates, history start and stale state per index. MSCI World has no FRED fallback and may be unavailable; do not substitute an ETF. FRED peaks are limited-history highs, not verified all-time records.
 
 0. **Live-verify the Pick tab after merge (needs the server):** open `http://192.168.0.149:8080/pick` and check (a) the hero symbol also appears on `/stocks`, (b) the entry window matches the current U.S. clock — 22:30–00:00 MYT in U.S. winter, 21:30–23:00 MYT in summer, (c) RM levels appear only when `/stocks` has a fresh USD/MYR reference, (d) `curl -s localhost:8080/api/status | python3 -c "import json,sys; print(json.load(sys.stdin)['pick'])"` reports the same pick and window. Tune only if the plan looks wrong: `ECON_PICK_MIN_STOP_PCT` (2.5), `ECON_PICK_MAX_STOP_PCT` (8), `ECON_PICK_COST_PCT` (0.35), then `systemctl restart econ-dashboard`.
 
@@ -352,6 +358,11 @@ Preview (no network needed): `ECON_DEMO=1 python3 dashboard/app.py` → sample d
 7. **Recovery if a commit breaks the dashboard (cron now auto-applies bad commits):** `rm -f /etc/cron.d/econ-update && cd /opt/econ && git reset --hard <last-good-sha> && ./install.sh` — remove the cron file first so it does not re-apply the bad commit, then restore and re-run `install.sh` to re-enable the cron entry. Logs: `/var/log/econ-update.log`, `journalctl -u econ-dashboard`. `install.sh`'s import smoke test leaves the running service on the old code if Python imports break.
 
 ## 9. Session log
+
+### 2026-11-20 — Index drawdown tab
+
+- Added `/drawdowns`, `/api/drawdowns`, summary data, independent hourly cached index histories and synthetic demo data. Values are daily index points; drawdown is measured against the highest available close, not intraday highs. Source, dates, coverage, cache state and history limitations are visible. Yahoo max-history is attempted first; FRED up to 10 years is the US fallback, and MSCI has no proxy.
+- Validation: 249 offline Python tests, 22 updater assertions; live upstream/LXC behavior still needs owner verification. A merge to `main` triggers the existing cron auto-deploy; it is not evidence of live upstream success.
 
 ### 2026-11-05 — Session 22: Pick tab — best pick, buy price, Malaysian-time window, sell plan — D29
 

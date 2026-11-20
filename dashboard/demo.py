@@ -274,3 +274,8 @@ def fetch_news(candidates, *, days=7, per_symbol=3, now=None):
                         "carry no links. They are not real news."),
         "demo": True,
     }
+
+
+def index_drawdown_history(yahoo_symbol, fred_symbol):
+    bases = {"^GSPC": 5700, "^NDX": 20000, "^990100-USD-STRD": 3700, "^DJI": 42000}
+    return _walk("drawdown:" + yahoo_symbol, bases[yahoo_symbol], 365), "DEMO synthetic history"
