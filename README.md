@@ -143,6 +143,24 @@ Preview without a server (sample data): `ECON_DEMO=1 python3 dashboard/app.py`
 - Descriptive only. Annual data is history, not today's economy, and nothing on
   the tab is a forecast or investment advice.
 
+## Index drawdowns
+
+Open **Drawdowns** (`/drawdowns`) for the S&P 500, Nasdaq 100, MSCI World
+(USD price-return index), and Dow Jones Industrial Average. `/api/drawdowns`
+returns the same data; `/api/summary` includes it as `drawdowns`.
+
+Each card shows the latest available daily index value in points, the highest
+**daily close in the available history**, and `(latest / high - 1) × 100`.
+The high is not a verified all-time or intraday record: Yahoo's maximum
+available history may not cover inception. If Yahoo is unavailable, the US
+indices fall back to FRED's up-to-10-year history; MSCI World has no substitute
+and is shown as unavailable rather than using an ETF. Each card shows source,
+history range, dates, and last successful fetch. Daily values can be delayed or
+include the current incomplete session; they are not guaranteed real-time.
+Data is rechecked at most hourly and failures retain a visibly cached reading.
+After deployment, check `/api/drawdowns` on the LXC: Yahoo was previously
+rate-limited there, so MSCI availability in particular needs live verification.
+
 ## Stocks watchlist
 
 - `/stocks` — every passing name from the editable universe in

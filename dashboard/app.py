@@ -11,6 +11,8 @@ Python stdlib only (no pip deps). Runs as a systemd service on the LXC.
 Endpoints:  /             the dashboard
             /summary      prose summary
             /economies    Economy 101 (US vs Malaysia explainer)
+            /drawdowns    index peak-to-current drawdowns
+            /api/drawdowns index drawdown data as JSON
             /stocks       short-term stock screen
             /pick         best-pick planner (price, MYT timing, sell plan)
             /api/summary  data as JSON
@@ -38,6 +40,7 @@ import alerts
 import briefing
 import config
 import economy
+import drawdown
 import pick as pick_planner
 import render
 import sources
@@ -383,6 +386,13 @@ def build_registry():
     reg.append(("economy_history", economy_history, config.TTL.get(
         "economy", 24 * 60 * 60)))
 
+    # One independently cached history per index; one outage cannot blank peers.
+    for name, symbol, fred in drawdown.INDICES:
+        def fetch_drawdown(n=name, sym=symbol, fid=fred):
+            rows, source = backend.index_drawdown_history(sym, fid)
+            return drawdown.from_history(n, rows, source)
+        reg.append((f"drawdown:{symbol}", fetch_drawdown, drawdown.TTL))
+
     return reg
 
 
@@ -402,7 +412,7 @@ def warm_all(force=False):
         # The stock screen fans out across a fixed watchlist. If every provider
         # fails, honour its 1 h TTL even with no last-good cache so a 5 min board
         # refresh does not repeat the full stock-source cascade.
-        if (not force and key == "stock_screen" and entry and entry.get("err")
+        if (not force and (key == "stock_screen" or key.startswith("drawdown:")) and entry and entry.get("err")
                 and (time.time() - entry.get("attempted_at", entry.get("at", 0))) < ttl):
             continue
         todo.append((key, fn, ttl))
@@ -966,11 +976,28 @@ def summary():
         "providers": providers,
         "stock_screen": stock_screen_data,
         "economy_history": get_data("economy_history") or {},
+        "drawdowns": drawdown_view(),
     }
     out["pick"] = build_pick(stock_screen_data, demo=config.DEMO)
     out["briefing"] = briefing.build_briefing(out)
     out["economy"] = economy.build_economy(out)
     return out
+
+
+def drawdown_view():
+    items = []
+    for name, symbol, _ in drawdown.INDICES:
+        entry = cache_get(f"drawdown:{symbol}") or {}
+        data = entry.get("data")
+        item = dict(data) if isinstance(data, dict) else {"name": name}
+        item["symbol"] = symbol
+        item["status"] = ("unavailable" if not data else
+                          "cached" if entry.get("err") or not cache_valid(entry) else "ok")
+        item["checked_at_utc"] = (datetime.fromtimestamp(entry["at"], timezone.utc)
+                                  .isoformat(timespec="seconds") if entry.get("at") else None)
+        items.append(item)
+    return {"items": items, "refresh_interval_seconds": drawdown.TTL,
+            "method": "Latest daily value versus highest daily close in available history; history may not cover inception."}
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -1020,6 +1047,12 @@ class Handler(BaseHTTPRequestHandler):
                     refresh=config.REFRESH_SECONDS,
                 )
                 self._send(200, page.encode(), "text/html; charset=utf-8")
+            elif path == "/drawdowns":
+                page = render.build_drawdown_page(drawdown_view(), demo=config.DEMO,
+                    generated_at=datetime.now(timezone.utc).astimezone(), refresh=config.REFRESH_SECONDS)
+                self._send(200, page.encode(), "text/html; charset=utf-8")
+            elif path == "/api/drawdowns":
+                self._send(200, json.dumps(drawdown_view(), indent=1).encode(), "application/json")
             elif path == "/economies":
                 s = summary()
                 page = render.build_economy_page(

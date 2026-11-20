@@ -589,6 +589,7 @@ def tabs(active):
             + link("/", "board", "Board")
             + link("/summary", "summary", "Summary")
             + link("/economies", "economies", "Economy 101")
+            + link("/drawdowns", "drawdowns", "Drawdowns")
             + link("/stocks", "stocks", "Stocks")
             + link("/pick", "pick", "Pick")
             + "</nav>")
@@ -2027,6 +2028,44 @@ quickly.</footer>
     page_html = page_html.replace("<title>econ — world at a glance</title>",
                                  f"<title>{esc(title)}</title>")
     return page_html
+
+def build_drawdown_page(view, *, demo=False, generated_at=None, refresh=300):
+    now = generated_at or datetime.now(timezone.utc).astimezone()
+    banner = '<span class="badge demo">DEMO MODE — sample data</span>' if demo else ""
+    cards = []
+    for item in view.get("items", []):
+        name = esc(item.get("name") or "Index")
+        if item.get("current") is None:
+            cards.append(f'<article class="stock-card"><h3>{name}</h3>'
+                         '<p class="note">Awaiting index history. No estimate available.</p></article>')
+            continue
+        status = ('<span class="badge cached">CACHED / STALE</span>'
+                  if item.get("status") == "cached" else '<span class="badge">Daily data</span>')
+        cards.append(f'''<article class="stock-card">
+  <div class="stock-head"><h3>{name}</h3>{status}</div>
+  <div class="stock-stats">
+    <div class="stock-stat"><small>Latest value · points</small><b>{fmt_num(item["current"])}</b></div>
+    <div class="stock-stat"><small>Highest available close · points</small><b>{fmt_num(item["peak"])}</b></div>
+    <div class="stock-stat"><small>Drawdown from high</small><b class="stock-pct down">{item["drawdown_pct"]:.2f}%</b></div>
+  </div>
+  <p class="stock-meta">Latest date: {esc(item.get("current_date"))} · Peak date: {esc(item.get("peak_date"))}<br>
+  Available history: {esc(item.get("history_start"))} to {esc(item.get("history_end"))}<br>
+  Source: {esc(item.get("source"))} · Last successful fetch: {esc(item.get("checked_at_utc") or "unknown")}</p>
+</article>''')
+    body = f'''<header><h1>ECON<span>.</span>world</h1>
+<span class="updated">updated {esc(now.strftime("%Y-%m-%d %H:%M %Z"))}</span>{banner}</header>
+{tabs("drawdowns")}
+<div class="stock-intro"><h2>Index drawdowns</h2>
+<p>Track how far each index is below its highest available daily close. Drawdown = (latest ÷ high − 1) × 100.</p>
+<p><strong>History coverage matters:</strong> the high is the highest close in the history returned by the source, not a verified all-time or intraday record. FRED fallback covers up to 10 years; Yahoo history may also be incomplete. Values are index points, not ETF prices. MSCI World is the USD price-return index.</p>
+<p>Latest daily values may be delayed or include a still-open session; they are not guaranteed real-time. Sources are checked at most hourly; cached readings are flagged. Not investment advice.</p></div>
+<div class="stock-grid">{''.join(cards)}</div>'''
+    return (PAGE.replace("__STYLE__", STYLE)
+                .replace("__REFRESH__", str(max(60, int(refresh))))
+                .replace("__BODY__", body)
+                .replace("<title>econ — world economy at a glance</title>",
+                         "<title>Index drawdowns — econ</title>"))
+
 
 def build_page(sections, *, demo=False, generated_at=None, refresh=300,
                errors=None, providers=None):
