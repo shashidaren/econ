@@ -83,6 +83,124 @@ def _risk_label(volatility_pct, drawdown_pct):
     return "High"
 
 
+def _ema_series(values, period):
+    """EMA series aligned to `values` (None until `period` observations)."""
+    out = [None] * len(values)
+    if len(values) < period:
+        return out
+    k = 2.0 / (period + 1.0)
+    seed = statistics.fmean(values[:period])
+    out[period - 1] = seed
+    for i in range(period, len(values)):
+        prev = out[i - 1] if out[i - 1] is not None else seed
+        out[i] = values[i] * k + prev * (1.0 - k)
+    return out
+
+
+def _rsi_value(closes, period=14):
+    """Wilder RSI at the last close (None when history is too short)."""
+    if len(closes) <= period:
+        return None
+    gains, losses = [], []
+    for a, b in zip(closes[:-1], closes[1:]):
+        chg = b - a
+        gains.append(max(chg, 0.0))
+        losses.append(max(-chg, 0.0))
+    avg_gain = statistics.fmean(gains[:period])
+    avg_loss = statistics.fmean(losses[:period])
+    for i in range(period, len(gains)):
+        avg_gain = (avg_gain * (period - 1) + gains[i]) / period
+        avg_loss = (avg_loss * (period - 1) + losses[i]) / period
+    if avg_loss == 0:
+        return 100.0 if avg_gain > 0 else 50.0
+    rs = avg_gain / avg_loss
+    return 100.0 - 100.0 / (1.0 + rs)
+
+
+def _extra_metrics(rows, closes, sma20, sma50, vol20, daily_returns):
+    """Ensemble features for the Pick tab (close-based proxies only).
+
+    The pipeline carries daily closes + volumes (no OHLC), so RSI uses
+    close-to-close changes, the Donchian band uses closes, and the ATR proxy
+    is the mean absolute daily move. Every value uses data up to the last bar.
+    """
+    close = closes[-1]
+    extra = {
+        "rsi14": _rsi_value(closes, 14),
+        "sharpe20": None, "sortino20": None,
+        "macd": None, "macd_signal": None, "macd_hist": None,
+        "bollinger_pct_b": None, "zscore20": None,
+        "donchian20": None, "volume_ratio20": None,
+        "obv_slope20": None, "dist_high60_pct": None,
+    }
+    # Sharpe / Sortino over the last 20 daily returns.
+    if len(daily_returns) >= 15:
+        try:
+            mean_ret = statistics.fmean(daily_returns)
+            sd_ret = statistics.stdev(daily_returns)
+            if sd_ret > 0:
+                extra["sharpe20"] = mean_ret / sd_ret * math.sqrt(252.0)
+            downside = [r for r in daily_returns if r < 0]
+            if downside:
+                dd_dev = math.sqrt(statistics.fmean([r * r for r in downside]))
+                if dd_dev > 0:
+                    extra["sortino20"] = mean_ret / dd_dev * math.sqrt(252.0)
+        except statistics.StatisticsError:
+            pass
+    # MACD (12, 26, 9) on closes.
+    ema12 = _ema_series(closes, 12)
+    ema26 = _ema_series(closes, 26)
+    macd_line = [(a - b) if (a is not None and b is not None) else None
+                 for a, b in zip(ema12, ema26)]
+    macd_vals = [v for v in macd_line if v is not None]
+    if macd_vals:
+        extra["macd"] = macd_vals[-1]
+        if len(macd_vals) >= 9:
+            seed = statistics.fmean(macd_vals[:9])
+            k = 2.0 / 10.0
+            prev = seed
+            for v in macd_vals[9:]:
+                prev = v * k + prev * (1.0 - k)
+            extra["macd_signal"] = prev
+            extra["macd_hist"] = macd_vals[-1] - prev
+    # Bollinger %B + z-score (20, 2σ).
+    if len(closes) >= 20:
+        window = closes[-20:]
+        sd20 = statistics.stdev(window) if len(window) >= 2 else None
+        if sd20:
+            upper, lower = sma20 + 2.0 * sd20, sma20 - 2.0 * sd20
+            if upper != lower:
+                extra["bollinger_pct_b"] = (close - lower) / (upper - lower)
+            extra["zscore20"] = (close - sma20) / sd20
+        hi20, lo20 = max(window), min(window)
+        extra["donchian20"] = ((close - lo20) / (hi20 - lo20)) if hi20 != lo20 else 0.5
+    if len(closes) >= 60:
+        hi60 = max(closes[-60:])
+        extra["dist_high60_pct"] = ((close / hi60) - 1.0) * 100.0 if hi60 else None
+    # Volume ratio + OBV slope (20 sessions).
+    vols = [r[2] for r in rows[-20:]]
+    vols_known = [v for v in vols if v is not None]
+    if len(vols_known) >= 15 and rows[-1][2] is not None:
+        avg_vol = statistics.fmean(vols_known)
+        if avg_vol > 0:
+            extra["volume_ratio20"] = rows[-1][2] / avg_vol
+    if len(vols_known) >= 15:
+        obv, running = [], 0.0
+        for i in range(len(rows)):
+            if i > 0:
+                chg = rows[i][1] - rows[i - 1][1]
+                vol = rows[i][2] or 0.0
+                if chg > 0:
+                    running += vol
+                elif chg < 0:
+                    running -= vol
+            obv.append(running)
+        avg_vol = statistics.fmean(vols_known) or 1.0
+        extra["obv_slope20"] = (obv[-1] - obv[-21]) / (avg_vol * 20.0) \
+            if len(obv) >= 21 else None
+    return extra
+
+
 def _metrics(rows):
     closes = [r[1] for r in rows]
     recent = rows[-60:]
@@ -128,6 +246,7 @@ def _metrics(rows):
     window = [r for r in rows if week_base and r[0] >= week_base[0]] or rows[-6:]
     week_high = max(r[1] for r in window)
     week_low = min(r[1] for r in window)
+    extra = _extra_metrics(rows, closes, sma20, sma50, vol20, daily_returns)
     return {
         "close": close,
         "as_of": rows[-1][0],
@@ -146,6 +265,7 @@ def _metrics(rows):
         "vol20_annual_pct": vol20,
         "drawdown60_pct": drawdown,
         "avg_dollar_volume20": avg_dollar_volume,
+        **extra,
     }
 
 
