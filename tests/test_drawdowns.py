@@ -362,6 +362,30 @@ class DrawdownTest(unittest.TestCase):
             self.assertEqual(merged["close_peak"], 6000.0)
             self.assertAlmostEqual(merged["close_drawdown_pct"], (5950.0 / 6000.0 - 1.0) * 100.0)
 
+    def test_gold_drawdown_and_indicative_myr_per_gram(self):
+        today = date.today()
+        gold_history = drawdown.from_history("Gold", [
+            ((today - timedelta(days=2)).isoformat(), 3000.0),
+            ((today - timedelta(days=1)).isoformat(), 3200.0),
+            (today.isoformat(), 3100.0),
+        ], "Yahoo GC=F", today=today)
+        now_dt = datetime.now(timezone.utc)
+        with (patch.dict(app.CACHE, {}, clear=True),
+              patch.object(app, "save_disk_cache")):
+            app.cache_put("drawdown:gold", gold_history, ttl=drawdown.TTL)
+            app.cache_put("fx", [{
+                "name": "Malaysian Ringgit (MYR)", "close": 4.5,
+                "date": today.isoformat(), "source": "ECB",
+            }], ttl=config.TTL["fx"])
+            gold = app.drawdown_view(now=now_dt)["items"][-1]
+
+        self.assertEqual(gold["symbol"], "xauusd")
+        self.assertAlmostEqual(gold["close_drawdown_pct"], (3100 / 3200 - 1) * 100)
+        self.assertAlmostEqual(
+            gold["price_per_gram_myr"], 3100 * 4.5 / drawdown.GOLD_GRAMS_PER_TROY_OUNCE,
+            places=2)
+        self.assertEqual(gold["myr_rate_date"], today.isoformat())
+
     def test_render_escapes_source_and_labels_coverage(self):
         html = render.build_drawdown_page({"items": [{
             "name": "<index>",
@@ -406,6 +430,18 @@ class DrawdownTest(unittest.TestCase):
         self.assertIn("Fetch latest values", html)
         self.assertIn("/drawdowns?refresh=1", html)
 
+        gold_html = render.build_drawdown_page({"items": [{
+            "name": "Gold", "symbol": "xauusd", "unit": "USD / troy oz",
+            "current": 3100.0, "current_date": "2026-11-20",
+            "price_per_gram_myr": 448.50, "myr_rate": 4.5,
+            "myr_rate_date": "2026-11-20",
+            "price_per_gram_note": "Indicative conversion.",
+            "source": "Yahoo GC=F", "status": "ok",
+        }]})
+        self.assertIn("RM 448.50", gold_html)
+        self.assertIn("per gram", gold_html)
+        self.assertIn("USD/MYR reference 4.5000", gold_html)
+
     def test_manual_refresh_route_fetches_drawdowns_then_cleans_url(self):
         server = ThreadingHTTPServer(("127.0.0.1", 0), app.Handler)
         thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -417,7 +453,7 @@ class DrawdownTest(unittest.TestCase):
                 # URL instead of forcing another provider fetch on auto-refresh.
                 with urlopen(base + "/drawdowns?refresh=1") as response:
                     self.assertEqual(response.geturl(), base + "/drawdowns")
-                    self.assertIn("Index drawdowns", response.read().decode())
+                    self.assertIn("Market drawdowns", response.read().decode())
                 refresh.assert_called_once_with()
         finally:
             server.shutdown()
@@ -440,7 +476,7 @@ class DrawdownTest(unittest.TestCase):
         self.assertTrue(sources.provider_available(sources.SINA_INDEX_QUOTE_KEY))
         self.assertTrue(sources.provider_available(sources.MSCI_KEY))
         self.assertIn("drawdown_quotes", called)
-        self.assertEqual(sum(1 for k in called if k.startswith("drawdown:")), 4)
+        self.assertEqual(sum(1 for k in called if k.startswith("drawdown:")), 5)
 
     def test_warm_all_immediately_upgrades_legacy_close_only_drawdown_cache(self):
         now_ts = time.time()
@@ -485,11 +521,12 @@ class DrawdownTest(unittest.TestCase):
         try:
             base = f"http://127.0.0.1:{server.server_port}"
             with urlopen(base + "/drawdowns") as response:
-                self.assertIn("Index drawdowns", response.read().decode())
+                self.assertIn("Market drawdowns", response.read().decode())
             with urlopen(base + "/api/drawdowns") as response:
                 data = json.load(response)
-                self.assertEqual(len(data["items"]), 4)
+                self.assertEqual(len(data["items"]), 5)
                 self.assertEqual(data["items"][2]["name"], "MSCI World")
+                self.assertEqual(data["items"][4]["name"], "Gold")
                 self.assertIn("quotes", data)
         finally:
             server.shutdown()
