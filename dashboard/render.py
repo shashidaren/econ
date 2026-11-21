@@ -2181,6 +2181,19 @@ def build_drawdown_page(view, *, demo=False, generated_at=None, refresh=300):
         close_peak_val = f"<b>{fmt_num(close_peak)}</b>" if close_peak is not None else "<b>—</b>"
         close_peak_sub = esc(close_peak_date or "available history")
         close_dd_val = _fmt_dd_pct(close_dd, above_pct=above_close)
+        metric_unit = "USD/oz" if item.get("symbol") == "xauusd" else "pts"
+        gold_myr_price = item.get("price_per_gram_myr")
+        gold_myr_html = (
+            f'<div class="stock-price" style="font-size:1.25rem;margin-top:5px">'
+            f'RM {fmt_num(gold_myr_price, 2)} <span class="stock-name">per gram</span></div>'
+            f'<div class="stock-close-anchor">Indicative · USD/MYR reference {fmt_num(item.get("myr_rate"), 4)} '
+            f'({esc(item.get("myr_rate_date") or "date unknown")})</div>'
+            f'<div class="stock-close-anchor">{esc(item.get("price_per_gram_note") or "")}</div>'
+            if gold_myr_price is not None else (
+                '<div class="stock-close-anchor">MYR/gram unavailable: '
+                + esc(item.get("price_per_gram_note") or "fresh USD/MYR reference unavailable")
+                + '</div>')
+        ) if item.get("symbol") == "xauusd" else ""
         close_dd_sub = (
             f"+{above_close:.2f}% above prior close high"
             if above_close > 0.005
@@ -2190,13 +2203,13 @@ def build_drawdown_page(view, *, demo=False, generated_at=None, refresh=300):
         cards.append(f'''<article class="stock-card">
   <div class="stock-head"><h3>{name}</h3>{status}</div>
   <div>
-    <div class="stock-price">{fmt_num(item["current"])} <span class="stock-name">points</span></div>
-    {intraday_move_html}{close_anchor_html}
+    <div class="stock-price">{fmt_num(item["current"])} <span class="stock-name">{esc(item.get("unit") or "points")}</span></div>
+    {gold_myr_html}{intraday_move_html}{close_anchor_html}
   </div>
   <div class="econ-stats" style="margin-top:10px">
-    <div class="econ-stat"><small>Intraday high · pts</small>{intra_peak_val}<span>{intra_peak_sub}</span></div>
+    <div class="econ-stat"><small>Intraday high · {metric_unit}</small>{intra_peak_val}<span>{intra_peak_sub}</span></div>
     <div class="econ-stat"><small>From intraday high</small>{intra_dd_val}<span>{intra_dd_sub}</span></div>
-    <div class="econ-stat"><small>Closing high · pts</small>{close_peak_val}<span>{close_peak_sub}</span></div>
+    <div class="econ-stat"><small>Closing high · {metric_unit}</small>{close_peak_val}<span>{close_peak_sub}</span></div>
     <div class="econ-stat"><small>From closing high</small>{close_dd_val}<span>{esc(close_dd_sub)}</span></div>
   </div>
   <p class="stock-meta">{quote_meta_line}Latest session date: {esc(item.get("current_date"))}<br>
@@ -2206,11 +2219,12 @@ def build_drawdown_page(view, *, demo=False, generated_at=None, refresh=300):
     body = f'''<header><h1>ECON<span>.</span>world</h1>
 <span class="updated">updated {esc(now.strftime("%Y-%m-%d %H:%M %Z"))}</span>{banner}</header>
 {tabs("drawdowns")}
-<div class="stock-intro"><h2>Index drawdowns</h2>
-<p>Track how far each index sits below both its <strong>intraday high</strong> and its <strong>highest daily close</strong> using live / ~15-min-delayed index points. Drawdown = (latest ÷ high − 1) × 100.</p>
+<div class="stock-intro"><h2>Market drawdowns</h2>
+<p>Track how far each index and the gold price sit below their <strong>intraday high</strong> (where available) and <strong>highest daily close</strong>. Indexes use live / ~15-min-delayed levels where available; gold uses USD per troy ounce. Drawdown = (latest ÷ high − 1) × 100.</p>
+<p>Gold's indicative Malaysian-ringgit price per gram converts the latest USD/oz close using the dashboard's USD/MYR reference rate. It is not a local dealer quote and excludes premiums, spreads and jewellery costs.</p>
 <p><strong>Why two columns?</strong> Financial headlines and terminals differ: some quote drawdown from the record intraday print, while others measure from the highest settled close. Showing both side-by-side reconciles either convention.</p>
-<p><strong>History coverage matters:</strong> peaks reflect the history returned by the active source, not a verified all-time record back to index inception. Values are index points, not ETF prices. MSCI World is the official USD price-return index (<code>990100 USD STRD</code>, daily end-of-day closes).</p>
-<p>US index quotes re-check every 5 minutes and daily histories re-check hourly; cached readings are flagged. Use <strong>Fetch latest values</strong> above to force a fresh pull of histories and quotes now. Not investment advice.</p>{quotes_note}</div>
+<p><strong>History coverage matters:</strong> peaks reflect the history returned by the active source, not a verified all-time record back to index inception. Index values are points, not ETF prices. Gold history is USD per troy ounce. MSCI World is the official USD price-return index (<code>990100 USD STRD</code>, daily end-of-day closes).</p>
+<p>US index quotes re-check every 5 minutes; daily histories and gold re-check hourly. Cached readings are flagged. Use <strong>Fetch latest values</strong> above to force a fresh pull now. Not investment advice.</p>{quotes_note}</div>
 <div class="stock-grid">{''.join(cards)}</div>'''
     return (PAGE.replace("__STYLE__", STYLE)
                 .replace("__REFRESH__", str(max(60, int(refresh))))
@@ -2220,7 +2234,7 @@ def build_drawdown_page(view, *, demo=False, generated_at=None, refresh=300):
                 .replace("document.getElementById('refresh-now').addEventListener('click', () => location.reload());",
                          "document.getElementById('refresh-now').addEventListener('click', () => { status.textContent = 'Fetching latest drawdown histories & quotes…'; location.assign('/drawdowns?refresh=1'); });")
                 .replace("<title>econ — world at a glance</title>",
-                         "<title>Index drawdowns — econ</title>"))
+                         "<title>Market drawdowns — econ</title>"))
 
 
 def build_page(sections, *, demo=False, generated_at=None, refresh=300,

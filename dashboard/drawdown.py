@@ -10,6 +10,11 @@ INDICES = (
     ("MSCI World", "^990100-USD-STRD", None),
     ("Dow Jones Industrial Average", "^DJI", "DJIA"),
 )
+# Gold uses the dashboard's XAU/USD quote mapping (USD per troy ounce).
+GOLD_NAME = "Gold"
+GOLD_SYMBOL = "xauusd"
+GOLD_GRAMS_PER_TROY_OUNCE = 31.1034768
+GOLD_HISTORY_DAYS = 365
 TTL = 60 * 60
 QUOTE_TTL = 5 * 60
 

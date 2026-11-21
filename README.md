@@ -146,12 +146,16 @@ Preview without a server (sample data): `ECON_DEMO=1 python3 dashboard/app.py`
 ## Index drawdowns
 
 Open **Drawdowns** (`/drawdowns`) for the S&P 500, Nasdaq 100, MSCI World
-(USD price-return index), and Dow Jones Industrial Average. `/api/drawdowns`
+(USD price-return index), Dow Jones Industrial Average, and gold. `/api/drawdowns`
 returns the same data; `/api/summary` includes it as `drawdowns`.
 
-Each card displays the latest live / ~15-minute-delayed index level in points
+Each index card displays the latest live / ~15-minute-delayed level in points
 (or latest settled daily close) alongside **both** drawdown conventions
-side-by-side so it reconciles with either live reporting style:
+side-by-side so it reconciles with either live reporting style. Gold is shown
+in USD per troy ounce using daily price history; its card also shows an
+indicative MYR-per-gram conversion when both the gold close and USD/MYR reference
+are fresh. The calculation is `USD/oz × USD/MYR ÷ 31.1034768`; it is not a local
+retail quote and excludes dealer premiums, spreads and jewellery costs.
 - **Intraday high & drawdown from intraday high:** `(latest / intraday_high - 1) × 100`
   when daily OHLC history is available (Sina US daily K, Nasdaq index historical,
   Tencent raw K-line, or Yahoo daily bars).

@@ -393,6 +393,18 @@ def build_registry():
             return drawdown.from_history(n, rows, source)
         reg.append((f"drawdown:{symbol}", fetch_drawdown, drawdown.TTL))
 
+    # Gold is shown alongside indices using the existing XAU/USD history
+    # cascade. It is quoted in USD per troy ounce; drawdown history is daily.
+    def fetch_gold_drawdown():
+        rows = backend.stooq_history(
+            drawdown.GOLD_SYMBOL, days=drawdown.GOLD_HISTORY_DAYS)
+        source = ("DEMO synthetic history" if config.DEMO else
+                  (sources._LAST_SOURCE.get(drawdown.GOLD_SYMBOL) or ("market",))[0])
+        item = drawdown.from_history(drawdown.GOLD_NAME, rows, source)
+        item["unit"] = "USD / troy oz"
+        return item
+    reg.append(("drawdown:gold", fetch_gold_drawdown, drawdown.TTL))
+
     # 8. Live / ~15-min-delayed index quotes for `/drawdowns` (5-min TTL).
     # Keeps latest index points and intraday/closing peaks fresh between hourly
     # daily-history refreshes.
@@ -1023,7 +1035,7 @@ def summary():
 
 
 def refresh_drawdowns():
-    """Force only the four drawdown histories and their live index quotes to refresh.
+    """Force only the index and gold histories plus live index quotes to refresh.
 
     This powers the explicit control on the Drawdowns tab.  It deliberately
     avoids warming the rest of the dashboard, whose providers and cadences are
@@ -1123,15 +1135,65 @@ def drawdown_view(*, now: datetime | None = None):
                                   .isoformat(timespec="seconds") if entry.get("at") else None)
         items.append(item)
 
+    # Gold's market history is USD per troy ounce. Convert the latest daily
+    # close to MYR/gram using the board's existing USD/MYR ECB reference rate;
+    # suppress the conversion if either input is missing or stale.
+    gold_entry = cache_get("drawdown:gold") or {}
+    gold_data = gold_entry.get("data")
+    gold_item = dict(gold_data) if isinstance(gold_data, dict) else {
+        "name": drawdown.GOLD_NAME, "unit": "USD / troy oz"}
+    gold_item["symbol"] = drawdown.GOLD_SYMBOL
+    gold_item["unit"] = "USD / troy oz"
+    gold_item["status"] = ("unavailable" if not gold_data else
+                            "cached" if gold_entry.get("err") or not cache_valid(gold_entry) else "ok")
+    gold_item["checked_at_utc"] = (
+        datetime.fromtimestamp(gold_entry["at"], timezone.utc).isoformat(timespec="seconds")
+        if gold_entry.get("at") else None)
+
+    fx_entry = cache_get("fx") or {}
+    fx_quotes = fx_entry.get("data") if isinstance(fx_entry.get("data"), list) else []
+    myr_quote = next((q for q in fx_quotes if isinstance(q, dict)
+                      and str(q.get("name") or "").endswith("(MYR)")), None)
+    fx_rate = None
+    fx_date = myr_quote.get("date") if myr_quote else None
+    conversion_ok = bool(gold_data and myr_quote and cache_valid(gold_entry)
+                         and cache_valid(fx_entry) and not gold_entry.get("err")
+                         and not fx_entry.get("err"))
+    if conversion_ok:
+        try:
+            fx_rate = float(myr_quote.get("close"))
+            fx_age_days = (now_dt.date() - date.fromisoformat(str(fx_date)[:10])).days
+            gold_date = date.fromisoformat(str(gold_item.get("current_date"))[:10])
+            gold_age_days = (now_dt.date() - gold_date).days
+            conversion_ok = (math.isfinite(fx_rate) and fx_rate > 0
+                             and 0 <= fx_age_days <= 5
+                             and 0 <= gold_age_days <= 10)
+        except (TypeError, ValueError, OverflowError):
+            conversion_ok = False
+    gold_item["price_per_gram_myr"] = (
+        round(float(gold_item["current"]) * fx_rate /
+              drawdown.GOLD_GRAMS_PER_TROY_OUNCE, 2)
+        if conversion_ok and gold_item.get("current") is not None else None)
+    gold_item["myr_rate"] = fx_rate if conversion_ok else None
+    gold_item["myr_rate_date"] = fx_date if conversion_ok else None
+    gold_item["myr_source"] = "ECB reference via Frankfurter" if conversion_ok else None
+    gold_item["price_per_gram_note"] = (
+        "Indicative conversion from USD/troy oz using USD/MYR reference rate; "
+        "excludes retail premiums, spreads and jewellery costs."
+        if conversion_ok else "A fresh gold close and USD/MYR reference are required.")
+    items.append(gold_item)
+
     return {
         "items": items,
         "quotes": quotes_view,
         "refresh_interval_seconds": drawdown.TTL,
         "quote_refresh_interval_seconds": quote_interval,
         "method": (
-            "Latest live / ~15-min-delayed index level (or latest settled daily close) "
-            "measured against both the highest intraday level and the highest daily "
-            "close in available history; history may not cover index inception."
+            "Index items use the latest live / ~15-min-delayed level (or latest "
+            "settled daily close), measured against the highest intraday level and "
+            "daily close in available history. Gold uses daily USD/troy-ounce closes; "
+            "MYR/gram is indicative and uses a fresh USD/MYR reference. History may "
+            "not cover index inception."
         ),
     }
 
