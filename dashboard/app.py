@@ -984,6 +984,26 @@ def summary():
     return out
 
 
+def refresh_drawdowns():
+    """Force only the four drawdown histories to refresh.
+
+    This powers the explicit control on the Drawdowns tab.  It deliberately
+    avoids warming the rest of the dashboard, whose providers and cadences are
+    unrelated.  fetch_into_cache retains last-good values when an upstream is
+    temporarily unavailable.
+    """
+    jobs = [item for item in REGISTRY if item[0].startswith("drawdown:")]
+    with ThreadPoolExecutor(max_workers=1 if config.DEMO else 4,
+                            thread_name_prefix="drawdown-refresh") as pool:
+        futures = [pool.submit(fetch_into_cache, key, fn, ttl)
+                   for key, fn, ttl in jobs]
+        for future in futures:
+            try:
+                future.result()
+            except Exception:  # pragma: no cover - fetch_into_cache is defensive
+                traceback.print_exc()
+
+
 def drawdown_view():
     items = []
     for name, symbol, _ in drawdown.INDICES:
@@ -1025,8 +1045,21 @@ class Handler(BaseHTTPRequestHandler):
         self.do_GET()
 
     def do_GET(self):  # noqa: N802 (stdlib naming)
-        path = urlparse(self.path).path
+        parsed = urlparse(self.path)
+        path = parsed.path
         try:
+            # A normal page reload only re-renders cached values.  The explicit
+            # Drawdowns refresh control asks providers for new daily histories,
+            # then redirects to a clean URL so later auto-refreshes do not keep
+            # bypassing the one-hour cache.
+            if path == "/drawdowns" and parsed.query == "refresh=1":
+                refresh_drawdowns()
+                self.send_response(303)
+                self.send_header("Location", "/drawdowns")
+                self.send_header("Cache-Control", "no-store")
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
             if path == "/":
                 s = summary()
                 page = render.build_page(

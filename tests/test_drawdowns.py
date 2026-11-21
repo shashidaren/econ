@@ -95,6 +95,26 @@ class DrawdownTest(unittest.TestCase):
         self.assertIn("not a verified all-time", html)
         self.assertIn("CACHED / STALE", html)
         self.assertIn('aria-current="page"', html)
+        self.assertIn("Fetch latest values", html)
+        self.assertIn("/drawdowns?refresh=1", html)
+
+    def test_manual_refresh_route_fetches_drawdowns_then_cleans_url(self):
+        server = ThreadingHTTPServer(("127.0.0.1", 0), app.Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            base = f"http://127.0.0.1:{server.server_port}"
+            with patch.object(app, "refresh_drawdowns") as refresh:
+                # urllib follows the 303, proving the browser lands on the clean
+                # URL instead of forcing another provider fetch on auto-refresh.
+                with urlopen(base + "/drawdowns?refresh=1") as response:
+                    self.assertEqual(response.geturl(), base + "/drawdowns")
+                    self.assertIn("Index drawdowns", response.read().decode())
+                refresh.assert_called_once_with()
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join()
 
     def test_html_and_json_routes(self):
         server = ThreadingHTTPServer(("127.0.0.1", 0), app.Handler)
