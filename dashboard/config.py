@@ -213,6 +213,17 @@ except ValueError:
     STOCK_QUOTE_TTL = 300
 TTL["stock_quotes"] = STOCK_QUOTE_TTL
 
+# --- Live / delayed index quotes (Drawdowns tab overlay) ---------------------
+# Keyless ~15-min-delayed / live index quotes (Sina gb_$inx/gb_$ndx/gb_$dji ->
+# Nasdaq index quote -> Tencent qt.gtimg.cn -> Yahoo chart) refreshed every
+# 5 min so Drawdowns tracks current market levels alongside intraday & closing highs.
+DRAWDOWN_QUOTES_ENABLED = os.environ.get("ECON_DRAWDOWN_QUOTES", "1") not in ("0", "false", "no")
+try:
+    DRAWDOWN_QUOTE_TTL = max(60, int(os.environ.get("ECON_DRAWDOWN_QUOTE_TTL", "300")))
+except ValueError:
+    DRAWDOWN_QUOTE_TTL = 300
+TTL["drawdown_quotes"] = DRAWDOWN_QUOTE_TTL
+
 # --- Stock-movement notifications -------------------------------------------
 # One threshold shared by the Stocks badge and Telegram. Only positive moves
 # are alerted, matching the existing sharp-rise badge. Notifications are opt-in;

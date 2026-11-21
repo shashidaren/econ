@@ -149,17 +149,33 @@ Open **Drawdowns** (`/drawdowns`) for the S&P 500, Nasdaq 100, MSCI World
 (USD price-return index), and Dow Jones Industrial Average. `/api/drawdowns`
 returns the same data; `/api/summary` includes it as `drawdowns`.
 
-Each card shows the latest available daily index value in points, the highest
-**daily close in the available history**, and `(latest / high - 1) × 100`.
-The high is not a verified all-time or intraday record: Yahoo's maximum
-available history may not cover inception. If Yahoo is unavailable, the US
-indices fall back to FRED's up-to-10-year history; MSCI World has no substitute
-and is shown as unavailable rather than using an ETF. Each card shows source,
-history range, dates, and last successful fetch. Daily values can be delayed or
-include the current incomplete session; they are not guaranteed real-time.
-Data is rechecked at most hourly and failures retain a visibly cached reading.
-After deployment, check `/api/drawdowns` on the LXC: Yahoo was previously
-rate-limited there, so MSCI availability in particular needs live verification.
+Each card displays the latest live / ~15-minute-delayed index level in points
+(or latest settled daily close) alongside **both** drawdown conventions
+side-by-side so it reconciles with either live reporting style:
+- **Intraday high & drawdown from intraday high:** `(latest / intraday_high - 1) × 100`
+  when daily OHLC history is available (Sina US daily K, Nasdaq index historical,
+  Tencent raw K-line, or Yahoo daily bars).
+- **Closing high & drawdown from closing high:** `(latest / close_high - 1) × 100`
+  measured against the highest settled daily close in the available history.
+
+**Sources & fallbacks:**
+- **Daily history (`TTL = 3600`):** Yahoo Finance (`period1=0&period2=<now>&interval=1d`
+  to avoid Yahoo's `range=max` monthly-candle coercion) → Sina US daily K
+  (`.INX`, `.NDX`, `.DJI`) → Nasdaq index historical (`NDX`) → Tencent raw
+  daily K-line (`us.INX`, `us.NDX`, `us.DJI`) → MSCI's official public
+  `getLevelDataForGraph` JSON endpoint (`990100 USD STRD`, daily end-of-day
+  closes since 1997 — exact same USD price-return index, never an ETF or total
+  return) → FRED (`SP500`, `NASDAQ100`, `DJIA`, up to 10 years of daily closes).
+- **Live / ~15-min-delayed quote overlay (`TTL = 300`, `ECON_DRAWDOWN_QUOTES=1`):**
+  Sina `hq.sinajs.cn/list=gb_$inx,gb_$ndx,gb_$dji` → Nasdaq `/api/quote/NDX/info?assetclass=index`
+  → Tencent `qt.gtimg.cn/q=usINX,usNDX,usDJI` → Yahoo chart meta. Close-only
+  sources (such as MSCI EOD or FRED) leave the intraday-high column blank (`—`)
+  unless a verified 52-week intraday high covers a peak inside the past 52 weeks.
+- Peaks reflect the history returned by the active source, not a verified
+  all-time record back to index inception. Click **Fetch latest values** on
+  `/drawdowns` to reset drawdown circuit breakers and refresh histories and
+  quotes immediately. Verify live reachability on the LXC with
+  `python3 /opt/econ/dashboard/sources.py --doctor` (§[12/12]).
 
 ## Stocks watchlist
 

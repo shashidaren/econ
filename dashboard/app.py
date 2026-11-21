@@ -393,6 +393,39 @@ def build_registry():
             return drawdown.from_history(n, rows, source)
         reg.append((f"drawdown:{symbol}", fetch_drawdown, drawdown.TTL))
 
+    # 8. Live / ~15-min-delayed index quotes for `/drawdowns` (5-min TTL).
+    # Keeps latest index points and intraday/closing peaks fresh between hourly
+    # daily-history refreshes.
+    def drawdown_quotes_data():
+        symbols = [sym for _name, sym, _fid in drawdown.INDICES]
+        if not config.DRAWDOWN_QUOTES_ENABLED:
+            return {
+                "status": "disabled",
+                "message": "Live index quotes are disabled (ECON_DRAWDOWN_QUOTES=0).",
+                "items": {},
+                "errors": {},
+                "quote_providers": {},
+                "coverage": {"symbols": len(symbols), "with_quotes": 0, "providers": []},
+            }
+        result = backend.index_quotes_batch(symbols)
+        if result.get("status") == "unavailable":
+            prev_entry = cache_get("drawdown_quotes") or {}
+            prev = prev_entry.get("data")
+            prev_at = prev_entry.get("at") or 0
+            if (isinstance(prev, dict) and prev.get("items")
+                    and (time.time() - float(prev_at)) < 3600):
+                degraded = dict(prev)
+                degraded["status"] = "cached"
+                degraded["served_from_cache"] = True
+                degraded["refresh_error"] = str(
+                    result.get("message") or "index quote refresh failed"
+                )[:240]
+                return degraded
+        return result
+
+    reg.append(("drawdown_quotes", drawdown_quotes_data,
+                config.TTL.get("drawdown_quotes", drawdown.QUOTE_TTL)))
+
     return reg
 
 
@@ -407,7 +440,12 @@ def warm_all(force=False):
     todo = []
     for key, fn, ttl in REGISTRY:
         entry = cache_get(key)
-        if not force and cache_valid(entry):
+        is_legacy_drawdown = (
+            key.startswith("drawdown:")
+            and isinstance((entry or {}).get("data"), dict)
+            and "close_peak" not in entry["data"]
+        )
+        if not force and cache_valid(entry) and not is_legacy_drawdown:
             continue
         # The stock screen fans out across a fixed watchlist. If every provider
         # fails, honour its 1 h TTL even with no last-good cache so a 5 min board
@@ -985,14 +1023,21 @@ def summary():
 
 
 def refresh_drawdowns():
-    """Force only the four drawdown histories to refresh.
+    """Force only the four drawdown histories and their live index quotes to refresh.
 
     This powers the explicit control on the Drawdowns tab.  It deliberately
     avoids warming the rest of the dashboard, whose providers and cadences are
     unrelated.  fetch_into_cache retains last-good values when an upstream is
     temporarily unavailable.
     """
-    jobs = [item for item in REGISTRY if item[0].startswith("drawdown:")]
+    if not config.DEMO:
+        for family in ("index_quote", "sina_index", "nasdaq_index",
+                       "tencent_index_kline", "msci"):
+            sources.reset_breakers(family)
+    jobs = [
+        item for item in REGISTRY
+        if item[0].startswith("drawdown:") or item[0] == "drawdown_quotes"
+    ]
     with ThreadPoolExecutor(max_workers=1 if config.DEMO else 4,
                             thread_name_prefix="drawdown-refresh") as pool:
         futures = [pool.submit(fetch_into_cache, key, fn, ttl)
@@ -1004,20 +1049,91 @@ def refresh_drawdowns():
                 traceback.print_exc()
 
 
-def drawdown_view():
+def drawdown_view(*, now: datetime | None = None):
+    now_dt = now or datetime.now(timezone.utc)
+    if now_dt.tzinfo is None:
+        now_dt = now_dt.replace(tzinfo=timezone.utc)
+    now_dt = now_dt.astimezone(timezone.utc)
+    now_ts = now_dt.timestamp()
+
+    quote_interval = int(config.TTL.get("drawdown_quotes") or drawdown.QUOTE_TTL)
+    quotes_entry = cache_get("drawdown_quotes") or {}
+    raw_quotes = quotes_entry.get("data")
+    if not config.DRAWDOWN_QUOTES_ENABLED:
+        quotes_view = {
+            "status": "disabled",
+            "message": "Live index quotes are disabled (ECON_DRAWDOWN_QUOTES=0); showing daily closes.",
+            "items": {},
+            "errors": {},
+            "refresh_interval_seconds": quote_interval,
+        }
+    elif not isinstance(raw_quotes, dict):
+        quotes_view = {
+            "status": "waiting",
+            "message": "Waiting for the 5-minute index quote refresh.",
+            "items": {},
+            "errors": {},
+            "refresh_interval_seconds": quote_interval,
+        }
+    else:
+        quotes_view = dict(raw_quotes)
+        quotes_view["refresh_interval_seconds"] = quote_interval
+        at = quotes_entry.get("at")
+        try:
+            at_f = float(at)
+        except (TypeError, ValueError):
+            at_f = None
+        if at_f is not None:
+            quotes_view["checked_at_utc"] = datetime.fromtimestamp(
+                at_f, timezone.utc
+            ).isoformat(timespec="seconds")
+            quotes_view["next_check_in_seconds"] = max(0, int(at_f + quote_interval - now_ts))
+            if (now_ts - at_f) > 6 * 3600 and not quotes_view.get("demo"):
+                quotes_view["status"] = "stale"
+                quotes_view["message"] = (
+                    "Cached index quotes are older than 6 hours; showing daily "
+                    "closes until the next 5-minute quote refresh."
+                )
+
+    quotes_map = (
+        quotes_view.get("items")
+        if quotes_view.get("status") in ("ok", "partial", "cached")
+        and isinstance(quotes_view.get("items"), dict)
+        else {}
+    )
+    quotes_served_cached = bool(
+        quotes_view.get("served_from_cache")
+        or quotes_view.get("status") == "cached"
+        or quotes_entry.get("err")
+    )
+
     items = []
     for name, symbol, _ in drawdown.INDICES:
         entry = cache_get(f"drawdown:{symbol}") or {}
         data = entry.get("data")
         item = dict(data) if isinstance(data, dict) else {"name": name}
+        raw_q = quotes_map.get(symbol)
+        if data and isinstance(raw_q, dict):
+            item = drawdown.apply_quote(item, raw_q, now=now_dt)
+            item["quote_served_from_cache"] = quotes_served_cached
         item["symbol"] = symbol
         item["status"] = ("unavailable" if not data else
                           "cached" if entry.get("err") or not cache_valid(entry) else "ok")
         item["checked_at_utc"] = (datetime.fromtimestamp(entry["at"], timezone.utc)
                                   .isoformat(timespec="seconds") if entry.get("at") else None)
         items.append(item)
-    return {"items": items, "refresh_interval_seconds": drawdown.TTL,
-            "method": "Latest daily value versus highest daily close in available history; history may not cover inception."}
+
+    return {
+        "items": items,
+        "quotes": quotes_view,
+        "refresh_interval_seconds": drawdown.TTL,
+        "quote_refresh_interval_seconds": quote_interval,
+        "method": (
+            "Latest live / ~15-min-delayed index level (or latest settled daily close) "
+            "measured against both the highest intraday level and the highest daily "
+            "close in available history; history may not cover index inception."
+        ),
+    }
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -1165,6 +1281,23 @@ class Handler(BaseHTTPRequestHandler):
                                   or {}).get("state"),
                     },
                     "telegram": alerts.status(),
+                    "drawdowns": {
+                        "quotes_status": ((s.get("drawdowns") or {}).get("quotes") or {}).get("status"),
+                        "quotes_checked_at_utc": ((s.get("drawdowns") or {}).get("quotes") or {}).get("checked_at_utc"),
+                        "items": [
+                            {
+                                "symbol": it.get("symbol"),
+                                "status": it.get("status"),
+                                "current": it.get("current"),
+                                "current_is_live_quote": bool(it.get("current_is_live_quote")),
+                                "intraday_drawdown_pct": it.get("intraday_drawdown_pct"),
+                                "close_drawdown_pct": it.get("close_drawdown_pct"),
+                                "source": it.get("source"),
+                            }
+                            for it in ((s.get("drawdowns") or {}).get("items") or [])
+                            if isinstance(it, dict)
+                        ],
+                    },
                 }
                 body = json.dumps(payload, default=str, indent=1).encode()
                 self._send(200, body, "application/json")
