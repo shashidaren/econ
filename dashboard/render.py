@@ -2058,12 +2058,16 @@ def build_drawdown_page(view, *, demo=False, generated_at=None, refresh=300):
 <div class="stock-intro"><h2>Index drawdowns</h2>
 <p>Track how far each index is below its highest available daily close. Drawdown = (latest ÷ high − 1) × 100.</p>
 <p><strong>History coverage matters:</strong> the high is the highest close in the history returned by the source, not a verified all-time or intraday record. FRED fallback covers up to 10 years; Yahoo history may also be incomplete. Values are index points, not ETF prices. MSCI World is the USD price-return index.</p>
-<p>Latest daily values may be delayed or include a still-open session; they are not guaranteed real-time. Sources are checked at most hourly; cached readings are flagged. Not investment advice.</p></div>
+<p>Latest daily values may be delayed or include a still-open session; they are not guaranteed real-time. Sources are checked at most hourly; cached readings are flagged. Use <strong>Fetch latest values</strong> above to request fresh histories now; this may take a few seconds and will retain the last successful value if a provider fails. Not investment advice.</p></div>
 <div class="stock-grid">{''.join(cards)}</div>'''
     return (PAGE.replace("__STYLE__", STYLE)
                 .replace("__REFRESH__", str(max(60, int(refresh))))
                 .replace("__BODY__", body)
-                .replace("<title>econ — world economy at a glance</title>",
+                .replace('<button type="button" id="refresh-now">Refresh now</button>',
+                         '<button type="button" id="refresh-now">Fetch latest values</button>')
+                .replace("document.getElementById('refresh-now').addEventListener('click', () => location.reload());",
+                         "document.getElementById('refresh-now').addEventListener('click', () => { status.textContent = 'Fetching latest drawdown histories…'; location.assign('/drawdowns?refresh=1'); });")
+                .replace("<title>econ — world at a glance</title>",
                          "<title>Index drawdowns — econ</title>"))
 
 
