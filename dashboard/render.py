@@ -2029,9 +2029,62 @@ quickly.</footer>
                                  f"<title>{esc(title)}</title>")
     return page_html
 
+def _fmt_dd_pct(val, *, above_pct=0.0):
+    if val is None:
+        return "<b>—</b>"
+    try:
+        vf = float(val)
+    except (TypeError, ValueError):
+        return "<b>—</b>"
+    if not math.isfinite(vf):
+        return "<b>—</b>"
+    if above_pct and above_pct > 0.005:
+        return f'<b class="stock-pct up">{vf:.2f}%</b>'
+    cls = "down" if vf < -0.005 else "flat"
+    return f'<b class="stock-pct {cls}">{vf:.2f}%</b>'
+
+
 def build_drawdown_page(view, *, demo=False, generated_at=None, refresh=300):
     now = generated_at or datetime.now(timezone.utc).astimezone()
     banner = '<span class="badge demo">DEMO MODE — sample data</span>' if demo else ""
+
+    quotes = view.get("quotes") if isinstance(view.get("quotes"), dict) else {}
+    q_status = str(quotes.get("status") or "")
+    q_interval_min = max(1, int(round(int(quotes.get("refresh_interval_seconds") or 300) / 60)))
+    q_next = quotes.get("next_check_in_seconds")
+    q_next_txt = (f", next in ~{max(1, int(round(q_next / 60)))} min"
+                  if isinstance(q_next, (int, float)) and q_next > 0 else "")
+    quotes_note = ""
+    if quotes:
+        if q_status == "disabled":
+            quotes_note = (
+                f'<p class="stock-currency-note">'
+                f'{esc(quotes.get("message") or "Live index quotes are disabled.")}</p>'
+            )
+        elif q_status == "waiting":
+            quotes_note = (
+                f'<p class="stock-currency-note">Index quotes (~15m): '
+                f'{esc(quotes.get("message") or "Waiting for quote refresh.")} '
+                f'Checked every {q_interval_min} min.</p>'
+            )
+        elif q_status in ("unavailable", "stale"):
+            quotes_note = (
+                f'<p class="stock-currency-note">Index quotes unavailable: '
+                f'{esc(quotes.get("message") or "no quote feed answered")} '
+                f'Showing settled daily closes.</p>'
+            )
+        else:
+            q_cov = quotes.get("coverage") if isinstance(quotes.get("coverage"), dict) else {}
+            q_providers = ", ".join(str(p) for p in (q_cov.get("providers") or []))
+            q_fetched = _myt_timestamp(quotes.get("fetched_at_utc"))
+            cached_tag = " (serving last-good cached quotes)" if quotes.get("served_from_cache") else ""
+            quotes_note = (
+                f'<p class="stock-currency-note">Live / ~15m index quotes{esc(cached_tag)}: '
+                f'{esc(quotes.get("message") or "")} '
+                f'Re-checked every {q_interval_min} min{esc(q_next_txt)} · '
+                f'sources: {esc(q_providers or "none")} · fetched {q_fetched}.</p>'
+            )
+
     cards = []
     for item in view.get("items", []):
         name = esc(item.get("name") or "Index")
@@ -2039,26 +2092,125 @@ def build_drawdown_page(view, *, demo=False, generated_at=None, refresh=300):
             cards.append(f'<article class="stock-card"><h3>{name}</h3>'
                          '<p class="note">Awaiting index history. No estimate available.</p></article>')
             continue
-        status = ('<span class="badge cached">CACHED / STALE</span>'
-                  if item.get("status") == "cached" else '<span class="badge">Daily data</span>')
+
+        quote = item.get("quote") if isinstance(item.get("quote"), dict) else None
+        is_live_quote = bool(item.get("current_is_live_quote") and quote)
+        served_cached_q = bool(item.get("quote_served_from_cache"))
+
+        if item.get("status") == "cached":
+            status = '<span class="badge cached">CACHED / STALE</span>'
+        elif is_live_quote:
+            if demo or quote.get("demo"):
+                status = '<span class="quote-delay-pill warn">DEMO quote</span>'
+            elif served_cached_q:
+                status = '<span class="quote-delay-pill warn">cached ~15m quote</span>'
+            else:
+                delay_m = int(quote.get("delay_minutes") or 15)
+                status = f'<span class="quote-delay-pill">~{delay_m}m / live quote</span>'
+        else:
+            status = '<span class="badge">Daily close</span>'
+
+        intraday_move_html = ""
+        close_anchor_html = ""
+        quote_meta_line = ""
+        if is_live_quote:
+            move_bits = []
+            try:
+                chg_f = float(quote.get("change"))
+                pct_f = float(quote.get("change_pct"))
+                if math.isfinite(chg_f) and math.isfinite(pct_f):
+                    cls = "up" if pct_f > 0 else ("down" if pct_f < 0 else "flat")
+                    move_bits.append(
+                        f'<span class="stock-pct {cls}">{chg_f:+,.2f} ({pct_f:+.2f}%)</span>'
+                    )
+            except (TypeError, ValueError):
+                pass
+            try:
+                dl_f = float(quote.get("day_low"))
+                dh_f = float(quote.get("day_high"))
+                if math.isfinite(dl_f) and math.isfinite(dh_f) and dl_f > 0 and dh_f >= dl_f:
+                    move_bits.append(f"Day {fmt_num(dl_f)}–{fmt_num(dh_f)}")
+            except (TypeError, ValueError):
+                pass
+            if move_bits:
+                intraday_move_html = f'<div class="stock-intraday">{" · ".join(move_bits)}</div>'
+
+            d_close = item.get("daily_close")
+            d_date = item.get("daily_close_date")
+            try:
+                dc_f = float(d_close) if d_close is not None else None
+                cur_f = float(item["current"])
+                if dc_f is not None and (abs(cur_f - dc_f) >= 0.01 or d_date != item.get("current_date")):
+                    close_anchor_html = (
+                        f'<div class="stock-close-anchor">History bar close: '
+                        f'{fmt_num(dc_f)} ({esc(d_date or "?")})</div>'
+                    )
+            except (TypeError, ValueError):
+                pass
+
+            q_stamp = (
+                _myt_timestamp(quote.get("as_of_utc"))
+                if quote.get("as_of_utc")
+                else esc(quote.get("as_of_display") or item.get("current_date") or "recent")
+            )
+            quote_meta_line = f"Quote as of: {q_stamp} ({esc(quote.get('source') or 'public feed')})<br>"
+
+        close_peak = item.get("close_peak") if item.get("close_peak") is not None else item.get("peak")
+        close_peak_date = item.get("close_peak_date") or item.get("peak_date")
+        close_dd = (item.get("close_drawdown_pct")
+                    if item.get("close_drawdown_pct") is not None
+                    else item.get("drawdown_pct"))
+        above_close = float(item.get("above_close_peak_pct") or 0.0)
+
+        intraday_peak = item.get("intraday_peak")
+        intraday_peak_date = item.get("intraday_peak_date")
+        intraday_dd = item.get("intraday_drawdown_pct")
+        intraday_note = item.get("intraday_peak_note")
+
+        if intraday_peak is not None:
+            intra_peak_val = f"<b>{fmt_num(intraday_peak)}</b>"
+            intra_peak_sub = esc(intraday_peak_date or intraday_note or "available history")
+            intra_dd_val = _fmt_dd_pct(intraday_dd)
+            intra_dd_sub = esc(intraday_note or "vs intraday high")
+        else:
+            intra_peak_val = "<b>—</b>"
+            intra_peak_sub = "close-only history feed"
+            intra_dd_val = "<b>—</b>"
+            intra_dd_sub = "no intraday highs in source"
+
+        close_peak_val = f"<b>{fmt_num(close_peak)}</b>" if close_peak is not None else "<b>—</b>"
+        close_peak_sub = esc(close_peak_date or "available history")
+        close_dd_val = _fmt_dd_pct(close_dd, above_pct=above_close)
+        close_dd_sub = (
+            f"+{above_close:.2f}% above prior close high"
+            if above_close > 0.005
+            else "vs highest daily close"
+        )
+
         cards.append(f'''<article class="stock-card">
   <div class="stock-head"><h3>{name}</h3>{status}</div>
-  <div class="stock-stats">
-    <div class="stock-stat"><small>Latest value · points</small><b>{fmt_num(item["current"])}</b></div>
-    <div class="stock-stat"><small>Highest available close · points</small><b>{fmt_num(item["peak"])}</b></div>
-    <div class="stock-stat"><small>Drawdown from high</small><b class="stock-pct down">{item["drawdown_pct"]:.2f}%</b></div>
+  <div>
+    <div class="stock-price">{fmt_num(item["current"])} <span class="stock-name">points</span></div>
+    {intraday_move_html}{close_anchor_html}
   </div>
-  <p class="stock-meta">Latest date: {esc(item.get("current_date"))} · Peak date: {esc(item.get("peak_date"))}<br>
+  <div class="econ-stats" style="margin-top:10px">
+    <div class="econ-stat"><small>Intraday high · pts</small>{intra_peak_val}<span>{intra_peak_sub}</span></div>
+    <div class="econ-stat"><small>From intraday high</small>{intra_dd_val}<span>{intra_dd_sub}</span></div>
+    <div class="econ-stat"><small>Closing high · pts</small>{close_peak_val}<span>{close_peak_sub}</span></div>
+    <div class="econ-stat"><small>From closing high</small>{close_dd_val}<span>{esc(close_dd_sub)}</span></div>
+  </div>
+  <p class="stock-meta">{quote_meta_line}Latest session date: {esc(item.get("current_date"))}<br>
   Available history: {esc(item.get("history_start"))} to {esc(item.get("history_end"))}<br>
-  Source: {esc(item.get("source"))} · Last successful fetch: {esc(item.get("checked_at_utc") or "unknown")}</p>
+  History source: {esc(item.get("source"))} · Last history check: {esc(item.get("checked_at_utc") or "unknown")}</p>
 </article>''')
     body = f'''<header><h1>ECON<span>.</span>world</h1>
 <span class="updated">updated {esc(now.strftime("%Y-%m-%d %H:%M %Z"))}</span>{banner}</header>
 {tabs("drawdowns")}
 <div class="stock-intro"><h2>Index drawdowns</h2>
-<p>Track how far each index is below its highest available daily close. Drawdown = (latest ÷ high − 1) × 100.</p>
-<p><strong>History coverage matters:</strong> the high is the highest close in the history returned by the source, not a verified all-time or intraday record. FRED fallback covers up to 10 years; Yahoo history may also be incomplete. Values are index points, not ETF prices. MSCI World is the USD price-return index.</p>
-<p>Latest daily values may be delayed or include a still-open session; they are not guaranteed real-time. Sources are checked at most hourly; cached readings are flagged. Use <strong>Fetch latest values</strong> above to request fresh histories now; this may take a few seconds and will retain the last successful value if a provider fails. Not investment advice.</p></div>
+<p>Track how far each index sits below both its <strong>intraday high</strong> and its <strong>highest daily close</strong> using live / ~15-min-delayed index points. Drawdown = (latest ÷ high − 1) × 100.</p>
+<p><strong>Why two columns?</strong> Financial headlines and terminals differ: some quote drawdown from the record intraday print, while others measure from the highest settled close. Showing both side-by-side reconciles either convention.</p>
+<p><strong>History coverage matters:</strong> peaks reflect the history returned by the active source, not a verified all-time record back to index inception. Values are index points, not ETF prices. MSCI World is the official USD price-return index (<code>990100 USD STRD</code>, daily end-of-day closes).</p>
+<p>US index quotes re-check every 5 minutes and daily histories re-check hourly; cached readings are flagged. Use <strong>Fetch latest values</strong> above to force a fresh pull of histories and quotes now. Not investment advice.</p>{quotes_note}</div>
 <div class="stock-grid">{''.join(cards)}</div>'''
     return (PAGE.replace("__STYLE__", STYLE)
                 .replace("__REFRESH__", str(max(60, int(refresh))))
@@ -2066,7 +2218,7 @@ def build_drawdown_page(view, *, demo=False, generated_at=None, refresh=300):
                 .replace('<button type="button" id="refresh-now">Refresh now</button>',
                          '<button type="button" id="refresh-now">Fetch latest values</button>')
                 .replace("document.getElementById('refresh-now').addEventListener('click', () => location.reload());",
-                         "document.getElementById('refresh-now').addEventListener('click', () => { status.textContent = 'Fetching latest drawdown histories…'; location.assign('/drawdowns?refresh=1'); });")
+                         "document.getElementById('refresh-now').addEventListener('click', () => { status.textContent = 'Fetching latest drawdown histories & quotes…'; location.assign('/drawdowns?refresh=1'); });")
                 .replace("<title>econ — world at a glance</title>",
                          "<title>Index drawdowns — econ</title>"))
 

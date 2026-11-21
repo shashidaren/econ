@@ -668,30 +668,468 @@ def _yahoo_history(symbol: str, days: int = 150):
     raise RuntimeError(f"yahoo({ysym}): {last_err}")
 
 
+def _parse_chart_result_ohlc(result) -> list[tuple[str, float, float | None]]:
+    """[(date, close, high)] from a Yahoo v8 chart `result` object, rejecting non-daily bars."""
+    if not result:
+        return []
+    meta = result.get("meta") or {}
+    granularity = str(meta.get("dataGranularity") or "").strip().lower()
+    if granularity and granularity != "1d":
+        raise ValueError(f"Yahoo returned {granularity} bars instead of daily (1d)")
+
+    tz = timezone.utc
+    tz_name = str(meta.get("exchangeTimezoneName") or "").strip()
+    if tz_name:
+        try:
+            tz = ZoneInfo(tz_name)
+        except Exception:
+            tz = timezone.utc
+
+    ts_list = result.get("timestamp") or []
+    quotes = ((result.get("indicators") or {}).get("quote") or [{}])[0]
+    closes = quotes.get("close") or []
+    highs = quotes.get("high") or []
+    out: dict[str, tuple[float, float | None]] = {}
+    for i, (ts, c) in enumerate(zip(ts_list, closes)):
+        if ts is None or c is None:
+            continue
+        try:
+            close = float(c)
+            if close <= 0 or not math.isfinite(close):
+                continue
+            raw_high = highs[i] if i < len(highs) else None
+            high = None
+            if raw_high is not None:
+                try:
+                    hv = float(raw_high)
+                    if hv > 0 and math.isfinite(hv):
+                        high = round(max(hv, close), 4)
+                except (TypeError, ValueError, OverflowError):
+                    high = None
+            d = datetime.fromtimestamp(int(ts), tz=tz).strftime("%Y-%m-%d")
+            out[d] = (round(close, 4), high)
+        except (TypeError, ValueError, OverflowError, OSError):
+            continue
+
+    # Incorporate regularMarketPrice / regularMarketDayHigh if newer or higher on the latest session.
+    try:
+        reg_ts = meta.get("regularMarketTime")
+        reg_price = float(meta["regularMarketPrice"]) if meta.get("regularMarketPrice") is not None else None
+        reg_high = float(meta["regularMarketDayHigh"]) if meta.get("regularMarketDayHigh") is not None else None
+        if reg_ts and reg_price and reg_price > 0 and math.isfinite(reg_price):
+            reg_day = datetime.fromtimestamp(int(reg_ts), tz=tz).strftime("%Y-%m-%d")
+            latest_bar_day = max(out) if out else reg_day
+            if reg_day >= latest_bar_day:
+                prev_entry = out.get(reg_day)
+                cand_highs = [h for h in (
+                    prev_entry[1] if prev_entry else None,
+                    reg_high if (reg_high and reg_high > 0 and math.isfinite(reg_high)) else None,
+                ) if h is not None]
+                eff_high = round(max([reg_price, *cand_highs]), 4) if cand_highs else None
+                out[reg_day] = (round(reg_price, 4), eff_high)
+    except (TypeError, ValueError, OverflowError, OSError):
+        pass
+
+    return [(d, close, high) for d, (close, high) in sorted(out.items())]
+
+
+# Vendor mappings for `/drawdowns` histories and 5-minute live quote overlays.
+# Note: Yahoo `range=max` coerces daily intervals to monthly (`1mo`), so Yahoo
+# drawdown requests MUST use `period1=0&period2=<now>&interval=1d`. When Yahoo
+# is 429-limited on the LXC IP, US indices fall back across Sina daily K ->
+# Nasdaq index historical -> Tencent raw K-line -> FRED, while MSCI World falls
+# back to MSCI's official public `getLevelDataForGraph` JSON endpoint (`990100`
+# `USD` `STRD` — exact same USD price-return index, never an ETF or total return).
+DRAWDOWN_VENDOR_MAP = {
+    "^GSPC": {
+        "sina_kline": (".INX", ".inx"),
+        "sina_quote": "gb_$inx",
+        "nasdaq_index": None,
+        "tencent_kline": "us.INX",
+        "tencent_quote": "usINX",
+        "msci_code": None,
+    },
+    "^NDX": {
+        "sina_kline": (".NDX", ".ndx"),
+        "sina_quote": "gb_$ndx",
+        "nasdaq_index": "NDX",
+        "tencent_kline": "us.NDX",
+        "tencent_quote": "usNDX",
+        "msci_code": None,
+    },
+    "^990100-USD-STRD": {
+        "sina_kline": (),
+        "sina_quote": None,
+        "nasdaq_index": None,
+        "tencent_kline": None,
+        "tencent_quote": None,
+        "msci_code": "990100",
+    },
+    "^DJI": {
+        "sina_kline": (".DJI", ".dji"),
+        "sina_quote": "gb_$dji",
+        "nasdaq_index": None,
+        "tencent_kline": "us.DJI",
+        "tencent_quote": "usDJI",
+        "msci_code": None,
+    },
+}
+
+SINA_INDEX_KLINE_KEY = "sina_index:stock.finance.sina.com.cn"
+NASDAQ_INDEX_KEY = "nasdaq_index:api.nasdaq.com"
+MSCI_KEY = "msci"
+MSCI_LEVELS_URL = (
+    "https://app2.msci.com/products/service/index/"
+    "indexmaster/getLevelDataForGraph"
+)
+MSCI_HEADERS = {
+    "Accept": "application/json, text/plain, */*",
+    "Referer": "https://www.msci.com/",
+}
+TENCENT_RAW_KLINE_HOSTS = (
+    ("web.ifzq.gtimg.cn", "https://web.ifzq.gtimg.cn/appstock/app/kline/kline"),
+    ("proxy.finance.qq.com", "https://proxy.finance.qq.com/ifzqgtimg/appstock/app/kline/kline"),
+)
+
+
+def _sina_index_daily_k_url(code: str) -> str:
+    enc = urllib.parse.quote(str(code).strip(), safe=".")
+    return (
+        "https://stock.finance.sina.com.cn/usstock/api/jsonp.php/"
+        f"var%20s=/US_MinKService.getDailyK?symbol={enc}&___qn=3"
+    )
+
+
+def _parse_sina_daily_k_ohlc(payload) -> list[tuple[str, float, float | None]]:
+    """Parse Sina `US_MinKService.getDailyK` JSONP to `[(date, close, high)]`."""
+    if isinstance(payload, str):
+        text = payload.strip()
+        start, end = text.find("["), text.rfind("]")
+        if start == -1 or end <= start:
+            return []
+        try:
+            payload = json.loads(text[start:end + 1])
+        except (TypeError, ValueError):
+            return []
+    if not isinstance(payload, list):
+        return []
+    out: dict[str, tuple[float, float | None]] = {}
+    for row in payload:
+        if not isinstance(row, dict):
+            continue
+        day = str(row.get("d") or "")[:10]
+        try:
+            date.fromisoformat(day)
+            close = float(str(row.get("c")).replace(",", "").replace("$", ""))
+        except (TypeError, ValueError):
+            continue
+        if close <= 0 or not math.isfinite(close):
+            continue
+        high = None
+        if row.get("h") is not None:
+            try:
+                hv = float(str(row.get("h")).replace(",", "").replace("$", ""))
+                if hv > 0 and math.isfinite(hv):
+                    high = round(max(hv, close), 4)
+            except (TypeError, ValueError):
+                high = None
+        out[day] = (round(close, 4), high)
+    return [(d, c, h) for d, (c, h) in sorted(out.items())]
+
+
+def _sina_index_daily_k_history(codes) -> tuple[list, str]:
+    last_err = None
+    for code in codes or ():
+        try:
+            text = _stock_host_get(
+                _sina_index_daily_k_url(code),
+                SINA_INDEX_KLINE_KEY,
+                headers=SINA_KLINE_HEADERS,
+                timeout=14,
+            )
+            rows = _parse_sina_daily_k_ohlc(text)
+            if not rows:
+                raise _SymbolMiss(f"no Sina daily K rows for {code}")
+            note_provider_ok(SINA_INDEX_KLINE_KEY)
+            return rows, code
+        except _SymbolMiss as exc:
+            last_err = exc
+            continue
+        except Exception as exc:
+            last_err = exc
+            break
+    raise RuntimeError(f"sina-index-dailyk: {last_err or 'no symbol mapped'}")
+
+
+def _nasdaq_index_historical_url(index_symbol: str, *, start: str = "2010-01-01") -> str:
+    todate = date.today().isoformat()
+    sym = urllib.parse.quote(str(index_symbol).strip().upper(), safe="")
+    return (
+        f"https://api.nasdaq.com/api/quote/{sym}/historical?assetclass=index"
+        f"&fromdate={start}&todate={todate}&limit=10000"
+    )
+
+
+def _parse_nasdaq_historical_ohlc(payload) -> list[tuple[str, float, float | None]]:
+    """Parse Nasdaq `tradesTable.rows` to ascending `[(date, close, high)]`."""
+    if isinstance(payload, str):
+        try:
+            payload = json.loads(payload)
+        except (TypeError, ValueError):
+            return []
+    if not isinstance(payload, dict):
+        return []
+    rows = (((payload.get("data") or {}).get("tradesTable") or {}).get("rows")) or []
+
+    def _clean(raw):
+        try:
+            v = float(str(raw).replace("$", "").replace(",", "").strip())
+            return v if (v > 0 and math.isfinite(v)) else None
+        except (TypeError, ValueError):
+            return None
+
+    out: dict[str, tuple[float, float | None]] = {}
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        raw_day = str(row.get("date") or "").strip()
+        try:
+            day = datetime.strptime(raw_day, "%m/%d/%Y").date().isoformat()
+        except ValueError:
+            try:
+                day = date.fromisoformat(raw_day[:10]).isoformat()
+            except ValueError:
+                continue
+        close = _clean(row.get("close"))
+        if close is None:
+            continue
+        high = _clean(row.get("high"))
+        if high is not None:
+            high = round(max(high, close), 4)
+        out[day] = (round(close, 4), high)
+    return [(d, c, h) for d, (c, h) in sorted(out.items())]
+
+
+def _nasdaq_index_history(index_symbol: str) -> list[tuple[str, float, float | None]]:
+    text = _stock_host_get(
+        _nasdaq_index_historical_url(index_symbol),
+        NASDAQ_INDEX_KEY,
+        headers=NASDAQ_HEADERS,
+        timeout=14,
+    )
+    rows = _parse_nasdaq_historical_ohlc(text)
+    if not rows:
+        raise _SymbolMiss(f"no Nasdaq index rows for {index_symbol}")
+    note_provider_ok(NASDAQ_INDEX_KEY)
+    return rows
+
+
+def _tencent_raw_kline_url(base: str, code: str, count: int = 2500) -> str:
+    params = urllib.parse.urlencode({"param": f"{code},day,,,{int(count)}"})
+    return f"{base}?{params}"
+
+
+def _parse_tencent_kline_ohlc(payload, code: str) -> list[tuple[str, float, float | None]]:
+    """Parse Tencent raw daily K-lines (`[date, open, close, high, low, ...]`) to `[(date, close, high)]`."""
+    if isinstance(payload, str):
+        text = payload.strip()
+        if "(" in text and not text.startswith("{"):
+            text = text[text.find("(") + 1:text.rfind(")")].strip().rstrip(";")
+        try:
+            payload = json.loads(text)
+        except (TypeError, ValueError):
+            return []
+    if not isinstance(payload, dict):
+        return []
+    data = payload.get("data") or {}
+    item = data.get(code)
+    if item is None:
+        item = next(
+            (v for k, v in data.items() if str(k).lower() == code.lower()),
+            None,
+        )
+    if item is None:
+        non_market = [v for k, v in data.items() if k != "market" and isinstance(v, dict)]
+        if len(non_market) == 1:
+            item = non_market[0]
+    if not isinstance(item, dict):
+        return []
+    raw_rows = item.get("day") or item.get("qfqday") or item.get("dayqfq") or []
+    out: dict[str, tuple[float, float | None]] = {}
+    for row in raw_rows:
+        if not isinstance(row, (list, tuple)) or len(row) < 3:
+            continue
+        day = str(row[0])[:10]
+        try:
+            date.fromisoformat(day)
+            close = float(str(row[2]).replace(",", ""))
+        except (TypeError, ValueError):
+            continue
+        if close <= 0 or not math.isfinite(close):
+            continue
+        high = None
+        if len(row) > 3 and row[3] is not None:
+            try:
+                hv = float(str(row[3]).replace(",", ""))
+                if hv > 0 and math.isfinite(hv):
+                    high = round(max(hv, close), 4)
+            except (TypeError, ValueError):
+                high = None
+        out[day] = (round(close, 4), high)
+    return [(d, c, h) for d, (c, h) in sorted(out.items())]
+
+
+def _tencent_index_kline_history(code: str, count: int = 2500) -> list[tuple[str, float, float | None]]:
+    last_err = None
+    for host, base in TENCENT_RAW_KLINE_HOSTS:
+        key = f"tencent_index_kline:{host}"
+        try:
+            text = _stock_host_get(
+                _tencent_raw_kline_url(base, code, count=count),
+                key,
+                headers=TENCENT_KLINE_HEADERS,
+                timeout=10,
+            )
+            rows = _parse_tencent_kline_ohlc(text, code)
+            if not rows:
+                raise _SymbolMiss(f"no Tencent raw K-lines for {code}")
+            note_provider_ok(key)
+            return rows
+        except _SymbolMiss as exc:
+            last_err = exc
+            break
+        except Exception as exc:
+            last_err = exc
+    raise RuntimeError(f"tencent-index-kline({code}): {last_err or 'all hosts cooling down'}")
+
+
+def _msci_levels_url(index_code: str, *, start: str = "19970101",
+                     end: str | None = None, variant: str = "STRD",
+                     currency: str = "USD") -> str:
+    end_str = end or date.today().strftime("%Y%m%d")
+    params = urllib.parse.urlencode({
+        "currency_symbol": currency,
+        "index_variant": variant,
+        "start_date": start,
+        "end_date": end_str,
+        "data_frequency": "DAILY",
+        "baseValue": "false",
+        "index_codes": str(index_code),
+    })
+    return f"{MSCI_LEVELS_URL}?{params}"
+
+
+def _parse_msci_levels_payload(payload, *, index_code: str = "990100",
+                               variant: str = "STRD",
+                               currency: str = "USD") -> list[tuple[str, float]]:
+    """Validate and parse MSCI's public `getLevelDataForGraph` JSON (close-only)."""
+    if isinstance(payload, str):
+        try:
+            payload = json.loads(payload)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"invalid MSCI JSON ({exc})") from exc
+    if not isinstance(payload, dict):
+        raise ValueError("unexpected MSCI payload shape")
+
+    for err_key in ("error_message", "error_code"):
+        if err_key in payload:
+            raw_err = str(payload.get(err_key) or "").strip()
+            if raw_err and raw_err.lower() not in ("null", "none", "0"):
+                raise ValueError(f"MSCI API error ({err_key}={raw_err})")
+
+    echoed_code = str(payload.get("msci_index_code") or "").strip()
+    if echoed_code and echoed_code != str(index_code):
+        raise ValueError(f"MSCI index mismatch: got {echoed_code!r}, expected {index_code!r}")
+    echoed_var = str(payload.get("index_variant_type") or "").strip().upper()
+    if echoed_var and echoed_var != variant.upper():
+        raise ValueError(f"MSCI variant mismatch: got {echoed_var!r}, expected {variant!r}")
+    echoed_ccy = str(payload.get("ISO_currency_symbol") or "").strip().upper()
+    if echoed_ccy and echoed_ccy != currency.upper():
+        raise ValueError(f"MSCI currency mismatch: got {echoed_ccy!r}, expected {currency!r}")
+
+    levels = ((payload.get("indexes") or {}).get("INDEX_LEVELS")) or []
+    out: dict[str, float] = {}
+    for row in levels:
+        if not isinstance(row, dict):
+            continue
+        raw_date = str(row.get("calc_date") or "").strip()
+        day = _iso_date(raw_date)
+        val = row.get("level_eod")
+        if not day or val is None or isinstance(val, bool):
+            continue
+        try:
+            fv = float(val)
+        except (TypeError, ValueError):
+            continue
+        if fv > 0 and math.isfinite(fv):
+            out[day] = round(fv, 4)
+    if not out:
+        raise ValueError("no MSCI daily levels returned")
+    return sorted(out.items())
+
+
+def _msci_index_history(index_code: str, *, variant: str = "STRD",
+                        currency: str = "USD") -> list[tuple[str, float]]:
+    if not provider_available(MSCI_KEY):
+        raise RuntimeError("msci cooling down")
+    url = _msci_levels_url(index_code, variant=variant, currency=currency)
+    try:
+        text = _get(url, timeout=15, headers=MSCI_HEADERS, capture_error_body=True)
+        if _is_waf_block_body(text):
+            note_provider_failure(MSCI_KEY, "blocked by WAF", cooldown=BREAKER_COOLDOWN)
+            raise RuntimeError("msci: blocked by WAF")
+        rows = _parse_msci_levels_payload(
+            text, index_code=index_code, variant=variant, currency=currency,
+        )
+        note_provider_ok(MSCI_KEY)
+        return rows
+    except Exception as exc:
+        unreachable, limited = _classify(exc)
+        note_provider_failure(MSCI_KEY, exc, unreachable=unreachable, rate_limited=limited)
+        raise RuntimeError(f"msci({index_code}): {exc}") from exc
+
+
 def index_drawdown_history(yahoo_symbol: str, fred_symbol: str | None):
-    """Full available Yahoo daily history; bounded FRED history as fallback."""
+    """Multi-source daily index history for drawdowns (OHLC preferred, close-only fallback).
+
+    Cascade:
+      1. Yahoo Finance v8 chart (`period1=0&period2=<now>&interval=1d` — avoids
+         Yahoo's silent `range=max` -> `1mo` monthly coercion; includes daily `high`)
+      2. Sina US daily K (`.INX`, `.NDX`, `.DJI` — multi-decade daily OHLC)
+      3. Nasdaq index historical (`NDX` — daily OHLC since 2010)
+      4. Tencent raw daily K-line (`us.INX`, `us.NDX`, `us.DJI` — up to ~10y OHLC)
+      5. MSCI official `getLevelDataForGraph` (`990100` `USD` `STRD` — daily closes since 1997)
+      6. FRED (`SP500`, `NASDAQ100`, `DJIA` — up to 10 years daily closes)
+    """
+    import drawdown
+
     errors = []
+    spec = DRAWDOWN_VENDOR_MAP.get(yahoo_symbol) or {}
+
     if provider_available("yahoo"):
         enc = urllib.parse.quote(yahoo_symbol, safe="")
         headers = _yahoo_headers()
         _yahoo_pace()
         crumb = _yahoo_session_crumb()
         crumb_param = f"&crumb={urllib.parse.quote(crumb, safe='')}" if crumb else ""
+        now_ts = int(time.time()) + 60
         for host in ("query2.finance.yahoo.com", "query1.finance.yahoo.com"):
             hkey = f"yahoo:{host}"
             if not provider_available(hkey):
                 continue
             try:
-                url = (f"https://{host}/v8/finance/chart/{enc}"
-                       f"?range=max&interval=1d&includePrePost=false{crumb_param}")
-                data = _get_json(url, timeout=10, headers=headers)
-                rows = _parse_chart_result(((data.get("chart") or {}).get("result") or [None])[0])
-                # Do not accept old/incomplete feeds as current; try FRED instead.
-                import drawdown
+                url = (
+                    f"https://{host}/v8/finance/chart/{enc}"
+                    f"?period1=0&period2={now_ts}&interval=1d&includePrePost=false{crumb_param}"
+                )
+                data = _get_json(url, timeout=12, headers=headers)
+                rows = _parse_chart_result_ohlc(
+                    ((data.get("chart") or {}).get("result") or [None])[0]
+                )
                 drawdown.from_history(yahoo_symbol, rows, "Yahoo")
                 note_provider_ok("yahoo")
                 note_provider_ok(hkey)
-                return rows, f"Yahoo Finance ({yahoo_symbol}, maximum available history)"
+                return rows, f"Yahoo Finance ({yahoo_symbol}, maximum available daily history)"
             except Exception as exc:
                 errors.append(str(exc))
                 unreachable, limited = _classify(exc)
@@ -701,15 +1139,52 @@ def index_drawdown_history(yahoo_symbol: str, fred_symbol: str | None):
                 note_provider_failure(hkey, exc, unreachable=unreachable)
     else:
         errors.append("Yahoo cooling down")
+
+    sina_codes = spec.get("sina_kline") or ()
+    if sina_codes:
+        try:
+            rows, used_code = _sina_index_daily_k_history(sina_codes)
+            drawdown.from_history(yahoo_symbol, rows, "Sina")
+            return rows, f"Sina US daily K ({used_code}, daily OHLC history)"
+        except Exception as exc:
+            errors.append(str(exc))
+
+    nasdaq_sym = spec.get("nasdaq_index")
+    if nasdaq_sym:
+        try:
+            rows = _nasdaq_index_history(nasdaq_sym)
+            drawdown.from_history(yahoo_symbol, rows, "Nasdaq")
+            return rows, f"Nasdaq ({nasdaq_sym}, daily OHLC since 2010)"
+        except Exception as exc:
+            errors.append(str(exc))
+
+    tencent_code = spec.get("tencent_kline")
+    if tencent_code:
+        try:
+            rows = _tencent_index_kline_history(tencent_code)
+            drawdown.from_history(yahoo_symbol, rows, "Tencent")
+            return rows, f"Tencent K-line ({tencent_code}, daily OHLC up to ~10 years)"
+        except Exception as exc:
+            errors.append(str(exc))
+
+    msci_code = spec.get("msci_code")
+    if msci_code:
+        try:
+            rows = _msci_index_history(msci_code, variant="STRD", currency="USD")
+            drawdown.from_history(yahoo_symbol, rows, "MSCI")
+            return rows, f"MSCI ({msci_code} USD STRD, daily closes since 1997)"
+        except Exception as exc:
+            errors.append(str(exc))
+
     if fred_symbol:
         try:
             rows = _fred_csv_series(fred_symbol, window_years=10)
-            import drawdown
             drawdown.from_history(fred_symbol, rows, "FRED")
             return rows, f"FRED ({fred_symbol}, up to 10 years)"
         except Exception as exc:
             errors.append(str(exc))
-    raise RuntimeError("index history unavailable: " + "; ".join(errors)[:250])
+
+    raise RuntimeError("index history unavailable: " + "; ".join(errors)[:300])
 
 
 def _yahoo_spark_batch(symbols, days: int = 150, *, include_volume: bool = False) -> dict[str, list]:
@@ -2583,6 +3058,573 @@ def stock_quotes_batch(symbols, *, now: datetime | None = None) -> dict:
     }
 
 
+SINA_INDEX_QUOTE_KEY = "index_quote:sina"
+NASDAQ_INDEX_QUOTE_KEY = "index_quote:nasdaq"
+TENCENT_INDEX_QUOTE_KEY = "index_quote:tencent"
+
+
+def _parse_sina_et_trade_date(raw_et: str, raw_year: str,
+                              as_of_utc: str | None) -> str | None:
+    """Resolve US session trade date from Sina's `[25]` EDT/EST stamp + `[29]` year."""
+    et_txt = (raw_et or "").strip()
+    year_txt = (raw_year or "").strip()
+    if et_txt and len(year_txt) >= 4 and year_txt[:4].isdigit():
+        # Example: "Jul 28 05:10PM EDT" + "2026" -> "2026-07-28"
+        parts = et_txt.split()
+        if len(parts) >= 2:
+            try:
+                dt = datetime.strptime(
+                    f"{parts[0]} {parts[1].rstrip(',')} {year_txt[:4]}",
+                    "%b %d %Y",
+                )
+                return dt.date().isoformat()
+            except ValueError:
+                pass
+    if as_of_utc:
+        try:
+            dt = datetime.fromisoformat(as_of_utc)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return dt.astimezone(_ET_TZ).date().isoformat()
+        except ValueError:
+            pass
+    return None
+
+
+def _sina_index_quotes_url(codes) -> str:
+    joined = ",".join(str(c).strip() for c in codes if str(c or "").strip())
+    return f"https://hq.sinajs.cn/list={joined}"
+
+
+def _parse_sina_index_quotes_payload(text: str, code_to_symbol: dict[str, str],
+                                     *, session_state: str = "regular") -> dict[str, dict]:
+    """Parse Sina `hq.sinajs.cn/list=gb_$inx,gb_$ndx,gb_$dji` US index quotes."""
+    norm_map = {k.strip().lower(): v for k, v in (code_to_symbol or {}).items()}
+    out: dict[str, dict] = {}
+    for line in (text or "").splitlines():
+        line = line.strip()
+        if "hq_str_" not in line or '="' not in line:
+            continue
+        code_part, rest = line.split('="', 1)
+        code = code_part.split("hq_str_", 1)[-1].strip().lower()
+        sym = norm_map.get(code)
+        if not sym:
+            continue
+        body = rest.rsplit('"', 1)[0]
+        if not body:
+            continue
+        fields = body.split(",")
+        if len(fields) < 8:
+            continue
+        price = _pos_float(fields[1])
+        if price is None:
+            continue
+        raw_chg = _finite_float(fields[4])
+        raw_pct = _finite_float(fields[2])
+        prev_close = _pos_float(fields[26]) if len(fields) > 26 else None
+        if prev_close is None and raw_chg is not None:
+            cand = price - raw_chg
+            if cand > 0:
+                prev_close = cand
+        if prev_close is not None and prev_close > 0:
+            change = round(price - prev_close, 4)
+            change_pct = round((price / prev_close - 1.0) * 100.0, 2)
+        else:
+            change = round(raw_chg, 4) if raw_chg is not None else None
+            change_pct = round(raw_pct, 2) if raw_pct is not None else None
+
+        open_px = _pos_float(fields[5])
+        day_high = _pos_float(fields[6])
+        day_low = _pos_float(fields[7])
+        week52_high = _pos_float(fields[8]) if len(fields) > 8 else None
+        as_of_utc, as_of_display = _parse_cst_timestamp(fields[3])
+        trade_date = _parse_sina_et_trade_date(
+            fields[25] if len(fields) > 25 else "",
+            fields[29] if len(fields) > 29 else "",
+            as_of_utc,
+        )
+        out[sym] = {
+            "symbol": sym,
+            "price": round(price, 4),
+            "prev_close": round(prev_close, 4) if prev_close is not None else None,
+            "change": change,
+            "change_pct": change_pct,
+            "open": round(open_px, 4) if open_px is not None else None,
+            "day_high": round(day_high, 4) if day_high is not None else None,
+            "day_low": round(day_low, 4) if day_low is not None else None,
+            "week52_high": round(week52_high, 4) if week52_high is not None else None,
+            "trade_date": trade_date,
+            "as_of_utc": as_of_utc,
+            "as_of_display": as_of_display,
+            "delayed": True,
+            "delay_minutes": 15,
+            "source": "Sina US index quote",
+            "market_status": session_state,
+        }
+    return out
+
+
+def _sina_index_quotes_batch(pairs: list[tuple[str, str]], *,
+                             session_state: str = "regular",
+                             budget=None) -> dict[str, dict]:
+    if not pairs:
+        return {}
+    code_to_sym = {code: sym for sym, code in pairs if code}
+    text = _stock_host_get(
+        _sina_index_quotes_url(list(code_to_sym.keys())),
+        SINA_INDEX_QUOTE_KEY,
+        headers=SINA_KLINE_HEADERS,
+        timeout=8,
+        budget=budget,
+    )
+    out = _parse_sina_index_quotes_payload(
+        text, code_to_sym, session_state=session_state,
+    )
+    if out:
+        note_provider_ok(SINA_INDEX_QUOTE_KEY)
+    return out
+
+
+def _nasdaq_index_quote_url(index_code: str) -> str:
+    enc = urllib.parse.quote(str(index_code).strip().upper(), safe="")
+    return f"https://api.nasdaq.com/api/quote/{enc}/info?assetclass=index"
+
+
+def _parse_nasdaq_index_quote_payload(payload, *, symbol: str,
+                                      session_state: str = "regular") -> dict | None:
+    if isinstance(payload, str):
+        try:
+            data_obj = json.loads(payload)
+        except (TypeError, ValueError):
+            return None
+    elif isinstance(payload, dict):
+        data_obj = payload
+    else:
+        return None
+
+    item = _parse_nasdaq_quote_payload(data_obj, symbol=symbol, session_state=session_state)
+    if not item:
+        return None
+
+    key_stats = ((data_obj.get("data") or {}).get("keyStats")) or {}
+    w52_str = str(((key_stats.get("fiftyTwoWeekHighLow") or {}).get("value")) or "")
+    w52_vals = [
+        v for v in (_pos_float(part) for part in re.split(r"\s*[-–/]\s*", w52_str))
+        if v is not None
+    ]
+    week52_high = round(max(w52_vals), 4) if w52_vals else None
+
+    trade_date = None
+    if item.get("as_of_utc"):
+        try:
+            dt = datetime.fromisoformat(str(item["as_of_utc"]))
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            trade_date = dt.astimezone(_ET_TZ).date().isoformat()
+        except ValueError:
+            trade_date = None
+
+    item["symbol"] = symbol
+    item["week52_high"] = week52_high
+    item["trade_date"] = trade_date
+    item["delay_minutes"] = 15
+    item["source"] = "Nasdaq index quote"
+    return item
+
+
+def _nasdaq_index_quote(yahoo_symbol: str, index_code: str, *,
+                        session_state: str = "regular",
+                        budget=None) -> dict:
+    text = _stock_host_get(
+        _nasdaq_index_quote_url(index_code),
+        NASDAQ_INDEX_QUOTE_KEY,
+        headers=NASDAQ_HEADERS,
+        timeout=8,
+        budget=budget,
+    )
+    out = _parse_nasdaq_index_quote_payload(
+        text, symbol=yahoo_symbol, session_state=session_state,
+    )
+    if not out:
+        raise _SymbolMiss(f"no Nasdaq index quote for {index_code}")
+    note_provider_ok(NASDAQ_INDEX_QUOTE_KEY)
+    return out
+
+
+def _tencent_index_quotes_url(codes) -> str:
+    joined = ",".join(str(c).strip() for c in codes if str(c or "").strip())
+    return f"https://qt.gtimg.cn/q={joined}"
+
+
+def _parse_tencent_index_quotes_payload(text: str, code_to_symbol: dict[str, str],
+                                        *, session_state: str = "regular") -> dict[str, dict]:
+    norm_map: dict[str, str] = {}
+    for code, sym in (code_to_symbol or {}).items():
+        c_low = code.strip().lower()
+        norm_map[c_low] = sym
+        norm_map[c_low.replace(".", "")] = sym
+
+    out: dict[str, dict] = {}
+    for line in (text or "").replace("\n", ";").split(";"):
+        line = line.strip()
+        if not line.startswith("v_") or '="' not in line:
+            continue
+        head, rest = line.split('="', 1)
+        code_raw = head[2:].strip().lower()
+        sym = norm_map.get(code_raw) or norm_map.get(code_raw.replace(".", ""))
+        if not sym:
+            continue
+        body = rest.rsplit('"', 1)[0]
+        fields = body.split("~")
+        if len(fields) < 35:
+            continue
+        price = _pos_float(fields[3])
+        if price is None:
+            continue
+        prev_close = _pos_float(fields[4])
+        open_px = _pos_float(fields[5])
+        raw_chg = _finite_float(fields[31])
+        raw_pct = _finite_float(fields[32])
+        if prev_close is not None and prev_close > 0:
+            change = round(price - prev_close, 4)
+            change_pct = round((price / prev_close - 1.0) * 100.0, 2)
+        else:
+            change = round(raw_chg, 4) if raw_chg is not None else None
+            change_pct = round(raw_pct, 2) if raw_pct is not None else None
+        day_high = _pos_float(fields[33])
+        day_low = _pos_float(fields[34])
+
+        raw_ts = (fields[30] or "").strip()
+        as_of_utc, as_of_display = _parse_et_timestamp(raw_ts)
+        if as_of_utc is None and len(raw_ts) == 14 and raw_ts.isdigit():
+            try:
+                dt = datetime.strptime(raw_ts, "%Y%m%d%H%M%S").replace(tzinfo=_ET_TZ)
+                as_of_utc = dt.astimezone(timezone.utc).isoformat(timespec="seconds")
+                as_of_display = dt.strftime("%Y-%m-%d %H:%M:%S")
+            except ValueError:
+                pass
+        trade_date = None
+        if as_of_utc:
+            try:
+                trade_date = datetime.fromisoformat(as_of_utc).astimezone(_ET_TZ).date().isoformat()
+            except ValueError:
+                trade_date = None
+        if not trade_date:
+            trade_date = _iso_date(raw_ts)
+
+        out[sym] = {
+            "symbol": sym,
+            "price": round(price, 4),
+            "prev_close": round(prev_close, 4) if prev_close is not None else None,
+            "change": change,
+            "change_pct": change_pct,
+            "open": round(open_px, 4) if open_px is not None else None,
+            "day_high": round(day_high, 4) if day_high is not None else None,
+            "day_low": round(day_low, 4) if day_low is not None else None,
+            "week52_high": None,
+            "trade_date": trade_date,
+            "as_of_utc": as_of_utc,
+            "as_of_display": as_of_display,
+            "delayed": True,
+            "delay_minutes": 15,
+            "source": "Tencent US index quote",
+            "market_status": session_state,
+        }
+    return out
+
+
+def _tencent_index_quotes_batch(pairs: list[tuple[str, str]], *,
+                                session_state: str = "regular",
+                                budget=None) -> dict[str, dict]:
+    if not pairs:
+        return {}
+    code_to_sym = {code: sym for sym, code in pairs if code}
+    text = _stock_host_get(
+        _tencent_index_quotes_url(list(code_to_sym.keys())),
+        TENCENT_INDEX_QUOTE_KEY,
+        headers=TENCENT_KLINE_HEADERS,
+        timeout=8,
+        budget=budget,
+    )
+    out = _parse_tencent_index_quotes_payload(
+        text, code_to_sym, session_state=session_state,
+    )
+    if out:
+        note_provider_ok(TENCENT_INDEX_QUOTE_KEY)
+    return out
+
+
+def _yahoo_index_quote(yahoo_symbol: str, *, session_state: str = "regular",
+                       budget=None) -> dict:
+    if not provider_available("yahoo"):
+        raise RuntimeError("yahoo cooling down")
+    if budget is not None and not budget.take():
+        raise _BudgetExhausted("index quote request budget exhausted")
+    enc = urllib.parse.quote(yahoo_symbol, safe="")
+    _yahoo_pace()
+    crumb = _yahoo_session_crumb()
+    crumb_param = f"&crumb={urllib.parse.quote(crumb, safe='')}" if crumb else ""
+    url = (
+        f"https://query1.finance.yahoo.com/v8/finance/chart/{enc}"
+        f"?range=1d&interval=5m&includePrePost=false{crumb_param}"
+    )
+    try:
+        j = _get_json(url, timeout=8, headers=_yahoo_headers())
+    except Exception as exc:
+        unreachable, limited = _classify(exc)
+        if limited:
+            note_provider_failure("yahoo", exc, rate_limited=True)
+        raise RuntimeError(f"yahoo({yahoo_symbol}): {exc}") from exc
+
+    res = ((j.get("chart") or {}).get("result") or [None])[0] or {}
+    meta = res.get("meta") or {}
+    price = _pos_float(meta.get("regularMarketPrice"))
+    if price is None:
+        raise _SymbolMiss(f"yahoo: no regularMarketPrice for {yahoo_symbol}")
+    prev_close = _pos_float(meta.get("chartPreviousClose")) or _pos_float(meta.get("previousClose"))
+    change = None
+    change_pct = None
+    if prev_close is not None and prev_close > 0:
+        change = round(price - prev_close, 4)
+        change_pct = round((price / prev_close - 1.0) * 100.0, 2)
+    day_high = _pos_float(meta.get("regularMarketDayHigh"))
+    day_low = _pos_float(meta.get("regularMarketDayLow"))
+    week52_high = _pos_float(meta.get("fiftyTwoWeekHigh"))
+
+    tz = _ET_TZ
+    tz_name = str(meta.get("exchangeTimezoneName") or "").strip()
+    if tz_name:
+        try:
+            tz = ZoneInfo(tz_name)
+        except Exception:
+            tz = _ET_TZ
+
+    reg_ts = meta.get("regularMarketTime")
+    as_of_utc = None
+    trade_date = None
+    if reg_ts:
+        try:
+            dt_utc = datetime.fromtimestamp(int(reg_ts), tz=timezone.utc)
+            as_of_utc = dt_utc.isoformat(timespec="seconds")
+            trade_date = dt_utc.astimezone(tz).date().isoformat()
+        except (TypeError, ValueError, OSError):
+            as_of_utc = None
+            trade_date = None
+
+    note_provider_ok("yahoo")
+    return {
+        "symbol": yahoo_symbol,
+        "price": round(price, 4),
+        "prev_close": round(prev_close, 4) if prev_close is not None else None,
+        "change": change,
+        "change_pct": change_pct,
+        "open": None,
+        "day_high": round(day_high, 4) if day_high is not None else None,
+        "day_low": round(day_low, 4) if day_low is not None else None,
+        "week52_high": round(week52_high, 4) if week52_high is not None else None,
+        "trade_date": trade_date,
+        "as_of_utc": as_of_utc,
+        "as_of_display": None,
+        "delayed": True,
+        "delay_minutes": 15,
+        "source": "Yahoo Finance",
+        "market_status": session_state,
+    }
+
+
+def index_quotes_batch(symbols=None, *, now: datetime | None = None) -> dict:
+    """Fetch live / ~15-min-delayed index quotes for `/drawdowns`.
+
+    Cascade:
+      1. Sina `hq.sinajs.cn/list=gb_$inx,gb_$ndx,gb_$dji` (1 batched call)
+      2. Nasdaq `/api/quote/NDX/info?assetclass=index` (for `^NDX` miss)
+      3. Tencent `qt.gtimg.cn/q=usINX,usNDX,usDJI` (1 batched call for misses)
+      4. Yahoo `v8/finance/chart` meta (covers `^990100-USD-STRD` when reachable)
+
+    Never raises: returns a structured status dict (`ok` | `partial` | `unavailable`)
+    so daily drawdown cards always render even if every intraday feed fails.
+    """
+    import drawdown
+
+    moment = now or datetime.now(timezone.utc)
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=timezone.utc)
+    moment_utc = moment.astimezone(timezone.utc)
+    session = us_market_session(moment_utc)
+    session_state = session["state"]
+
+    default_syms = [ysym for _name, ysym, _fsym in drawdown.INDICES]
+    wanted = list(dict.fromkeys(
+        str(s).strip() for s in (symbols if symbols is not None else default_syms)
+        if str(s or "").strip()
+    ))
+
+    base = {
+        "delay_note": (
+            "Keyless public index quotes (live to ~15 min delayed for US indices; "
+            "daily EOD for MSCI World when Yahoo is rate-limited)."
+        ),
+        "market_session": session,
+        "fetched_at_utc": moment_utc.isoformat(timespec="seconds"),
+    }
+    if not wanted:
+        return {
+            **base,
+            "status": "waiting",
+            "message": "No drawdown indices configured.",
+            "items": {},
+            "errors": {},
+            "quote_providers": {},
+            "quote_requests": 0,
+            "coverage": {"symbols": 0, "with_quotes": 0, "providers": []},
+        }
+
+    budget = _RequestBudget(max(10, len(wanted) * 3))
+    items: dict[str, dict] = {}
+    errors: dict[str, list[str]] = {s: [] for s in wanted}
+    quote_providers: dict[str, int] = {}
+
+    def _record(sym: str, quote: dict) -> None:
+        items[sym] = quote
+        prov = str(quote.get("source") or "unknown")
+        quote_providers[prov] = quote_providers.get(prov, 0) + 1
+
+    # Stage 1: Sina US index batch (`gb_$inx,gb_$ndx,gb_$dji`)
+    sina_pairs = [
+        (sym, DRAWDOWN_VENDOR_MAP[sym]["sina_quote"])
+        for sym in wanted
+        if sym in DRAWDOWN_VENDOR_MAP and DRAWDOWN_VENDOR_MAP[sym].get("sina_quote")
+    ]
+    if sina_pairs:
+        try:
+            got = _sina_index_quotes_batch(
+                sina_pairs, session_state=session_state, budget=budget,
+            )
+            for sym, q in got.items():
+                _record(sym, q)
+            for sym, _code in sina_pairs:
+                if sym not in got:
+                    errors[sym].append("sina: empty index quote")
+        except Exception as exc:
+            for sym, _code in sina_pairs:
+                errors[sym].append(f"sina: {exc}")
+
+    # Stage 2: Nasdaq official index quote (`NDX`)
+    for sym in wanted:
+        if sym in items:
+            continue
+        nasdaq_code = (DRAWDOWN_VENDOR_MAP.get(sym) or {}).get("nasdaq_index")
+        if not nasdaq_code or not provider_available(NASDAQ_INDEX_QUOTE_KEY):
+            continue
+        try:
+            _record(sym, _nasdaq_index_quote(
+                sym, nasdaq_code, session_state=session_state, budget=budget,
+            ))
+        except Exception as exc:
+            errors[sym].append(f"nasdaq: {exc}")
+
+    # Stage 3: Tencent US index batch (`usINX,usNDX,usDJI`)
+    tencent_pairs = [
+        (sym, DRAWDOWN_VENDOR_MAP[sym]["tencent_quote"])
+        for sym in wanted
+        if sym not in items
+        and sym in DRAWDOWN_VENDOR_MAP
+        and DRAWDOWN_VENDOR_MAP[sym].get("tencent_quote")
+    ]
+    if tencent_pairs:
+        try:
+            got = _tencent_index_quotes_batch(
+                tencent_pairs, session_state=session_state, budget=budget,
+            )
+            for sym, q in got.items():
+                if sym not in items:
+                    _record(sym, q)
+            for sym, _code in tencent_pairs:
+                if sym not in items:
+                    errors[sym].append("tencent: empty index quote")
+        except Exception as exc:
+            for sym, _code in tencent_pairs:
+                if sym not in items:
+                    errors[sym].append(f"tencent: {exc}")
+
+    # Stage 4: Yahoo Finance v8 chart meta (covers MSCI World when Yahoo is reachable)
+    missing = [s for s in wanted if s not in items]
+    if missing and provider_available("yahoo"):
+        for sym in missing:
+            if not provider_available("yahoo"):
+                errors[sym].append("yahoo: cooling down")
+                break
+            try:
+                _record(sym, _yahoo_index_quote(
+                    sym, session_state=session_state, budget=budget,
+                ))
+            except _BudgetExhausted as exc:
+                errors[sym].append(str(exc))
+                break
+            except Exception as exc:
+                errors[sym].append(str(exc))
+    else:
+        for sym in missing:
+            if (DRAWDOWN_VENDOR_MAP.get(sym) or {}).get("msci_code"):
+                errors[sym].append("daily EOD index (Yahoo cooling down)")
+            else:
+                errors[sym].append("yahoo: cooling down")
+
+    providers_used = list(quote_providers.keys())
+    errors_out = {
+        sym: "; ".join(reasons)
+        for sym, reasons in errors.items()
+        if sym not in items and reasons
+    }
+    coverage = {
+        "symbols": len(wanted),
+        "with_quotes": len(items),
+        "providers": providers_used,
+    }
+    if items and len(items) == len(wanted):
+        status = "ok"
+        message = (
+            f"Live / delayed quotes loaded for all {len(wanted)} indices · "
+            f"{session['label']}."
+        )
+    elif items:
+        status = "partial"
+        msci_daily_only = (
+            len(wanted) - len(items) == 1
+            and "^990100-USD-STRD" in wanted
+            and "^990100-USD-STRD" not in items
+        )
+        if msci_daily_only:
+            message = (
+                f"Live / ~15m quotes loaded for {len(items)} US indices · "
+                f"{session['label']} (MSCI World uses daily EOD close)."
+            )
+        else:
+            message = (
+                f"Live / ~15m quotes loaded for {len(items)} of {len(wanted)} "
+                f"indices · {session['label']}."
+            )
+    else:
+        status = "unavailable"
+        sample_reason = next(iter(errors_out.values()), "")
+        first_part = sample_reason.split(";")[0] if sample_reason else ""
+        message = (
+            "Live index quotes unavailable"
+            + (f" ({first_part})" if first_part else "")
+            + "; showing latest daily closes."
+        )
+    return {
+        **base,
+        "status": status,
+        "message": message,
+        "items": items,
+        "errors": errors_out,
+        "quote_providers": quote_providers,
+        "quote_requests": budget.used,
+        "coverage": coverage,
+    }
+
+
 def quote_from_history(name: str, hist, source: str | None = None,
                        max_age_days: int | None = None,
                        symbol: str | None = None):
@@ -3169,6 +4211,77 @@ def _doctor_stock_quotes(run_checks):
     ], width=28)
 
 
+def _doctor_drawdowns(run_checks):
+    """Probe Drawdowns history hosts (Sina, Nasdaq, Tencent, MSCI) and live index quotes."""
+    reset_breakers("sina_index")
+    reset_breakers("nasdaq_index")
+    reset_breakers("tencent_index_kline")
+    reset_breakers("msci")
+    reset_breakers("index_quote")
+
+    def probe_rows(url, headers, parse):
+        try:
+            body = _get(url, timeout=12, headers=headers, capture_error_body=True)
+        except HttpStatusError as exc:
+            raise RuntimeError(f"HTTP {exc.status} body[:120]={exc.body[:120]!r}")
+        rows = parse(body)
+        if not rows:
+            raise RuntimeError(
+                f"HTTP 200 but no rows parsed; body[:120]={body[:120]!r}")
+        last = rows[-1]
+        high_txt = f" (high={last[2]})" if len(last) > 2 and last[2] is not None else ""
+        return (f"HTTP 200, {len(rows)} rows, last {last[0]} = {last[1]}{high_txt} "
+                f"| body[:120]={body[:120]!r}")
+
+    def probe_index_quotes():
+        url = _sina_index_quotes_url(["gb_$inx", "gb_$ndx", "gb_$dji"])
+        try:
+            body = _get(url, timeout=10, headers=SINA_KLINE_HEADERS, capture_error_body=True)
+        except HttpStatusError as exc:
+            raise RuntimeError(f"HTTP {exc.status} body[:120]={exc.body[:120]!r}")
+        parsed = _parse_sina_index_quotes_payload(
+            body, {"gb_$inx": "^GSPC", "gb_$ndx": "^NDX", "gb_$dji": "^DJI"},
+        )
+        if not parsed:
+            raise RuntimeError(
+                f"HTTP 200 but no index quotes parsed; body[:120]={body[:120]!r}")
+        parts = [f"{k}={v['price']}" for k, v in sorted(parsed.items())]
+        return f"HTTP 200, {', '.join(parts)} | body[:120]={body[:120]!r}"
+
+    def cascade_hist(ysym, fsym):
+        rows, src = index_drawdown_history(ysym, fsym)
+        return f"{src}, {len(rows)} rows, last {rows[-1][0]} = {rows[-1][1]}"
+
+    def cascade_quotes():
+        out = index_quotes_batch()
+        items = out.get("items") or {}
+        if not items:
+            raise RuntimeError(out.get("message") or "no index quotes returned")
+        parts = [f"{k}={v['price']}" for k, v in sorted(items.items())]
+        return f"{out.get('status')}: {', '.join(parts)}"
+
+    run_checks([
+        ("sina index daily K .INX", lambda: probe_rows(
+            _sina_index_daily_k_url(".INX"), SINA_KLINE_HEADERS,
+            _parse_sina_daily_k_ohlc)),
+        ("nasdaq index hist NDX", lambda: probe_rows(
+            _nasdaq_index_historical_url("NDX"), NASDAQ_HEADERS,
+            _parse_nasdaq_historical_ohlc)),
+        ("tencent index kline .INX", lambda: probe_rows(
+            _tencent_raw_kline_url(TENCENT_RAW_KLINE_HOSTS[0][1], "us.INX", count=60),
+            TENCENT_KLINE_HEADERS,
+            lambda body: _parse_tencent_kline_ohlc(body, "us.INX"))),
+        ("msci 990100 USD STRD", lambda: probe_rows(
+            _msci_levels_url("990100", start=(date.today() - timedelta(days=90)).strftime("%Y%m%d")),
+            MSCI_HEADERS,
+            lambda body: _parse_msci_levels_payload(body, index_code="990100"))),
+        ("sina index quotes", probe_index_quotes),
+        ("drawdown cascade ^GSPC", lambda: cascade_hist("^GSPC", "SP500")),
+        ("drawdown cascade MSCI", lambda: cascade_hist("^990100-USD-STRD", None)),
+        ("index quote cascade", cascade_quotes),
+    ], width=28)
+
+
 def fetch_news(candidates, *, days=7, per_symbol=3):
     """Headlines for the displayed stock picks (see news.py for the rules).
 
@@ -3259,6 +4372,9 @@ if __name__ == "__main__":
                 ["PFE"], {"PFE": "usPFE.N"}, days=130)["PFE"]["source"]),
             ("stock_quote:PFE", lambda: stock_quotes_batch(
                 ["PFE"])["items"]["PFE"]["source"]),
+            ("drawdown:^GSPC", lambda: index_drawdown_history("^GSPC", "SP500")[1]),
+            ("drawdown:MSCI", lambda: index_drawdown_history("^990100-USD-STRD", None)[1]),
+            ("index_quote:^GSPC", lambda: index_quotes_batch(["^GSPC"])["items"]["^GSPC"]["source"]),
         ])
         print("provider breakers:")
         _print_breakers()
@@ -3270,7 +4386,7 @@ if __name__ == "__main__":
         print(f"curl: {CURL_BIN or 'NOT FOUND (urllib only)'} | yahoo pace "
               f"{YAHOO_MIN_INTERVAL}s | yahoo cookie {'on' if YAHOO_USE_COOKIE else 'off'}")
 
-        print("\n[1/11] FX & macro")
+        print("\n[1/12] FX & macro")
         _run_checks([
             ("frankfurter.app", lambda: _get_json(
                 "https://api.frankfurter.app/latest?from=USD&to=EUR,JPY")["date"]),
@@ -3284,7 +4400,7 @@ if __name__ == "__main__":
                 ["US", "MY"], "NE.TRD.GNFS.ZS", "trade")),
         ], width=26)
 
-        print("\n[2/11] Rates, curve & their official fallbacks")
+        print("\n[2/12] Rates, curve & their official fallbacks")
         _run_checks([
             ("fred DFF", lambda: fred_series("DFF", years=1)[-1]),
             ("fred ECBDFR", lambda: fred_series("ECBDFR", years=1)[-1]),
@@ -3296,7 +4412,7 @@ if __name__ == "__main__":
             ("ustreasury breakeven", lambda: _ustreasury_breakeven_series(years=1)[-1]),
         ], width=24)
 
-        print("\n[3/11] FRED quote series (mapped to board cards, including fallbacks)")
+        print("\n[3/12] FRED quote series (mapped to board cards, including fallbacks)")
         mapped_fred = {sid for sid, _age in FRED_QUOTE_MAP.values()}
         mapped_fred.update(
             sid for fallbacks in FRED_QUOTE_FALLBACKS.values()
@@ -3307,7 +4423,7 @@ if __name__ == "__main__":
             for sid in sorted(mapped_fred)
         ], width=24)
 
-        print("\n[4/11] FRED candidate series (not wired in yet)")
+        print("\n[4/12] FRED candidate series (not wired in yet)")
         if FRED_PROBE_CANDIDATES:
             _run_checks([
                 (f"fred {sid}", lambda s=sid: _fred_probe(s, monthly=s.endswith("USDM")))
@@ -3316,13 +4432,13 @@ if __name__ == "__main__":
         else:
             print("  (no unverified candidates)")
 
-        print("\n[5/11] Yahoo Finance (cookie + crumb handshake, charts, spark batch)")
+        print("\n[5/12] Yahoo Finance (cookie + crumb handshake, charts, spark batch)")
         _doctor_yahoo(_run_checks)
 
-        print("\n[6/11] CNBC quote candidates (international indices)")
+        print("\n[6/12] CNBC quote candidates (international indices)")
         _doctor_cnbc(_run_checks)
 
-        print("\n[7/11] Stooq & CoinGecko")
+        print("\n[7/12] Stooq & CoinGecko")
         checks = []
         for scheme, domain, tag in (("https", "stooq.com", ""),
                                     ("https", "stooq.pl", ""),
@@ -3334,7 +4450,7 @@ if __name__ == "__main__":
                            lambda c=coin, s=sym: _coingecko_history(s, days=30)[-1]))
         _run_checks(checks, width=24)
 
-        print("\n[8/11] Tencent / Sina (indices FRED does not publish)")
+        print("\n[8/12] Tencent / Sina (indices FRED does not publish)")
         reset_breakers("tencent")
         reset_breakers("sina")
         clear_asia_cache()
@@ -3350,10 +4466,10 @@ if __name__ == "__main__":
             ("euro stoxx ^stx", lambda: _asia_probe("^stx")),
         ], width=24)
 
-        print("\n[9/11] US stock history (Stocks tab; Sina -> Nasdaq -> Tencent hosts, PFE probe)")
+        print("\n[9/12] US stock history (Stocks tab; Sina -> Nasdaq -> Tencent hosts, PFE probe)")
         _doctor_stock_history(_run_checks)
 
-        print("\n[10/11] Stock headline feeds (Stocks tab; Google -> Bing -> Yahoo)")
+        print("\n[10/12] Stock headline feeds (Stocks tab; Google -> Bing -> Yahoo)")
         import news
         reset_breakers("google_news")
         reset_breakers("bing_news")
@@ -3373,8 +4489,11 @@ if __name__ == "__main__":
             probe_checks.append((label, _probe))
         _run_checks(probe_checks, width=24)
 
-        print("\n[11/11] US stock delayed quotes (Stocks tab; Sina -> Nasdaq -> Tencent, PFE probe)")
+        print("\n[11/12] US stock delayed quotes (Stocks tab; Sina -> Nasdaq -> Tencent, PFE probe)")
         _doctor_stock_quotes(_run_checks)
+
+        print("\n[12/12] Index drawdowns & live index quotes (Drawdowns tab; Sina -> Nasdaq -> Tencent -> MSCI -> FRED)")
+        _doctor_drawdowns(_run_checks)
 
         print("\nProvider breakers after the probe:")
         _print_breakers()

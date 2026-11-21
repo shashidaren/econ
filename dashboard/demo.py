@@ -278,4 +278,74 @@ def fetch_news(candidates, *, days=7, per_symbol=3, now=None):
 
 def index_drawdown_history(yahoo_symbol, fred_symbol):
     bases = {"^GSPC": 5700, "^NDX": 20000, "^990100-USD-STRD": 3700, "^DJI": 42000}
-    return _walk("drawdown:" + yahoo_symbol, bases[yahoo_symbol], 365), "DEMO synthetic history"
+    walk = _walk("drawdown:" + yahoo_symbol, bases[yahoo_symbol], 365)
+    if yahoo_symbol == "^990100-USD-STRD":
+        return walk, "DEMO synthetic history (daily closes)"
+    ohlc = [
+        (d, c, round(c * (1.0 + 0.003 + ((i % 7) * 0.001)), 4))
+        for i, (d, c) in enumerate(walk)
+    ]
+    return ohlc, "DEMO synthetic history (daily OHLC)"
+
+
+def index_quotes_batch(symbols=None, *, now=None):
+    import drawdown
+    import sources
+
+    moment = now or datetime.now(timezone.utc)
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=timezone.utc)
+    moment_utc = moment.astimezone(timezone.utc)
+    session = sources.us_market_session(moment_utc)
+
+    default_syms = [ysym for _name, ysym, _fsym in drawdown.INDICES]
+    wanted = [str(s).strip() for s in (symbols if symbols is not None else default_syms) if str(s or "").strip()]
+    bases = {"^GSPC": 5700, "^NDX": 20000, "^990100-USD-STRD": 3700, "^DJI": 42000}
+    items = {}
+    for sym in wanted:
+        if sym == "^990100-USD-STRD":
+            continue
+        walk = _walk("drawdown:" + sym, bases.get(sym, 5000), 365)
+        prev_close = float(walk[-1][1])
+        seed = _seed("idxq:" + sym)
+        bump = (((seed % 140) - 55) / 10000.0)
+        price = round(prev_close * (1.0 + bump), 2)
+        change = round(price - prev_close, 2)
+        change_pct = round((change / prev_close) * 100.0, 2) if prev_close else 0.0
+        day_high = round(max(prev_close, price) * 1.004, 2)
+        day_low = round(min(prev_close, price) * 0.996, 2)
+        items[sym] = {
+            "symbol": sym,
+            "price": price,
+            "prev_close": round(prev_close, 2),
+            "change": change,
+            "change_pct": change_pct,
+            "open": round(prev_close * 1.0005, 2),
+            "day_high": day_high,
+            "day_low": day_low,
+            "week52_high": round(max(v for _, v in walk) * 1.01, 2),
+            "trade_date": walk[-1][0],
+            "as_of_utc": (moment_utc - timedelta(minutes=15)).isoformat(timespec="seconds"),
+            "as_of_display": None,
+            "delayed": True,
+            "delay_minutes": 15,
+            "source": "DEMO synthetic",
+            "market_status": session["state"],
+            "demo": True,
+        }
+    return {
+        "status": "ok" if len(items) == len(wanted) else ("partial" if items else "waiting"),
+        "message": "Synthetic demo index quotes — not live or delayed market levels.",
+        "delay_note": "Demo mode: synthetic index quotes generated locally; not real market data.",
+        "market_session": session,
+        "fetched_at_utc": moment_utc.isoformat(timespec="seconds"),
+        "items": items,
+        "errors": {},
+        "quote_providers": {"DEMO synthetic": len(items)} if items else {},
+        "coverage": {
+            "symbols": len(wanted),
+            "with_quotes": len(items),
+            "providers": ["DEMO synthetic"] if items else [],
+        },
+        "demo": True,
+    }
