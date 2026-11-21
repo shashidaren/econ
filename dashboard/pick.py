@@ -37,7 +37,7 @@ import math
 from zoneinfo import ZoneInfo
 
 METHOD = (
-    "Score = 0.35×trend (0.2×5-session + 0.5×20-session + 0.3×60-session return) "
+    "Legacy score = 0.35×trend (0.2×5-session + 0.5×20-session + 0.3×60-session return) "
     "+ 0.25×buyable-now (1.0 when the current price sits inside the planned buy "
     "zone, falling to 0 as it moves away or under the invalidation line) + "
     "0.20×calm (20-session realized volatility mapped 0→90% to 1→30%) + "
@@ -45,7 +45,17 @@ METHOD = (
     "(log 20-session dollar volume, 0→$3M to 1→$300M). Trend and buyable-now "
     "are relative to the list; the three risk terms use fixed bounds, so their "
     "scores mean the same thing every day. Overall scores are still only "
-    "comparable inside the same list."
+    "comparable inside the same list. "
+    "Ensemble score (primary rank) = equal-weight blend of five families, each "
+    "0..1 on fixed bounds: trend (SMA stack + MACD histogram + momentum), "
+    "mean-reversion pullback (RSI/Bollinger/z-score, only above the 50-day "
+    "average), risk-adjusted (20-session Sharpe/Sortino + inverse volatility), "
+    "volume breakout (Donchian + volume ratio + OBV slope) and calm/liquidity. "
+    "Weights are walk-forward tuned on prior folds only and shrunk 50% toward "
+    "equal weights; a bear-breadth regime gate (share of universe above its "
+    "20-day average) suppresses new picks. Confidence merges walk-forward "
+    "out-of-sample backtest evidence with a forward paper-trading ledger; "
+    "until enough matured picks exist the verdict stays in 'testing'."
 )
 LEVEL_METHOD = (
     "One-session σ = 20-session realized volatility ÷ √252, in dollars at the "
@@ -63,10 +73,13 @@ LEVEL_METHOD = (
 )
 LIMITATIONS = (
     "Daily closes only: no intraday order book, bid/ask spread, fundamentals, "
-    "earnings calendar, analyst targets or news scoring. The buy zone and both "
+    "earnings calendar, analyst targets or news scoring. RSI/MACD/Bollinger use "
+    "close-based proxies (no OHLC in this pipeline). The buy zone and both "
     "sell targets are volatility-scaled rules, not predictions — the stock can "
-    "gap straight through the stop. Position sizing is yours, and short-term "
-    "trading can lose money quickly."
+    "gap straight through the stop. Backtest and ledger hit rates are "
+    "out-of-sample estimates with wide intervals on small samples, not "
+    "guarantees. Position sizing is yours, and short-term trading can lose "
+    "money quickly."
 )
 
 MYT = ZoneInfo("Asia/Kuala_Lumpur")
@@ -490,12 +503,20 @@ def _entry_score(item, levels):
 def build_pick_view(screen, *, now=None, currency_rate=None, demo=False,
                     entry_sigma=None, target_sigmas=None, max_stop_pct=None,
                     hold_sessions=None, weights=None, local_tz=None,
-                    cost_pct=None, min_stop_pct=None, max_vol_pct=None):
+                    cost_pct=None, min_stop_pct=None, max_vol_pct=None,
+                    backtest=None, ledger_summary=None, breadth=None,
+                    ensemble_weights=None, risk_per_trade_pct=None):
     """Rank the screened candidates and plan the top one.
 
     `screen` is the payload app.summary() already builds for the Stocks tab
     (candidates carrying daily metrics, an optional `quote`, and the
     `currency_reference` block). Nothing here re-fetches or re-screens.
+
+    `backtest` / `ledger_summary` / `breadth` are optional accuracy evidence
+    from ``backtest.py`` (walk-forward OOS results + forward ledger). When
+    supplied, the ensemble score is the primary rank and the confidence gate
+    can hold the verdict in "testing"; when omitted, legacy behaviour is
+    preserved exactly (no gating).
     """
     import config  # local import keeps this module importable on its own
 
@@ -610,6 +631,19 @@ def build_pick_view(screen, *, now=None, currency_rate=None, demo=False,
                       for item, _ in rows],
     }
     total_weight = sum(float(v or 0.0) for v in weights.values()) or 1.0
+    # Ensemble (primary rank): five families on fixed bounds, from the same
+    # candidate metrics (stocks._extra_metrics supplies RSI/MACD/Bollinger/
+    # Sharpe/volume features; missing values fall back to neutral 0.5 inside
+    # backtest.family_scores, so older fixtures still score).
+    try:
+        import backtest as _bt
+        _ens_weights = tuple(ensemble_weights) if ensemble_weights is not None else \
+            tuple((backtest or {}).get("chosen_weights") or _bt.DEFAULT_WEIGHTS)
+    except Exception:  # pragma: no cover — backtest is stdlib-only
+        _bt = None
+        _ens_weights = (0.2, 0.2, 0.2, 0.2, 0.2)
+    risk_per_trade = (getattr(config, "PICK_RISK_PER_TRADE_PCT", 0.75)
+                      if risk_per_trade_pct is None else risk_per_trade_pct)
     ranked = []
     for index, (item, levels) in enumerate(rows):
         parts = {key: norm[key][index] for key in norm}
@@ -618,6 +652,14 @@ def build_pick_view(screen, *, now=None, currency_rate=None, demo=False,
         item["pick_score"] = round(score * 100.0, 1)
         item["score_parts"] = {key: round(value * 100.0, 0)
                                for key, value in parts.items()}
+        if _bt is not None:
+            ens, ens_parts = _bt.ensemble_score(item, weights=_ens_weights)
+            item["ensemble_score"] = round(ens * 100.0, 1)
+            item["ensemble_parts"] = {k: round(v * 100.0, 0)
+                                      for k, v in ens_parts.items()}
+        else:  # pragma: no cover
+            item["ensemble_score"] = item["pick_score"]
+            item["ensemble_parts"] = {}
         item["levels"] = _attach_myr(levels, rate)
         item["quote_price"] = _num(item.get("quote_price")) or _num(item.get("close"))
         item["entry_vs_quote_pct"] = (
@@ -626,9 +668,15 @@ def build_pick_view(screen, *, now=None, currency_rate=None, demo=False,
             if item.get("quote_price") else None)
         item["quote_price_myr"] = _myr(item.get("quote_price"), rate)
         item["flags"] = _quality_flags(item, levels)
+        # Position-size hint: risk budget ÷ stop width = capital fraction.
+        width = _num(item["levels"].get("risk_pct"))
+        item["position_hint_pct"] = (
+            round(risk_per_trade / width * 100.0, 1)
+            if (width and width > 0) else None)
         ranked.append(item)
 
-    ranked.sort(key=lambda row: (row["pick_score"],
+    ranked.sort(key=lambda row: (row.get("ensemble_score", 0.0),
+                                 row["pick_score"],
                                  row.get("ret20_pct") or 0.0), reverse=True)
 
     top = ranked[0]
@@ -668,6 +716,35 @@ def build_pick_view(screen, *, now=None, currency_rate=None, demo=False,
             f"{'inside its buy zone' if alternative.get('now_tag') == 'in zone' else 'the next-closest to buyable'}."
         )
 
+    # ---- accuracy evidence: confidence + regime gate (only when supplied) --
+    confidence = None
+    regime = {"breadth": breadth, "trade_allowed": True,
+              "label": "breadth unknown — trading allowed"}
+    if _bt is not None and (backtest is not None or ledger_summary is not None
+                            or breadth is not None):
+        try:
+            bear = getattr(config, "PICK_BEAR_BREADTH", 0.35)
+            allowed, label = _bt.regime_gate(breadth, bear)
+            regime = {"breadth": breadth, "trade_allowed": allowed, "label": label}
+            confidence = _bt.confidence_from_evidence(
+                backtest, ledger_summary,
+                min_n=getattr(config, "PICK_TEST_MIN_N", 30),
+                buy_threshold=getattr(config, "PICK_CONFIDENCE_BUY_THRESHOLD", 60.0))
+            # Gate the verdict: in testing (or bear breadth) the plan is shown
+            # but the buy instruction is held until evidence accumulates.
+            gated = (not confidence.get("buy_allowed")) or (not allowed)
+            top["gated"] = bool(gated)
+            if gated and top.get("now_tag") == "in zone":
+                top["verdict"] = (
+                    f"Testing — confidence {confidence.get('score')}/100 "
+                    f"({confidence.get('label')}); "
+                    f"{confidence.get('required_ledger_n', 0)} more matured "
+                    f"picks needed. The price is inside the buy zone, but the "
+                    f"rule has not earned a buy yet — wait for evidence. "
+                    f"Original plan: {top.get('verdict')}")
+        except Exception:  # pragma: no cover — evidence is best-effort
+            confidence = None
+
     status = str(screen.get("status") or "ok")
     if status == "ok" or not status:
         status = "ok"
@@ -690,6 +767,11 @@ def build_pick_view(screen, *, now=None, currency_rate=None, demo=False,
             "rate_date": currency.get("rate_date"),
         },
         "weights": weights,
+        "ensemble_weights": list(_ens_weights),
+        "confidence": confidence,
+        "regime": regime,
+        "backtest": backtest,
+        "ledger_summary": ledger_summary,
         "hold_sessions": hold_sessions,
         "entry_sigma": entry_sigma,
         "target_sigmas": list(target_sigmas),
@@ -811,6 +893,18 @@ def _why(item):
     if adv:
         bits.append(f"Trades about ${adv / 1_000_000:,.1f}M a day, so the zone "
                     f"should absorb a normal personal order.")
+    rsi = _num(item.get("rsi14"))
+    if rsi is not None:
+        bits.append(f"RSI {rsi:.0f} (close-based proxy).")
+    macd_hist = _num(item.get("macd_hist"))
+    if macd_hist is not None:
+        bits.append(f"MACD histogram {macd_hist:+.2f}.")
+    sharpe = _num(item.get("sharpe20"))
+    if sharpe is not None:
+        bits.append(f"20-session Sharpe {sharpe:+.2f}.")
+    ens = _num(item.get("ensemble_score"))
+    if ens is not None:
+        bits.append(f"Ensemble score {ens:.0f}/100 (five families, fixed bounds).")
     flags = item.get("flags") or []
     if flags:
         bits.append("Caveats: " + " ".join(flags))

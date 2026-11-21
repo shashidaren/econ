@@ -184,7 +184,9 @@ h2:after{content:"";flex:1;height:1px;background:var(--line)}
 .pick-list{margin:0;padding-left:17px;color:var(--muted);font-size:12px}
 .pick-list li{margin:3px 0}
 .pick-parts{margin-top:10px;display:flex;flex-direction:column;gap:5px}
-.pick-part{display:grid;grid-template-columns:98px 1fr 30px;gap:8px;align-items:center;font-size:11px;color:var(--muted)}
+.pick-parts-group{display:flex;flex-direction:column;gap:5px}
+.pick-parts-group+.pick-parts-group{margin-top:6px;padding-top:6px;border-top:1px solid var(--line)}
+.pick-part{display:grid;grid-template-columns:124px 1fr 30px;gap:8px;align-items:center;font-size:11px;color:var(--muted)}
 .pick-part b{text-align:right;color:var(--text);font-variant-numeric:tabular-nums}
 .pick-part-track{background:#0d1119;border-radius:4px;height:7px;overflow:hidden}
 .pick-part-track i{display:block;height:100%;background:var(--accent)}
@@ -1728,6 +1730,89 @@ def _plan_row(label, price, myr, sub_html="", css=""):
             f'<div class="pick-level-sub">{sub_html}</div></div>')
 
 
+def _pick_accuracy_html(view, *, demo=False):
+    """Accuracy section: walk-forward backtest, live ledger, confidence gate.
+
+    Every number is an out-of-sample estimate with its sample size and
+    interval — never a bare score. Missing evidence renders as "testing",
+    not as zero.
+    """
+    view = view or {}
+    confidence = view.get("confidence") or {}
+    backtest = view.get("backtest") or {}
+    ledger = view.get("ledger_summary") or {}
+    regime = view.get("regime") or {}
+    oos = (backtest.get("oos") or {}) if isinstance(backtest, dict) else {}
+    if not confidence and not backtest and not ledger:
+        return ('<section class="pick-table-wrap"><h2>Accuracy — backtest &amp; live testing '
+                '<span class="src">· walk-forward, out-of-sample, net of costs</span></h2>'
+                '<p class="pick-small">No backtest or ledger evidence yet — the daily '
+                'backtest runs in the background and live picks accumulate one per '
+                'U.S. session. Until then this tab stays in <b>testing</b>: the plan '
+                'is shown, but the rule has not earned a buy.</p></section>')
+    demo_tag = ' <span class="badge demo">DEMO — synthetic history, not evidence</span>' if demo else ""
+    conf_score = confidence.get("score")
+    conf_label = esc(confidence.get("label") or "testing")
+    conf_text = f"{fmt_num(conf_score, 0)}/100 · {conf_label}" if conf_score is not None else "testing"
+    reasons = "".join(f"<li>{esc(r)}</li>" for r in (confidence.get("reasons") or []))
+    # Backtest stats.
+    bt_n = oos.get("n") or 0
+    hit = oos.get("hit_rate")
+    hit_ci = oos.get("hit_ci") or (None, None)
+    hit_text = (f"{hit * 100:.0f}% ({hit_ci[0] * 100:.0f}–{hit_ci[1] * 100:.0f}%, N={bt_n})"
+                if hit is not None and hit_ci[0] is not None else "—")
+    exp = oos.get("expectancy_pct")
+    exp_text = f"{exp:+.2f}%/trade" if exp is not None else "—"
+    sharpe = oos.get("sharpe")
+    sharpe_text = f"{sharpe:+.2f}" if sharpe is not None else "—"
+    dsr = backtest.get("deflated_sharpe") if isinstance(backtest, dict) else None
+    dsr_text = f"{dsr:.2f}" if dsr is not None else "—"
+    bench = (backtest.get("benchmark") or {}) if isinstance(backtest, dict) else {}
+    excess = bench.get("mean_excess_pct")
+    excess_text = f"{excess:+.2f}%/trade" if excess is not None else "—"
+    folds = backtest.get("folds") or [] if isinstance(backtest, dict) else []
+    def _fold_row(f):
+        f_hit = f.get("hit_rate")
+        f_exp = f.get("expectancy_pct")
+        hit_s = f"{f_hit * 100:.0f}%" if f_hit is not None else "—"
+        exp_s = f"{f_exp:+.2f}%" if f_exp is not None else "—"
+        return (f"<tr><td>{esc(f.get('fold'))}</td><td>{esc(f.get('chosen') or '')}</td>"
+                f"<td>{esc(f.get('n') or 0)}</td><td>{esc(hit_s)}</td><td>{esc(exp_s)}</td></tr>")
+
+    fold_rows = "".join(_fold_row(f) for f in folds)
+    fold_table = (f'<div class="pick-table-scroll"><table class="pick-table">'
+                  f'<thead><tr><th>Fold</th><th>Weights</th><th>N</th><th>Hit %</th><th>Expectancy %</th></tr></thead>'
+                  f'<tbody>{fold_rows}</tbody></table></div>') if folds else ""
+    # Ledger stats.
+    led_n = ledger.get("n_matured") or 0
+    led_pending = ledger.get("n_pending") or 0
+    led_hit = ledger.get("hit_rate")
+    led_ci = ledger.get("hit_ci") or (None, None)
+    led_text = (f"{led_hit * 100:.0f}% ({led_ci[0] * 100:.0f}–{led_ci[1] * 100:.0f}%, N={led_n})"
+                if led_hit is not None and led_ci[0] is not None else "—")
+    led_exp = ledger.get("expectancy_pct")
+    led_exp_text = f"{led_exp:+.2f}%/pick" if led_exp is not None else "—"
+    min_n = confidence.get("min_n") or 30
+    required = confidence.get("required_ledger_n")
+    progress = f"{led_n}/{min_n} matured" + (f" · {required} more needed" if required else "")
+    breadth = regime.get("breadth")
+    breadth_text = f"{breadth:.0%} above 20-day average" if breadth is not None else "unknown"
+    regime_text = esc(regime.get("label") or "")
+    return f"""<section class="pick-table-wrap">
+  <h2>Accuracy — backtest &amp; live testing <span class="src">· walk-forward, out-of-sample, net of costs{demo_tag}</span></h2>
+  <div class="pick-plan">
+    <div class="pick-level buy"><div class="pick-level-label">Confidence</div><div class="pick-level-price">{esc(conf_text)}</div><div class="pick-level-sub">{esc(confidence.get('buy_allowed') and 'validated — buy allowed' or 'testing — wait for evidence')}</div></div>
+    <div class="pick-level"><div class="pick-level-label">Backtest hit rate (OOS)</div><div class="pick-level-price">{esc(hit_text)}</div><div class="pick-level-sub">expectancy {esc(exp_text)} · Sharpe {esc(sharpe_text)} · deflated {esc(dsr_text)}</div></div>
+    <div class="pick-level"><div class="pick-level-label">Excess vs equal-weight</div><div class="pick-level-price">{esc(excess_text)}</div><div class="pick-level-sub">same dates, same costs</div></div>
+    <div class="pick-level"><div class="pick-level-label">Live ledger</div><div class="pick-level-price">{esc(led_text)}</div><div class="pick-level-sub">expectancy {esc(led_exp_text)} · {esc(progress)} · {led_pending} pending</div></div>
+    <div class="pick-level"><div class="pick-level-label">Regime</div><div class="pick-level-price">{esc(breadth_text)}</div><div class="pick-level-sub">{regime_text}</div></div>
+  </div>
+  <ul class="pick-list">{reasons}</ul>
+  {fold_table}
+  <p class="pick-small">Backtest: entry at the next session's close, stop-first simulation on daily closes, net of the assumed round-trip cost. Weights tuned on prior folds only (purge/embargo = horizon) and shrunk toward equal weights; the deflated Sharpe penalises the {esc(backtest.get('n_trials') or '—')} variants tried. Intervals are Wilson (hit rate) and block-bootstrap (mean). Past performance is not a forecast.</p>
+</section>"""
+
+
 def build_pick_page(view, *, demo=False, generated_at=None, refresh=300,
                     title="Pick — what to buy, when, and where to sell"):
     """Render the Pick tab from ``pick.build_pick_view``.
@@ -1802,6 +1887,26 @@ def build_pick_page(view, *, demo=False, generated_at=None, refresh=300,
         score_html = "".join(part_bar(key, label) for key, label in (
             ("trend", "Trend"), ("entry", "Buyable now"), ("calm", "Calm"),
             ("drawdown", "Shallow drawdown"), ("liquidity", "Liquidity")))
+        ens_parts = top.get("ensemble_parts") or {}
+
+        def ens_bar(key, label):
+            value = ens_parts.get(key)
+            try:
+                pct = max(0.0, min(100.0, float(value)))
+            except (TypeError, ValueError):
+                return ""
+            return (f'<div class="pick-part"><span>{esc(label)}</span>'
+                    f'<div class="pick-part-track"><i style="width:{pct:.0f}%"></i></div>'
+                    f'<b>{pct:.0f}</b></div>')
+
+        ens_html = "".join(ens_bar(key, label) for key, label in (
+            ("trend", "Ensemble · Trend"),
+            ("mean_reversion", "Ensemble · Pullback"),
+            ("risk_adjusted", "Ensemble · Risk-adj"),
+            ("volume_breakout", "Ensemble · Volume"),
+            ("calm", "Ensemble · Calm/liq")))
+        if ens_html:
+            score_html = f'<div class="pick-parts-group">{ens_html}</div><div class="pick-parts-group">{score_html}</div>'
 
         if not quote_price:
             quote_line = ("No delayed quote yet — these are the last settled "
@@ -1854,13 +1959,17 @@ def build_pick_page(view, *, demo=False, generated_at=None, refresh=300,
                 f'{_usd(top.get("alternative_target"))}; '
                 f'{esc(top.get("alternative_tag"))}. Full numbers in the table below.</div>')
 
+        ens_sub = (f" · ensemble {esc(fmt_num(top.get('ensemble_score'), 1))}/100"
+                   if top.get("ensemble_score") is not None else "")
+        size_sub = (f" · size hint {esc(fmt_num(top.get('position_hint_pct'), 1))}%"
+                    if top.get("position_hint_pct") is not None else "")
         hero = f"""
 <section class="pick-hero">
   <div class="pick-hero-head">
     <div>
       <div class="pick-kicker">Best candidate in today's screen</div>
       <h2 class="pick-symbol">{esc(top.get("symbol"))} <span>{esc(top.get("name"))}</span></h2>
-      <div class="pick-sub">{esc(top.get("sector"))} · screen score {esc(fmt_num(top.get("pick_score"), 1))}/100
+      <div class="pick-sub">{esc(top.get("sector"))}{ens_sub} · legacy score {esc(fmt_num(top.get("pick_score"), 1))}/100{size_sub}
         · {esc(top.get("risk"))} risk · daily bars to {esc(top.get("as_of") or "?")}</div>
     </div>
     <div class="pick-quote">
@@ -1918,7 +2027,7 @@ def build_pick_page(view, *, demo=False, generated_at=None, refresh=300,
         return f"""<tr>
   <td class="pick-rank">{index}</td>
   <td><b>{esc(row.get("symbol"))}</b><div class="pick-small">{esc(row.get("name"))}</div></td>
-  <td>{esc(fmt_num(row.get("pick_score"), 1))}</td>
+  <td>{esc(fmt_num(row.get("ensemble_score"), 1))} <span class="pick-small">({esc(fmt_num(row.get("pick_score"), 1))})</span></td>
   <td>{_usd_rm(row_levels.get("buy_reference"), row_levels.get("buy_reference_myr"))}</td>
   <td>{_usd( row_levels.get("stop"))} <span class="pick-small">({_pfx(row_levels.get("stop_pct_from_entry"), 1)})</span></td>
   <td>{_usd(t1.get("price"))} <span class="pick-small">({_pfx(t1.get("move_pct"), 1)})</span></td>
@@ -1928,19 +2037,23 @@ def build_pick_page(view, *, demo=False, generated_at=None, refresh=300,
   <td>{esc(_hold_text(row))}</td>
 </tr>"""
 
+    # --- accuracy: backtest + live testing + confidence --------------------
+    accuracy_html = _pick_accuracy_html(view, demo=demo)
+
     table_rows = "".join(rank_row(i, row) for i, row in enumerate(picks, 1))
     table_html = (f"""<section class="pick-table-wrap">
   <h2>Full selection, ranked <span class="src">· same daily bars as the Stocks tab · buy price = midpoint of the buy zone</span></h2>
   <div class="pick-table-scroll">
   <table class="pick-table">
-    <thead><tr><th>#</th><th>Ticker</th><th>Score</th><th>Buy ≈</th><th>Stop</th>
+    <thead><tr><th>#</th><th>Ticker</th><th>Ensemble (legacy)</th><th>Buy ≈</th><th>Stop</th>
       <th>Target 1</th><th>Reward:risk</th><th>20-session</th><th>Risk</th><th>Hold</th></tr></thead>
     <tbody>{table_rows}</tbody>
   </table>
   </div>
-  <p class="pick-small">Scores are min-max normalised inside this list only, so
-  they are not comparable with another day's list. A name can rank first and
-  still be a "do not buy now" — the verdict above says which.</p>
+  <p class="pick-small">Ensemble scores use fixed bounds (comparable across
+  days); legacy scores in parentheses are min-max normalised inside this list
+  only. A name can rank first and still be a "testing" or "do not buy now" —
+  the verdict above says which.</p>
 </section>""" if picks else "")
 
     # --- cost + FX note -----------------------------------------------------
@@ -1971,6 +2084,12 @@ def build_pick_page(view, *, demo=False, generated_at=None, refresh=300,
     weights = view.get("weights") or {}
     weight_text = ", ".join(f"{esc(key)} {esc(fmt_num(value, 2))}"
                             for key, value in weights.items())
+    ens_weights = view.get("ensemble_weights") or []
+    ens_names = ("trend", "mean_reversion", "risk_adjusted", "volume_breakout", "calm")
+    ens_weight_text = (
+        ", ".join(f"{esc(name)} {esc(fmt_num(val, 2))}"
+                  for name, val in zip(ens_names, ens_weights))
+        if ens_weights else "equal (0.20 each)")
 
     rules_html = "".join(f"<li>{esc(rule)}</li>"
                          for rule in (session.get("rules") or []))
@@ -2001,12 +2120,14 @@ def build_pick_page(view, *, demo=False, generated_at=None, refresh=300,
 {caveat_html}
 {session_bar}
 {hero}
+{accuracy_html}
 {table_html}
 <details class="stock-method" open>
   <summary>How these numbers are calculated (and what they are not)</summary>
   <ul>
     <li><b>Selection:</b> {esc(method)}</li>
-    <li><b>Weights used today:</b> {weight_text}.</li>
+    <li><b>Ensemble weights used today:</b> {ens_weight_text}.</li>
+    <li><b>Legacy weights used today:</b> {weight_text}.</li>
     <li><b>Buy zone, stop and targets:</b> {esc(level_method)}</li>
     <li><b>Timing:</b><ul>{rules_html}</ul></li>
     <li><b>Costs:</b> net figures subtract an assumed {esc(fmt_num(cost_pct, 2))}% round trip.</li>

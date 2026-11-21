@@ -316,3 +316,50 @@ except ValueError:
 # cannot carry, and a stop tight enough to be affordable is noise. They are
 # counted on the page rather than silently ranked last.
 PICK_MAX_VOL_PCT = float(os.environ.get("ECON_PICK_MAX_VOL", "120"))
+
+# --- Pick accuracy engine (backtest + ensemble + live testing) ---------------
+# Walk-forward backtest over daily bars (same keyless cascade, longer window,
+# daily TTL). Entry at t+1 close, stop-first simulation, net of costs.
+PICK_BACKTEST_ENABLED = os.environ.get("ECON_PICK_BACKTEST", "1") not in ("0", "false", "no")
+try:
+    PICK_BACKTEST_DAYS = max(130, min(1500, int(os.environ.get("ECON_PICK_BACKTEST_DAYS", "500"))))
+except ValueError:
+    PICK_BACKTEST_DAYS = 500
+try:
+    PICK_BACKTEST_HORIZON = max(5, min(60, int(os.environ.get("ECON_PICK_BACKTEST_HORIZON", "20"))))
+except ValueError:
+    PICK_BACKTEST_HORIZON = 20
+try:
+    PICK_BACKTEST_STEP = max(1, min(20, int(os.environ.get("ECON_PICK_BACKTEST_STEP", "5"))))
+except ValueError:
+    PICK_BACKTEST_STEP = 5
+try:
+    PICK_BACKTEST_FOLDS = max(2, min(5, int(os.environ.get("ECON_PICK_BACKTEST_FOLDS", "3"))))
+except ValueError:
+    PICK_BACKTEST_FOLDS = 3
+# Forward paper-trading ledger: every live top pick is logged and matured as
+# sessions pass. Until `PICK_TEST_MIN_N` matured picks exist the tab stays in
+# "testing" and the verdict is gated — evidence before advice.
+PICK_LEDGER_ENABLED = os.environ.get("ECON_PICK_LEDGER", "1") not in ("0", "false", "no")
+PICK_LEDGER_FILE = os.environ.get("ECON_PICK_LEDGER_FILE", "/var/lib/econ/pick-ledger.json")
+try:
+    PICK_TEST_MIN_N = max(5, min(200, int(os.environ.get("ECON_PICK_TEST_MIN_N", "30"))))
+except ValueError:
+    PICK_TEST_MIN_N = 30
+try:
+    PICK_CONFIDENCE_BUY_THRESHOLD = max(40.0, min(90.0, float(
+        os.environ.get("ECON_PICK_CONFIDENCE_BUY", "60"))))
+except ValueError:
+    PICK_CONFIDENCE_BUY_THRESHOLD = 60.0
+# Bear-breadth gate: share of the universe above its 20-day average below
+# this suppresses new picks (regime filter).
+try:
+    PICK_BEAR_BREADTH = max(0.1, min(0.6, float(os.environ.get("ECON_PICK_BEAR_BREADTH", "0.35"))))
+except ValueError:
+    PICK_BEAR_BREADTH = 0.35
+# Risk per trade for the position-size hint (percent of capital at the stop).
+try:
+    PICK_RISK_PER_TRADE_PCT = max(0.1, min(5.0, float(
+        os.environ.get("ECON_PICK_RISK_PER_TRADE", "0.75"))))
+except ValueError:
+    PICK_RISK_PER_TRADE_PCT = 0.75

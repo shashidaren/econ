@@ -37,6 +37,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 import alerts
+import backtest as backtest_engine
 import briefing
 import config
 import economy
@@ -199,6 +200,46 @@ def economy_history():
     }
 
 
+def _record_pick_ledger(screen):
+    """Append today's top pick to the forward paper-trading ledger.
+
+    Called only from the background screen refresh (never on page views).
+    Deduped by (data_date, symbol) inside ledger_append, so hourly refreshes
+    on the same U.S. session log one pick per day. Maturation enters at the
+    next session's close (t+1) and simulates stop-first on daily closes net
+    of costs.
+    """
+    if not isinstance(screen, dict) or not screen.get("candidates"):
+        return False
+    bt_data = get_data("stock_backtest")
+    view = pick_planner.build_pick_view(
+        screen, now=datetime.now(timezone.utc),
+        max_stop_pct=getattr(config, "PICK_STOP_MAX_LOSS_PCT", 8.0),
+        backtest=bt_data if isinstance(bt_data, dict) else None)
+    top = view.get("top") or {}
+    levels = top.get("levels") or {}
+    if not top.get("symbol") or levels.get("buy_reference") is None:
+        return False
+    targets = levels.get("targets") or []
+    entry = {
+        "date": screen.get("data_date") or datetime.now(timezone.utc).date().isoformat(),
+        "entry_date": None,
+        "symbol": str(top.get("symbol")).upper(),
+        "entry_ref": levels.get("buy_reference"),
+        "stop": levels.get("stop"),
+        "tp1": (targets[0] or {}).get("price") if targets else None,
+        "tp2": (targets[1] or {}).get("price") if len(targets) > 1 else None,
+        "ensemble_score": top.get("ensemble_score"),
+        "pick_score": top.get("pick_score"),
+        "horizon": int(getattr(config, "PICK_BACKTEST_HORIZON", 20)),
+        "cost_pct": float(getattr(config, "PICK_COST_PCT", 0.35)),
+        "matured": False,
+    }
+    return backtest_engine.ledger_append(
+        getattr(config, "PICK_LEDGER_FILE", "/var/lib/econ/pick-ledger.json"),
+        entry)
+
+
 def _displayed_stock_symbols() -> list[str]:
     """Ticker symbols currently shown by the cached stock screen (up to 7)."""
     entry = cache_get("stock_screen") or {}
@@ -313,8 +354,83 @@ def build_registry():
                                 f"{type(exc).__name__}: {exc}")[:240],
                     "items": {}, "errors": {},
                 }
+        # Forward paper-trading ledger: log today's top pick (deduped by
+        # date+symbol) so live accuracy accumulates over testing time.
+        # Background-only (this runs in the refresher, never on page views);
+        # demo picks are synthetic and must never count as live evidence.
+        if getattr(config, "PICK_LEDGER_ENABLED", True) and not config.DEMO:
+            try:
+                _record_pick_ledger(screen)
+            except Exception:  # noqa: BLE001 — ledger must never break the screen
+                pass
         return screen
     reg.append(("stock_screen", stock_screen_data, config.TTL["stocks"]))
+
+    # 5b. Pick accuracy: walk-forward backtest over a longer daily window
+    # (daily TTL) + ledger maturation. Same keyless cascade as the screen;
+    # failures keep the last good backtest and never touch the screen.
+    def stock_backtest_data():
+        if not getattr(config, "PICK_BACKTEST_ENABLED", True):
+            return {"status": "disabled",
+                    "message": "Backtest is disabled (ECON_PICK_BACKTEST=0)."}
+        symbols = [row[0] for row in config.STOCK_UNIVERSE]
+        vendor_symbols = {row[0]: row[3] for row in config.STOCK_UNIVERSE}
+        histories = backend.stock_history_batch(
+            symbols,
+            vendor_symbols=vendor_symbols,
+            days=getattr(config, "PICK_BACKTEST_DAYS", 500),
+        )
+        result = backtest_engine.walk_forward_backtest(
+            histories,
+            horizon=getattr(config, "PICK_BACKTEST_HORIZON", 20),
+            cost_pct=getattr(config, "PICK_COST_PCT", 0.35),
+            step=getattr(config, "PICK_BACKTEST_STEP", 5),
+            n_folds=getattr(config, "PICK_BACKTEST_FOLDS", 3),
+            bear_threshold=getattr(config, "PICK_BEAR_BREADTH", 0.35),
+            min_price=config.STOCK_MIN_PRICE,
+            max_price=config.STOCK_MAX_PRICE,
+            min_adv=config.STOCK_MIN_AVG_DOLLAR_VOLUME,
+            max_vol=getattr(config, "PICK_MAX_VOL_PCT", 120.0),
+            entry_sigma=getattr(config, "PICK_ENTRY_SIGMA", 0.6),
+            min_stop_pct=getattr(config, "PICK_MIN_STOP_PCT", 2.5),
+            max_stop_pct=getattr(config, "PICK_STOP_MAX_LOSS_PCT", 8.0),
+        )
+        # Breadth on the latest date (regime gate input).
+        try:
+            latest = max((r[0] for h in histories.values()
+                          for r in (h.get("rows") if isinstance(h, dict) else h or [])),
+                         default=None)
+            above = total = 0
+            for payload in histories.values():
+                rows = backtest_engine.rows_for(payload)
+                feats = backtest_engine.compute_features(rows)
+                for f in feats:
+                    if f and f.get("date") == latest:
+                        total += 1
+                        if f.get("close") and f.get("sma20") and f["close"] > f["sma20"]:
+                            above += 1
+            result["breadth"] = (above / total) if total else None
+            result["breadth_date"] = latest
+        except Exception:  # noqa: BLE001 — breadth is best-effort
+            result["breadth"] = None
+        # Mature the forward ledger with the same histories.
+        ledger_file = getattr(config, "PICK_LEDGER_FILE", "/var/lib/econ/pick-ledger.json")
+        try:
+            entries = backtest_engine.ledger_load(ledger_file)
+            matured, newly = backtest_engine.ledger_mature(
+                entries, histories,
+                horizon=getattr(config, "PICK_BACKTEST_HORIZON", 20),
+                cost_pct=getattr(config, "PICK_COST_PCT", 0.35))
+            if newly:
+                backtest_engine.ledger_save(ledger_file, matured)
+            result["ledger_summary"] = backtest_engine.ledger_summary(matured)
+            result["ledger_pending"] = sum(1 for e in matured if not e.get("matured"))
+        except Exception:  # noqa: BLE001 — ledger must never break the backtest
+            result["ledger_summary"] = backtest_engine.ledger_summary([])
+        result["generated_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        result["demo"] = bool(config.DEMO)
+        return result
+    reg.append(("stock_backtest", stock_backtest_data, 24 * 60 * 60))
 
     # 6. Delayed / intraday stock quotes (~15-min delayed keyless overlay for
     # the displayed stock picks, refreshed every 5 min on the board cycle).
@@ -933,9 +1049,11 @@ def _with_indicative_myr(screen, fx_entry, *, demo=False, now=None):
 def build_pick(screen, *, demo=False, now=None):
     """Plan view over the stock screen that is already in the cache.
 
-    Pure derivation: no new fetch, no new cache key. `pick.build_pick_view`
-    ranks the displayed candidates for buyability and turns the top one into a
-    buy zone, a stop, two sell targets and a Malaysian-time window.
+    Pure derivation over the cached screen + cached backtest/ledger evidence:
+    no new fetch on page views. `pick.build_pick_view` ranks the displayed
+    candidates for buyability and turns the top one into a buy zone, a stop,
+    two sell targets and a Malaysian-time window, gated by the confidence
+    the backtest + forward ledger have earned.
     """
     if not getattr(config, "PICK_ENABLED", True):
         return {
@@ -947,12 +1065,29 @@ def build_pick(screen, *, demo=False, now=None):
     screen = screen if isinstance(screen, dict) else {}
     currency = screen.get("currency_reference") or {}
     rate = currency.get("rate") if currency.get("available") else None
+    backtest_result = get_data("stock_backtest")
+    if not isinstance(backtest_result, dict):
+        backtest_result = None
+    ledger_summary = (backtest_result or {}).get("ledger_summary") \
+        if backtest_result else None
+    if ledger_summary is None and not demo:
+        # Ledger may exist before the first daily backtest lands.
+        try:
+            entries = backtest_engine.ledger_load(
+                getattr(config, "PICK_LEDGER_FILE", "/var/lib/econ/pick-ledger.json"))
+            ledger_summary = backtest_engine.ledger_summary(entries)
+        except Exception:  # noqa: BLE001 — evidence is best-effort
+            ledger_summary = None
+    breadth = (backtest_result or {}).get("breadth") if backtest_result else None
     return pick_planner.build_pick_view(
         screen,
         now=moment,
         currency_rate=rate,
         demo=demo,
         max_stop_pct=getattr(config, "PICK_STOP_MAX_LOSS_PCT", 8.0),
+        backtest=backtest_result,
+        ledger_summary=ledger_summary,
+        breadth=breadth,
     )
 
 
