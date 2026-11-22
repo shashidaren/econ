@@ -152,10 +152,11 @@ returns the same data; `/api/summary` includes it as `drawdowns`.
 Each index card displays the latest live / ~15-minute-delayed level in points
 (or latest settled daily close) alongside **both** drawdown conventions
 side-by-side so it reconciles with either live reporting style. Gold is shown
-in USD per troy ounce using daily price history; its card also shows an
-indicative MYR-per-gram conversion when both the gold close and USD/MYR reference
-are fresh. The calculation is `USD/oz × USD/MYR ÷ 31.1034768`; it is not a local
-retail quote and excludes dealer premiums, spreads and jewellery costs.
+in USD per troy ounce using its deepest available daily OHLC history; its card
+also shows an indicative MYR-per-gram conversion when both the gold close and
+USD/MYR reference are fresh. The calculation is `USD/oz × USD/MYR ÷ 31.1034768`;
+it is not a local retail quote and excludes dealer premiums, spreads and
+jewellery costs.
 - **Intraday high & drawdown from intraday high:** `(latest / intraday_high - 1) × 100`
   when daily OHLC history is available (Sina US daily K, Nasdaq index historical,
   Tencent raw K-line, or Yahoo daily bars).
@@ -170,6 +171,13 @@ retail quote and excludes dealer premiums, spreads and jewellery costs.
   `getLevelDataForGraph` JSON endpoint (`990100 USD STRD`, daily end-of-day
   closes since 1997 — exact same USD price-return index, never an ETF or total
   return) → FRED (`SP500`, `NASDAQ100`, `DJIA`, up to 10 years of daily closes).
+- **Gold history (`TTL = 3600`):** Yahoo Finance `GC=F`
+  (`period1=0&period2=<now>&interval=1d`, maximum available daily OHLC) →
+  Stooq `xauusd` daily OHLC (`Date,Open,High,Low,Close,Volume`) → CoinGecko
+  PAX Gold daily closes (up to 365 days). This is a dedicated cascade: the
+  generic market-quote cascade is close-only and its CoinGecko fallback is
+  90-day capped, which previously made the gold card report a ~3-month high
+  (~$4,672) instead of gold's January 2026 all-time high (~$5,590).
 - **Live / ~15-min-delayed quote overlay (`TTL = 300`, `ECON_DRAWDOWN_QUOTES=1`):**
   Sina `hq.sinajs.cn/list=gb_$inx,gb_$ndx,gb_$dji` → Nasdaq `/api/quote/NDX/info?assetclass=index`
   → Tencent `qt.gtimg.cn/q=usINX,usNDX,usDJI` → Yahoo chart meta. Close-only

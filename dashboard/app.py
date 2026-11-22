@@ -509,15 +509,17 @@ def build_registry():
             return drawdown.from_history(n, rows, source)
         reg.append((f"drawdown:{symbol}", fetch_drawdown, drawdown.TTL))
 
-    # Gold is shown alongside indices using the existing XAU/USD history
-    # cascade. It is quoted in USD per troy ounce; drawdown history is daily.
+    # Gold is shown alongside indices. It is quoted in USD per troy ounce;
+    # drawdown history is daily and uses a dedicated deep OHLC cascade so the
+    # peak covers the deepest history the provider has (the generic quote
+    # cascade is close-only and its CoinGecko fallback is 90-day capped).
     def fetch_gold_drawdown():
-        rows = backend.stooq_history(
-            drawdown.GOLD_SYMBOL, days=drawdown.GOLD_HISTORY_DAYS)
-        source = ("DEMO synthetic history" if config.DEMO else
-                  (sources._LAST_SOURCE.get(drawdown.GOLD_SYMBOL) or ("market",))[0])
+        rows, source = backend.gold_drawdown_history()
         item = drawdown.from_history(drawdown.GOLD_NAME, rows, source)
         item["unit"] = "USD / troy oz"
+        # Marks the deep-OHLC schema so warm_all() refreshes pre-upgrade gold
+        # entries that were built from the shallow 90-day quote cascade.
+        item["history_kind"] = "gold-deep-ohlc"
         return item
     reg.append(("drawdown:gold", fetch_gold_drawdown, drawdown.TTL))
 
@@ -573,7 +575,15 @@ def warm_all(force=False):
             and isinstance((entry or {}).get("data"), dict)
             and "close_peak" not in entry["data"]
         )
-        if not force and cache_valid(entry) and not is_legacy_drawdown:
+        # Pre-upgrade gold entries came from the shallow close-only quote
+        # cascade (90-day CoinGecko cap); refresh them on the first boot.
+        is_shallow_gold = (
+            key == "drawdown:gold"
+            and isinstance((entry or {}).get("data"), dict)
+            and entry["data"].get("history_kind") != "gold-deep-ohlc"
+        )
+        if (not force and cache_valid(entry)
+                and not is_legacy_drawdown and not is_shallow_gold):
             continue
         # The stock screen fans out across a fixed watchlist. If every provider
         # fails, honour its 1 h TTL even with no last-good cache so a 5 min board
@@ -1326,9 +1336,10 @@ def drawdown_view(*, now: datetime | None = None):
         "method": (
             "Index items use the latest live / ~15-min-delayed level (or latest "
             "settled daily close), measured against the highest intraday level and "
-            "daily close in available history. Gold uses daily USD/troy-ounce closes; "
-            "MYR/gram is indicative and uses a fresh USD/MYR reference. History may "
-            "not cover index inception."
+            "daily close in available history. Gold uses the deepest available daily "
+            "OHLC history (Yahoo GC=F, Stooq, or CoinGecko closes); MYR/gram is "
+            "indicative and uses a fresh USD/MYR reference. History may not cover "
+            "index inception."
         ),
     }
 

@@ -362,6 +362,110 @@ class DrawdownTest(unittest.TestCase):
             self.assertEqual(merged["close_peak"], 6000.0)
             self.assertAlmostEqual(merged["close_drawdown_pct"], (5950.0 / 6000.0 - 1.0) * 100.0)
 
+    def test_gold_drawdown_history_searches_deep_ohlc_not_90d_quote_cap(self):
+        # Regression: the gold card used the close-only quote cascade, whose
+        # CoinGecko fallback truncates `days` to 90. With Yahoo 429'd and Stooq
+        # blocked, only ~3 months of closes were searched and the January 2026
+        # all-time high (~$5,590) was missed, reporting ~4,672 as the peak.
+        today = date.today()
+        record_day = today - timedelta(days=298)  # ~2026-01-28 from Nov 2026
+        deep_rows = [
+            ((today - timedelta(days=360)).isoformat(), 4300.0, 4325.0),
+            (record_day.isoformat(), 5590.0, 5602.22),
+            (today.isoformat(), 4100.0, 4125.0),
+        ]
+        with patch.object(sources, "_yahoo_chart_ohlc_history",
+                          return_value=deep_rows) as yahoo:
+            rows, src = sources.gold_drawdown_history()
+        yahoo.assert_called_once_with("GC=F")
+        self.assertIn("Yahoo", src)
+        item = drawdown.from_history("Gold", rows, src, today=today)
+        self.assertEqual(item["close_peak"], 5590.0)
+        self.assertEqual(item["intraday_peak"], 5602.22)
+        self.assertGreater(item["close_peak"], 5000)  # not the old ~90-day high
+
+    def test_gold_drawdown_history_falls_back_to_stooq_ohlc_then_coingecko(self):
+        today = date.today()
+        stooq_rows = [
+            ((today - timedelta(days=400)).isoformat(), 4200.0, 4250.0),
+            (today.isoformat(), 4100.0, 4125.0),
+        ]
+        with patch.object(sources, "_yahoo_chart_ohlc_history",
+                          side_effect=RuntimeError("yahoo: 429")), \
+             patch.object(sources, "_stooq_raw_history",
+                          return_value=stooq_rows) as stooq:
+            rows, src = sources.gold_drawdown_history()
+        self.assertIn("Stooq", src)
+        self.assertEqual(rows[-1][2], 4125.0)
+        stooq.assert_called_once_with(
+            "xauusd", days=drawdown.GOLD_HISTORY_DAYS, ohlc=True)
+
+        coin_rows = [((today - timedelta(days=200)).isoformat(), 4672.31),
+                     (today.isoformat(), 4100.0)]
+        with patch.object(sources, "_yahoo_chart_ohlc_history",
+                          side_effect=RuntimeError("yahoo: 429")), \
+             patch.object(sources, "_stooq_raw_history",
+                          side_effect=RuntimeError("stooq: timeout")), \
+             patch.object(sources, "_coingecko_history",
+                          return_value=coin_rows) as coin:
+            rows, src = sources.gold_drawdown_history()
+        self.assertIn("CoinGecko", src)
+        self.assertEqual(rows[-1][1], 4100.0)
+        coin.assert_called_once_with("xauusd", days=drawdown.GOLD_HISTORY_DAYS)
+
+    def test_coingecko_history_requests_up_to_365_days(self):
+        ts_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+        payload = {"prices": [[ts_ms, 123.0]]}
+        with patch.object(sources, "provider_available", return_value=True), \
+             patch.object(sources, "_get_json", return_value=payload) as get, \
+             patch.object(sources, "note_provider_ok"), \
+             patch.object(sources, "note_provider_failure"):
+            rows = sources._coingecko_history("xauusd", days=drawdown.GOLD_HISTORY_DAYS)
+        self.assertEqual(rows[-1][1], 123.0)
+        called_url = get.call_args.args[0]
+        self.assertIn("days=365", called_url)
+        self.assertNotIn("days=90", called_url)
+
+    def test_stooq_csv_ohlc_parser_keeps_daily_high(self):
+        text = (
+            "Date,Open,High,Low,Close,Volume\n"
+            "2026-11-19,4090,4110.5,4080,4100.25,100\n"
+            "2026-11-20,4100,4150.5,4095,4125.25,120\n"
+            "bad,0,0,0,0,0\n"
+        )
+        rows = sources._parse_stooq_csv_ohlc(text)
+        self.assertEqual(rows, [
+            ("2026-11-19", 4100.25, 4110.5),
+            ("2026-11-20", 4125.25, 4150.5),
+        ])
+
+    def test_stooq_raw_history_ohlc_mode_returns_highs(self):
+        text = (
+            "Date,Open,High,Low,Close,Volume\n"
+            "2026-11-20,4100,4150.5,4095,4125.25,120\n"
+        )
+        with patch.object(sources, "provider_available", return_value=True), \
+             patch.object(sources, "_get", return_value=text), \
+             patch.object(sources, "note_provider_ok"):
+            rows = sources._stooq_raw_history("xauusd", days=365, ohlc=True)
+        self.assertEqual(rows, [("2026-11-20", 4125.25, 4150.5)])
+
+    def test_fetch_gold_drawdown_uses_dedicated_gold_history(self):
+        today = date.today()
+        rows = [
+            ((today - timedelta(days=300)).isoformat(), 4700.0, 4750.0),
+            (today.isoformat(), 4100.0, 4125.0),
+        ]
+        fetch = next(fn for key, fn, _ttl in app.REGISTRY if key == "drawdown:gold")
+        with patch.object(app.backend, "gold_drawdown_history",
+                          return_value=(rows, "test gold source")):
+            item = fetch()
+        self.assertEqual(item["name"], "Gold")
+        self.assertEqual(item["unit"], "USD / troy oz")
+        self.assertEqual(item["close_peak"], 4700.0)
+        self.assertEqual(item["intraday_peak"], 4750.0)
+        self.assertEqual(item["source"], "test gold source")
+
     def test_gold_drawdown_and_indicative_myr_per_gram(self):
         today = date.today()
         gold_history = drawdown.from_history("Gold", [
@@ -493,11 +597,31 @@ class DrawdownTest(unittest.TestCase):
                         "err": None,
                     }
                 else:
-                    app.CACHE[key] = {"data": {"close_peak": 1, "close": 1}, "at": now_ts, "ttl": ttl, "err": None}
+                    app.CACHE[key] = {
+                        "data": {"close_peak": 1, "close": 1,
+                                 "history_kind": "gold-deep-ohlc"},
+                        "at": now_ts, "ttl": ttl, "err": None,
+                    }
             refreshed = []
             with patch.object(app, "fetch_into_cache", side_effect=lambda k, fn, ttl: refreshed.append(k)):
                 app.warm_all(force=False)
             self.assertEqual(refreshed, ["drawdown:^GSPC"])
+
+    def test_warm_all_immediately_upgrades_shallow_gold_drawdown_cache(self):
+        now_ts = time.time()
+        with patch.dict(app.CACHE, {}, clear=True), \
+             patch.object(app, "save_disk_cache"), \
+             patch.object(config, "DEMO", True):
+            for key, _fn, ttl in app.REGISTRY:
+                data = {"close_peak": 1, "close": 1}
+                if key == "drawdown:gold":
+                    # Pre-upgrade entry from the shallow 90-day quote cascade.
+                    data["history_kind"] = "quote-cascade"
+                app.CACHE[key] = {"data": data, "at": now_ts, "ttl": ttl, "err": None}
+            refreshed = []
+            with patch.object(app, "fetch_into_cache", side_effect=lambda k, fn, ttl: refreshed.append(k)):
+                app.warm_all(force=False)
+            self.assertEqual(refreshed, ["drawdown:gold"])
 
     def test_demo_drawdowns_and_doctor_probe(self):
         rows, src = demo.index_drawdown_history("^GSPC", "SP500")

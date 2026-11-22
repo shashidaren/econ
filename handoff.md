@@ -73,6 +73,7 @@ kept only in server-local `.env`; it adds no market-data provider.
 
 | D30 | Index drawdown tab | **`/drawdowns` and `/api/drawdowns`; latest daily value vs highest close in available history** | Yahoo max-history first; FRED up to 10 years for S&P 500, Nasdaq 100 and Dow; MSCI World USD price-return Yahoo only. History coverage is explicit, so no limited peak is falsely represented as a verified all-time or intraday record. Independent per-index hourly caches retain and flag stale readings. No ETF proxy. |
 | D31 | Live drawdown reconciliation (dual highs + 5-min quote overlay + OHLC/MSCI cascade) | **Show live / ~15m index points against BOTH intraday high and daily closing high side-by-side; fix Yahoo `range=max` monthly coercion; add Sina/Nasdaq/Tencent OHLC + official MSCI `990100 USD STRD` + 5-min `drawdown_quotes`** | Fixes `/drawdowns` diverging from live figures on the LXC where Yahoo HTTP 429 forced US indices onto 1–2-day-lagging FRED closes and dropped MSCI World, and where `range=max&interval=1d` returned monthly (`1mo`) candles. Yahoo now uses `period1=0&period2=<now>&interval=1d` (rejecting non-`1d` granularity); US indices fall back across Sina `.INX`/`.NDX`/`.DJI` daily OHLC → Nasdaq `NDX` OHLC → Tencent `us.INX`/`us.NDX`/`us.DJI` raw K-line OHLC → FRED; MSCI World falls back to `app2.msci.com` `getLevelDataForGraph` (`990100`, `USD`, `STRD`, `baseValue=false`, daily closes since 1997 — never an ETF or total return). `drawdown_quotes` (`TTL=300`) overlays Sina `gb_$inx,gb_$ndx,gb_$dji` → Nasdaq → Tencent → Yahoo quotes every 5 min. |
+| D32 | Gold drawdown peak correction (2026-11-22) | **Gold card searches the deepest available daily OHLC history (Yahoo `GC=F` → Stooq `xauusd` OHLC → CoinGecko PAX Gold closes), never the 90-day-capped quote cascade** | Owner reported the gold card's highest value as **4,672.31**, while gold's actual record is ~$5,590–5,602 on 2026-01-28. Root cause: `fetch_gold_drawdown` reused `stooq_history()` — a close-only cascade whose last-resort CoinGecko provider hard-capped `days` to 90. On the LXC Yahoo 429s and Stooq times out, so only ~3 months of closes were searched and the January 2026 record fell outside the window; the intraday-high column was also permanently blank because every gold source was close-only. Fix: new `sources.gold_drawdown_history()` (Yahoo `GC=F` full-history OHLC → Stooq `xauusd` OHLC → CoinGecko closes up to 365 days), `GOLD_HISTORY_DAYS` raised to 3650, a `gold-deep-ohlc` cache marker that forces an immediate refresh of pre-upgrade gold entries, and a `--doctor` §[12/12] gold cascade probe. Demo data now includes a deterministic January 2026 record run-up so offline previews show the corrected peak. |
 
 ## 4. Architecture
 
@@ -941,3 +942,48 @@ Preview (no network needed): `ECON_DEMO=1 python3 dashboard/app.py` → sample d
   - `sources.index_quotes_batch` cascades Sina `hq.sinajs.cn/list=gb_$inx,gb_$ndx,gb_$dji` (resolving US trade date via Sina's ET field `[25]`+`[29]` so UTC+8 morning timestamps don't shift Friday closes to Saturday) → Nasdaq `NDX` `/info?assetclass=index` → Tencent `qt.gtimg.cn/q=usINX,usNDX,usDJI` → Yahoo `v8/finance/chart`.
   - `app.py` registers `drawdown_quotes` (`TTL=300`), immediately refreshes pre-upgrade close-only `drawdown:*` entries on startup, and resets drawdown/quote breakers on `/drawdowns?refresh=1`. `render.py` renders live index points, session move, history-bar close anchor, and a 2×2 **Intraday high** + **Closing high** grid. `--doctor` gained §[12/12] (`_doctor_drawdowns`).
 - **Verification:** `py_compile`, **258/258** Python unit tests, **22/22** `test_auto_update.sh` assertions, and `ECON_DEMO=1` smoke check across `/drawdowns`, `/api/drawdowns`, `/api/status`, and `/summary`. After merging to `main` (auto-deployed within ~30 min by `auto_update.sh` or immediately via `sudo /opt/econ/tools/auto_update.sh`), verify on `root@econ` with `python3 /opt/econ/dashboard/sources.py --doctor` §[12/12] and `curl -s localhost:8080/api/drawdowns | python3 -m json.tool`.
+
+### 2026-11-22 — Gold drawdown peak correction (D32)
+
+- **Symptom reported:** the Gold card on `/drawdowns` showed **4,672.31** as the
+  highest value, while gold's actual all-time high is **~$5,590–5,602 on
+  2026-01-28** (spot intraday; LBMA PM fix peaked near $5,405).
+- **Root cause:** `app.fetch_gold_drawdown` reused `sources.stooq_history()`, the
+  generic market-quote cascade. That cascade is **close-only** and its last-resort
+  provider, `_coingecko_history()`, hard-capped `days` to **90**:
+  `...market_chart?...&days={min(days, 90)}&interval=daily`. On the LXC Yahoo
+  returns 429 and Stooq times out, so CoinGecko was the only reachable gold source.
+  A 365-day request was silently truncated to 90 days (~2026-08-24 → 2026-11-22),
+  whose highest close was ~4,672.31; the January 2026 record fell outside the
+  window. A second defect: every gold source returned closes only, so the card's
+  **Intraday high** column was permanently `—` and the true intraday record
+  ($5,602.22) could never appear.
+- **Fix (`dashboard/sources.py`, `drawdown.py`, `app.py`, `demo.py`, `README.md`,
+  `handoff.md`, `tests/test_drawdowns.py`):**
+  - New `sources.gold_drawdown_history()` dedicated cascade: Yahoo `GC=F`
+    (`period1=0&period2=<now>&interval=1d`, maximum available daily OHLC) →
+    Stooq `xauusd` daily OHLC (`Date,Open,High,Low,Close,Volume`) → CoinGecko
+    PAX Gold daily closes (up to 365 days). Returns `(rows, source)` with
+    `(date, close, high)` rows where available.
+  - Factored the index cascade's Yahoo full-history request into
+    `_yahoo_chart_ohlc_history()` and reused it for gold; added
+    `_parse_stooq_csv_ohlc()` and an `ohlc=True` mode on `_stooq_raw_history()`.
+  - Raised `_coingecko_history`'s cap from 90 to 365 days (CoinGecko's free API
+    maximum) and `drawdown.GOLD_HISTORY_DAYS` from 365 to 3650, with each
+    provider clamping to its own maximum.
+  - `app.fetch_gold_drawdown` now calls `backend.gold_drawdown_history()` and
+    tags items with `history_kind="gold-deep-ohlc"`; `warm_all()` refreshes
+    pre-upgrade gold entries immediately so the old 4,672.31 cache value does not
+    linger for the hourly TTL after deployment.
+  - `--doctor` §[12/12] gained a `drawdown cascade gold` probe; demo mode now
+    generates a deterministic January 2026 record run-up (~$5,591 close /
+    ~$5,625 intraday high) so offline previews show the corrected card.
+- **Verification:** `py_compile`, **278/278** Python unit tests, **22/22**
+  `test_auto_update.sh` assertions, and an `ECON_DEMO=1` smoke check of
+  `/drawdowns` + `/api/drawdowns` showing Gold **Intraday high 5,624.64** and
+  **Closing high 5,591.09**, both dated **2026-01-28**, with drawdowns of
+  −21.51% and −21.04%. After merging to `main`, verify on the LXC with
+  `python3 /opt/econ/dashboard/sources.py --doctor` §[12/12] and
+  `curl -s localhost:8080/api/drawdowns | python3 -m json.tool`; the gold
+  `close_peak` should be ~5,400–5,600 (depending on whether Yahoo, Stooq or
+  CoinGecko serves), not ~4,672.
