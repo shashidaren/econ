@@ -14,7 +14,10 @@ INDICES = (
 GOLD_NAME = "Gold"
 GOLD_SYMBOL = "xauusd"
 GOLD_GRAMS_PER_TROY_OUNCE = 31.1034768
-GOLD_HISTORY_DAYS = 365
+# Desired lookback for the gold drawdown peak (~10 years). Each provider caps
+# this to its own maximum: Yahoo `GC=F` returns its full daily history, Stooq
+# serves deep history, and CoinGecko's free API stops at 365 daily points.
+GOLD_HISTORY_DAYS = 3650
 TTL = 60 * 60
 QUOTE_TTL = 5 * 60
 

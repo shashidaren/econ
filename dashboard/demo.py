@@ -288,6 +288,26 @@ def index_drawdown_history(yahoo_symbol, fred_symbol):
     return ohlc, "DEMO synthetic history (daily OHLC)"
 
 
+def gold_drawdown_history():
+    """Synthetic gold OHLC history ending today, with the Jan-2026 record run-up.
+
+    Mirrors the live cascade's row contract: `(date, close, high)` so the demo
+    card shows both the intraday record (~$5.6k) and the closing high.
+    """
+    today = date.today()
+    n = 365
+    rows = []
+    for i in range(n):
+        d = today - timedelta(days=n - 1 - i)
+        t = i / max(1, n - 1)
+        base = 4050.0 * (1.0 + 0.09 * t)
+        spike = 1475.0 * math.exp(-((d - date(2026, 1, 28)).days ** 2) / 30.0)
+        close = base + spike
+        high = close * (1.002 + 0.002 * ((i * 7) % 4))
+        rows.append((d.isoformat(), round(close, 4), round(high, 4)))
+    return rows, "DEMO synthetic history (daily OHLC)"
+
+
 def index_quotes_batch(symbols=None, *, now=None):
     import drawdown
     import sources

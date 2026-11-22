@@ -733,6 +733,56 @@ def _parse_chart_result_ohlc(result) -> list[tuple[str, float, float | None]]:
     return [(d, close, high) for d, (close, high) in sorted(out.items())]
 
 
+def _yahoo_chart_ohlc_history(ysym: str):
+    """Yahoo v8 chart with the maximum available daily OHLC history.
+
+    `range=max` is silently coerced by Yahoo to monthly (`1mo`) bars, which
+    distorts peaks and fails the daily freshness gate, so drawdown requests
+    always use `period1=0&period2=<now>&interval=1d` and reject non-daily
+    granularity. Shared by the index and gold drawdown cascades.
+    """
+    if not provider_available("yahoo"):
+        raise RuntimeError("yahoo: cooling down after recent 429/failures")
+    enc = urllib.parse.quote(ysym, safe="")
+    headers = _yahoo_headers()
+    _yahoo_pace()
+    crumb = _yahoo_session_crumb()
+    crumb_param = f"&crumb={urllib.parse.quote(crumb, safe='')}" if crumb else ""
+    now_ts = int(time.time()) + 60
+    last_err = None
+    tried = 0
+    for host in ("query2.finance.yahoo.com", "query1.finance.yahoo.com"):
+        hkey = f"yahoo:{host}"
+        if not provider_available(hkey):
+            continue
+        tried += 1
+        url = (
+            f"https://{host}/v8/finance/chart/{enc}"
+            f"?period1=0&period2={now_ts}&interval=1d&includePrePost=false{crumb_param}"
+        )
+        try:
+            data = _get_json(url, timeout=12, headers=headers)
+            rows = _parse_chart_result_ohlc(
+                ((data.get("chart") or {}).get("result") or [None])[0]
+            )
+            if rows:
+                note_provider_ok("yahoo")
+                note_provider_ok(hkey)
+                return rows
+            last_err = last_err or RuntimeError("empty response")
+        except Exception as exc:
+            last_err = exc
+            unreachable, limited = _classify(exc)
+            if limited:
+                # 429 is per-IP: back off on the whole provider, skip host 2.
+                note_provider_failure("yahoo", exc, rate_limited=True)
+                break
+            note_provider_failure(hkey, exc, unreachable=unreachable)
+    if last_err is None:
+        last_err = RuntimeError(f"all yahoo hosts cooling down ({tried} tried)")
+    raise RuntimeError(f"yahoo({ysym}): {last_err}")
+
+
 # Vendor mappings for `/drawdowns` histories and 5-minute live quote overlays.
 # Note: Yahoo `range=max` coerces daily intervals to monthly (`1mo`), so Yahoo
 # drawdown requests MUST use `period1=0&period2=<now>&interval=1d`. When Yahoo
@@ -1107,36 +1157,12 @@ def index_drawdown_history(yahoo_symbol: str, fred_symbol: str | None):
     spec = DRAWDOWN_VENDOR_MAP.get(yahoo_symbol) or {}
 
     if provider_available("yahoo"):
-        enc = urllib.parse.quote(yahoo_symbol, safe="")
-        headers = _yahoo_headers()
-        _yahoo_pace()
-        crumb = _yahoo_session_crumb()
-        crumb_param = f"&crumb={urllib.parse.quote(crumb, safe='')}" if crumb else ""
-        now_ts = int(time.time()) + 60
-        for host in ("query2.finance.yahoo.com", "query1.finance.yahoo.com"):
-            hkey = f"yahoo:{host}"
-            if not provider_available(hkey):
-                continue
-            try:
-                url = (
-                    f"https://{host}/v8/finance/chart/{enc}"
-                    f"?period1=0&period2={now_ts}&interval=1d&includePrePost=false{crumb_param}"
-                )
-                data = _get_json(url, timeout=12, headers=headers)
-                rows = _parse_chart_result_ohlc(
-                    ((data.get("chart") or {}).get("result") or [None])[0]
-                )
-                drawdown.from_history(yahoo_symbol, rows, "Yahoo")
-                note_provider_ok("yahoo")
-                note_provider_ok(hkey)
-                return rows, f"Yahoo Finance ({yahoo_symbol}, maximum available daily history)"
-            except Exception as exc:
-                errors.append(str(exc))
-                unreachable, limited = _classify(exc)
-                if limited:
-                    note_provider_failure("yahoo", exc, rate_limited=True)
-                    break
-                note_provider_failure(hkey, exc, unreachable=unreachable)
+        try:
+            rows = _yahoo_chart_ohlc_history(yahoo_symbol)
+            drawdown.from_history(yahoo_symbol, rows, "Yahoo")
+            return rows, f"Yahoo Finance ({yahoo_symbol}, maximum available daily history)"
+        except Exception as exc:
+            errors.append(str(exc))
     else:
         errors.append("Yahoo cooling down")
 
@@ -1185,6 +1211,53 @@ def index_drawdown_history(yahoo_symbol: str, fred_symbol: str | None):
             errors.append(str(exc))
 
     raise RuntimeError("index history unavailable: " + "; ".join(errors)[:300])
+
+
+def gold_drawdown_history():
+    """Multi-source daily gold history for `/drawdowns` (USD per troy ounce).
+
+    Cascade:
+      1. Yahoo Finance v8 chart `GC=F` (`period1=0&period2=<now>&interval=1d`) —
+         maximum available daily OHLC history, including the intraday record.
+      2. Stooq `xauusd` daily CSV (`Date,Open,High,Low,Close,Volume`) — OHLC.
+      3. CoinGecko PAX Gold daily closes — close-only, up to 365 days.
+
+    Returns `(rows, source)`; rows are `(date, close)` or `(date, close, high)`.
+    This exists because the board's generic quote cascade (`stooq_history`)
+    is close-only and its last-resort CoinGecko provider is capped at 90 days:
+    with Yahoo 429'd and Stooq blocked on the LXC, the gold card searched only
+    ~3 months of closes and reported ~4,672 as the peak, missing the January
+    2026 all-time high (~$5,590). A drawdown must search the deepest history
+    each source offers.
+    """
+    import drawdown
+
+    errors = []
+
+    try:
+        rows = _yahoo_chart_ohlc_history(YAHOO_MAP[drawdown.GOLD_SYMBOL])
+        drawdown.from_history(drawdown.GOLD_NAME, rows, "Yahoo")
+        return rows, "Yahoo Finance (GC=F, maximum available daily OHLC history)"
+    except Exception as exc:
+        errors.append(f"yahoo: {exc}")
+
+    try:
+        rows = _stooq_raw_history(
+            drawdown.GOLD_SYMBOL, days=drawdown.GOLD_HISTORY_DAYS, ohlc=True)
+        drawdown.from_history(drawdown.GOLD_NAME, rows, "Stooq")
+        return rows, "Stooq (xauusd, daily OHLC history)"
+    except Exception as exc:
+        errors.append(f"stooq: {exc}")
+
+    try:
+        rows = _coingecko_history(
+            drawdown.GOLD_SYMBOL, days=drawdown.GOLD_HISTORY_DAYS)
+        drawdown.from_history(drawdown.GOLD_NAME, rows, "CoinGecko")
+        return rows, "CoinGecko (PAX Gold, daily closes up to 365 days)"
+    except Exception as exc:
+        errors.append(f"coingecko: {exc}")
+
+    raise RuntimeError("gold history unavailable: " + "; ".join(errors)[:300])
 
 
 def _yahoo_spark_batch(symbols, days: int = 150, *, include_volume: bool = False) -> dict[str, list]:
@@ -1329,6 +1402,33 @@ def _parse_stooq_csv(text: str):
     return out
 
 
+def _parse_stooq_csv_ohlc(text: str):
+    """Yield (date_str, close, high) from Stooq's Date,Open,High,Low,Close,Volume CSV.
+
+    Used by the drawdown tab: the daily `high` is required for the intraday
+    record, which closing-only feeds (CoinGecko, FRED) can never supply.
+    """
+    out = []
+    for row in csv.DictReader(io.StringIO(text)):
+        try:
+            d = (row.get("Date") or "").strip()
+            close = float(row["Close"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if not d or close <= 0 or not math.isfinite(close):
+            continue
+        high = None
+        try:
+            hv = float(row.get("High") or "")
+            if hv > 0 and math.isfinite(hv):
+                high = round(max(hv, close), 4)
+        except (TypeError, ValueError, OverflowError):
+            high = None
+        out.append((d, round(close, 4), high))
+    out.sort(key=lambda x: x[0])
+    return out
+
+
 def _parse_stooq_csv_with_volume(text: str):
     """Yield (date_str, close, volume) for a Stooq stock-history CSV."""
     out = []
@@ -1351,12 +1451,13 @@ def _parse_stooq_csv_with_volume(text: str):
     return out
 
 
-def _stooq_raw_history(symbol: str, days: int = 150):
+def _stooq_raw_history(symbol: str, days: int = 150, *, ohlc: bool = False):
     """Try Stooq .com / .pl CSV endpoints (https, plus http as a last resort).
 
     Each host gets its own circuit breaker: on the LXC, Cloudflare/egress issues
     make stooq time out at TCP level, and retrying it for all 15 symbols is what
-    used to add ~45 s per card.
+    used to add ~45 s per card. `ohlc=True` returns `(date, close, high)` rows
+    for the drawdown tab instead of the `(date, close)` quote contract.
     """
     d1 = (date.today() - timedelta(days=int(days * 1.6))).strftime("%Y%m%d")
     d2 = date.today().strftime("%Y%m%d")
@@ -1373,7 +1474,8 @@ def _stooq_raw_history(symbol: str, days: int = 150):
             url = f"{scheme}://{domain}/q/d/l/?s={enc}&d1={d1}&d2={d2}&i=d"
             try:
                 text = _get(url, timeout=6, connect_timeout=3)
-                hist = _parse_stooq_csv(text)
+                hist = (_parse_stooq_csv_ohlc(text) if ohlc
+                        else _parse_stooq_csv(text))
                 if hist:
                     note_provider_ok(key)
                     return hist[-days:]
@@ -1421,7 +1523,13 @@ def _fred_quote_history(symbol: str, days: int = 150):
 
 
 def _coingecko_history(symbol: str, days: int = 90):
-    """Tokenised-metal fallback (PAXG for gold, KAG for silver)."""
+    """Tokenised-metal fallback (PAXG for gold, KAG for silver).
+
+    CoinGecko's free `market_chart` endpoint serves at most 365 daily points;
+    `days` is clamped to that, never to the 90-day chart window this function
+    originally used, because a drawdown peak needs the deepest history the
+    provider has (see `gold_drawdown_history`).
+    """
     coin = COINGECKO_MAP.get(symbol)
     if not coin:
         raise RuntimeError(f"coingecko: unmapped symbol {symbol}")
@@ -1429,7 +1537,7 @@ def _coingecko_history(symbol: str, days: int = 90):
         raise RuntimeError("coingecko: cooling down after recent failures")
     url = (
         f"https://api.coingecko.com/api/v3/coins/{coin}/market_chart"
-        f"?vs_currency=usd&days={min(days, 90)}&interval=daily"
+        f"?vs_currency=usd&days={min(max(days, 1), 365)}&interval=daily"
     )
     try:
         j = _get_json(url, timeout=10)
@@ -4252,6 +4360,12 @@ def _doctor_drawdowns(run_checks):
         rows, src = index_drawdown_history(ysym, fsym)
         return f"{src}, {len(rows)} rows, last {rows[-1][0]} = {rows[-1][1]}"
 
+    def cascade_gold():
+        rows, src = gold_drawdown_history()
+        last = rows[-1]
+        high_txt = f" (high={last[2]})" if len(last) > 2 and last[2] is not None else ""
+        return f"{src}, {len(rows)} rows, last {last[0]} = {last[1]}{high_txt}"
+
     def cascade_quotes():
         out = index_quotes_batch()
         items = out.get("items") or {}
@@ -4278,6 +4392,7 @@ def _doctor_drawdowns(run_checks):
         ("sina index quotes", probe_index_quotes),
         ("drawdown cascade ^GSPC", lambda: cascade_hist("^GSPC", "SP500")),
         ("drawdown cascade MSCI", lambda: cascade_hist("^990100-USD-STRD", None)),
+        ("drawdown cascade gold", cascade_gold),
         ("index quote cascade", cascade_quotes),
     ], width=28)
 
@@ -4492,7 +4607,7 @@ if __name__ == "__main__":
         print("\n[11/12] US stock delayed quotes (Stocks tab; Sina -> Nasdaq -> Tencent, PFE probe)")
         _doctor_stock_quotes(_run_checks)
 
-        print("\n[12/12] Index drawdowns & live index quotes (Drawdowns tab; Sina -> Nasdaq -> Tencent -> MSCI -> FRED)")
+        print("\n[12/12] Index drawdowns & live index quotes (Drawdowns tab; Sina -> Nasdaq -> Tencent -> MSCI -> FRED; gold: Yahoo -> Stooq -> CoinGecko)")
         _doctor_drawdowns(_run_checks)
 
         print("\nProvider breakers after the probe:")
