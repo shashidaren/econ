@@ -21,7 +21,7 @@ central-bank policy rates, and the US yield curve (recession indicator).
 | Server IP | `192.168.0.149` (LAN only) |
 | Access | root via SSH; web UI on LAN |
 | Repo | `shashidaren/econ` (this repo) |
-| Working branch | `arena/62c27993-econ` (branched from `main` at `343a3ea`). Index drawdown tab; D21 cron deploys `main` only. |
+| Working branch | `arena/37156a56-econ` (branched from `main` at `b32cf2c`). Inflation-meter fallback fix; D21 cron deploys `main` only. |
 | Deploy model | server does `git fetch --all && git reset --hard origin/main && ./install.sh` — **now also automatic** (D21) |
 | Unattended updates | **`/etc/cron.d/econ-update`** → `root /opt/econ/tools/auto_update.sh` every **30 min** (schedule set at install time via `ECON_UPDATE_SCHEDULE='0 * * * *' ./install.sh`), log `/var/log/econ-update.log`, lock `/var/lock/econ-update.lock`. Installed by `install.sh` on every run; removed by `uninstall.sh` or `rm -f /etc/cron.d/econ-update` |
 | App dir on server | `/opt/econ` |
@@ -230,6 +230,7 @@ Preview (no network needed): `ECON_DEMO=1 python3 dashboard/app.py` → sample d
 
 ## 6. Current status
 
+- [x] **Inflation-meter fallback fixed on `arena/37156a56-econ` (2026-11-28) — merge pending, live-verify owner-side.** The `/summary` meter no longer falls back to `cpi[0]` (the highest-inflation country, because the World Bank list is sorted by value); it uses the **US** row only, labels it `US CPI · <year>`, and explains that the breakeven did not load. The gauge prints the real number (8.0% stays 8.0%, not a clamped 5.0%) and its colour bands now match the caption (green <2, amber 2–3, red >3). Demo annual series are labelled from a fixed 2014 → 2025 range, fixing the one-year shift that put the US 8.0% spike in 2021. **287/287** offline tests pass (8 new in `tests/test_inflation_meter.py`).
 - [ ] **Drawdowns live-reconciliation upgrade implemented on `arena/bcd63a4d-econ` (D31, 2026-11-21) — ready for merge & LXC verification.** Fixes `/drawdowns` mismatch against live market numbers: (1) replaced Yahoo `range=max&interval=1d` (which Yahoo silently coerces to `1mo` monthly bars) with `period1=0&period2=<now>&interval=1d` + strict `dataGranularity == "1d"` check; (2) added multi-source daily OHLC cascade (`Sina .INX/.NDX/.DJI` → `Nasdaq NDX` → `Tencent raw kline us.INX/us.NDX/us.DJI` → `FRED`) plus official MSCI `getLevelDataForGraph` (`990100 USD STRD`, closes since 1997) when Yahoo 429s on the LXC; (3) added 5-min `drawdown_quotes` live/~15m index quote overlay (`Sina gb_$inx,gb_$ndx,gb_$dji` → `Nasdaq` → `Tencent` → `Yahoo`, `ECON_DRAWDOWN_QUOTES=1`); (4) side-by-side **Intraday high** and **Closing high** peaks & drawdowns on `/drawdowns` and `/api/drawdowns`, immediate post-upgrade refresh of legacy close-only `cache.json` entries, breaker reset on `?refresh=1`, and `--doctor` §[12/12] (`_doctor_drawdowns`). **258/258** Python tests + **22/22** updater shell assertions pass.
 - [x] **Index drawdown tab implemented** on `arena/62c27993-econ` (merged PR #24 & PR #25): four cards, per-index cache, Yahoo max-history and FRED fallback for US indices, `/api/drawdowns`, offline demo and tests.
 
@@ -361,6 +362,15 @@ Preview (no network needed): `ECON_DEMO=1 python3 dashboard/app.py` → sample d
 7. **Recovery if a commit breaks the dashboard (cron now auto-applies bad commits):** `rm -f /etc/cron.d/econ-update && cd /opt/econ && git reset --hard <last-good-sha> && ./install.sh` — remove the cron file first so it does not re-apply the bad commit, then restore and re-run `install.sh` to re-enable the cron entry. Logs: `/var/log/econ-update.log`, `journalctl -u econ-dashboard`. `install.sh`'s import smoke test leaves the running service on the old code if Python imports break.
 
 ## 9. Session log
+
+### 2026-11-28 — Inflation meter: show the US series, never clamp the print
+
+- **Ask:** "review the inflation meter and the values, the US seems to be reporting a much higher value."
+- **Root cause found:** the `/summary` meter used `cpi[0]` as its fallback when the 10y breakeven (`T10YIE`) did not load. `sources.worldbank_indicator()` returns countries **sorted by value**, so `cpi[0]` is whichever country has the *highest* inflation — in the demo that was **India 4.9%**, not the US 2.9% — and the gauge labelled it just "CPI" with a caption that still said the needle was the 10y breakeven. A reader reasonably reads that panel as the US, so the meter could appear to report a much higher US number than the breakeven (~2.3%) and than the US CPI row. The fallback also mixed two different measures (a daily market-implied 10y forward rate vs. a trailing annual CPI print).
+- **Fix (`dashboard/render.py`):** new `us_cpi_row()` picks the US row by `code` (`US`/`USA`) or name; the meter now uses the breakeven when loaded and otherwise the **US** CPI row, labelled `US CPI · <year>`, with a note saying the breakeven did not load and that annual CPI is a trailing 12-month change. `inflation_gauge()` now prints the **true** input and only clamps the needle: an 8.0% print reads "8.00% … above the 0–5% scale" instead of being silently shown as 5.00%. Colour bands now match the caption exactly (green <2%, amber 2–3%, red >3%).
+- **Demo (`dashboard/demo.py`):** the synthetic annual paths are now labelled from a fixed first year (2014 → 2025) instead of `date.today() - 2`, which had shifted the whole Economy 101 inflation chart by one year and printed the **8.0% US 2022 spike in 2021**. Demo values are still synthetic and are not live evidence.
+- **Tests:** new `tests/test_inflation_meter.py` (8 cases) covers the US-row fallback with India sorted first, the "8% is not 5%" clamp, labels/notes, missing data, and the demo year mapping. Full suite **287/287** passes.
+- **Not changed:** the board's macro CPI bars, the briefing's `US CPI` card, and the Economy 101 tab already select the US row by code/name and show the observation year, so their numbers were correct. Live-server verification is still owner-side (the sandbox cannot reach FRED or the World Bank): on `/summary`, a caption of `US 10y breakeven` should read ~2.2–2.5%; a caption of `US CPI · 2024` means the breakeven failed to load and the number is the annual print.
 
 ### 2026-11-20 — Index drawdown tab
 

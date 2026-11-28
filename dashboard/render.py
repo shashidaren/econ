@@ -641,30 +641,64 @@ def _section_heading(title, source, section, sections):
             f'{_status_badge(meta)}</span></h2>')
 
 
+def us_cpi_row(rows):
+    """The United States row from a World Bank CPI list, or None.
+
+    ``sources.worldbank_indicator`` returns countries sorted by value, so
+    ``rows[0]`` is whichever country has the *highest* inflation — never assume
+    the first row is the US.
+    """
+    for row in rows or []:
+        if not isinstance(row, dict):
+            continue
+        code = str(row.get("code") or "").strip().upper()
+        name = " ".join(str(row.get("name") or "").split()).lower()
+        if code in ("US", "USA") or name.startswith("united states"):
+            return row
+    return None
+
+
 def inflation_gauge(value, label="10y breakeven"):
-    """Semicircle meter, 0-5%. Needle is market-expected inflation, not a forecast."""
+    """Semicircle meter, 0-5%. Needle is market-expected inflation, not a forecast.
+
+    The printed number is always the true input, even when it sits outside the
+    drawn 0-5% arc; only the needle is clamped, and an out-of-range reading is
+    labelled as such instead of being quietly displayed as 5%.
+    """
     if value is None:
         return "<p>Inflation meter needs a breakeven or CPI print.</p>"
     import math
-    v = max(0.0, min(5.0, float(value)))
-    ang = math.radians(180 - (v / 5.0) * 180)
+    try:
+        raw = float(value)
+    except (TypeError, ValueError):
+        return "<p>Inflation meter needs a numeric breakeven or CPI print.</p>"
+    if math.isnan(raw) or math.isinf(raw):
+        return "<p>Inflation meter needs a numeric breakeven or CPI print.</p>"
+    top = 5.0
+    v = max(0.0, min(top, raw))
+    ang = math.radians(180 - (v / top) * 180)
     cx, cy, r = 110, 108, 78
     nx = cx + r * math.cos(ang)
     ny = cy - r * math.sin(ang)
-    word = "below target" if v < 2 else ("near a 2% anchor" if v < 3 else "hot")
+    word = "below target" if raw < 2 else ("near a 2% anchor" if raw < 3 else "hot")
+    if raw > top:
+        word += f" · above the 0–{top:.0f}% scale"
+    elif raw < 0:
+        word += f" · below the 0–{top:.0f}% scale"
     return (
-        f'<svg class="gauge" viewBox="0 0 220 130" role="img" aria-label="inflation meter {v:.2f} percent">'
+        f'<svg class="gauge" viewBox="0 0 220 130" role="img" '
+        f'aria-label="inflation meter {raw:.2f} percent">'
         f'<path d="M32 108 A78 78 0 0 1 188 108" fill="none" stroke="#232a38" stroke-width="14" stroke-linecap="round"/>'
-        f'<path d="M32 108 A78 78 0 0 1 94 36" fill="none" stroke="#26a69a" stroke-width="14"/>'
-        f'<path d="M94 36 A78 78 0 0 1 126 36" fill="none" stroke="#e5a50a" stroke-width="14"/>'
-        f'<path d="M126 36 A78 78 0 0 1 188 108" fill="none" stroke="#ef5350" stroke-width="14" stroke-linecap="round"/>'
+        f'<path d="M32 108 A78 78 0 0 1 86 34" fill="none" stroke="#26a69a" stroke-width="14"/>'
+        f'<path d="M86 34 A78 78 0 0 1 134 34" fill="none" stroke="#e5a50a" stroke-width="14"/>'
+        f'<path d="M134 34 A78 78 0 0 1 188 108" fill="none" stroke="#ef5350" stroke-width="14" stroke-linecap="round"/>'
         f'<line x1="{cx}" y1="{cy}" x2="{nx:.1f}" y2="{ny:.1f}" stroke="#e6e9f0" stroke-width="3" stroke-linecap="round"/>'
         f'<circle cx="{cx}" cy="{cy}" r="4" fill="#e6e9f0"/>'
         f'<text x="28" y="124" fill="#8b93a7" font-size="11">0</text>'
         f'<text x="100" y="22" fill="#8b93a7" font-size="11">2.5</text>'
         f'<text x="184" y="124" fill="#8b93a7" font-size="11">5%</text>'
-        f'<text x="110" y="78" fill="#e6e9f0" font-size="18" font-weight="700" text-anchor="middle">{v:.2f}%</text>'
-        f'<text x="110" y="96" fill="#8b93a7" font-size="11" text-anchor="middle">{esc(label)} · {word}</text>'
+        f'<text x="110" y="78" fill="#e6e9f0" font-size="18" font-weight="700" text-anchor="middle">{raw:.2f}%</text>'
+        f'<text x="110" y="96" fill="#8b93a7" font-size="11" text-anchor="middle">{esc(label)} · {esc(word)}</text>'
         f'</svg>'
     )
 
@@ -785,6 +819,29 @@ def build_summary_page(sections, *, demo=False, generated_at=None, refresh=300):
         rates.append(f"<li>10y real yield {real_v:.2f}%</li>")
     rates_html = "<ul>" + "".join(rates) + "</ul>" if rates else "<p>Rates not loaded.</p>"
 
+    # Inflation meter: the 10y breakeven (a US, market-implied, forward-looking
+    # number) when it loads. Only fall back to the *US* annual CPI row — the
+    # World Bank list is sorted by value, so its first row is usually another
+    # country, and an annual CPI print is a different measure from a breakeven.
+    us_cpi = us_cpi_row(cpi)
+    if be_v is not None:
+        meter_value, meter_label = be_v, "US 10y breakeven"
+        meter_note = ("Green under 2%, amber to 3%, red above. Needle is the US "
+                      "10y breakeven — the market's average expected inflation "
+                      "over the next decade. Not a forecast.")
+    elif us_cpi is not None and us_cpi.get("value") is not None:
+        meter_value = us_cpi.get("value")
+        meter_label = f"US CPI · {us_cpi.get('year') or '?'}"
+        meter_note = ("Green under 2%, amber to 3%, red above. The 10y breakeven "
+                      "did not load, so the needle is the US's latest annual CPI "
+                      "print — a trailing 12-month change, not the market's 10y "
+                      "expectation. Not a forecast.")
+    else:
+        meter_value, meter_label = None, "US 10y breakeven"
+        meter_note = ("Green under 2%, amber to 3%, red above. Needle is the US "
+                      "10y breakeven when loaded, else the US CPI print. "
+                      "Not a forecast.")
+
     cards = brief.get("cards") or []
     read = "".join(
         f"<li><b>{esc(c.get('label'))}</b> — {esc(c.get('value'))}. {esc(c.get('text'))}</li>"
@@ -828,8 +885,8 @@ def build_summary_page(sections, *, demo=False, generated_at=None, refresh=300):
   </section>
   <section>
     <h3>Inflation meter</h3>
-    {inflation_gauge(be_v if be_v is not None else (cpi[0]["value"] if cpi else None), "10y breakeven" if be_v is not None else "CPI")}
-    <p class="meta">Green under 2%, amber to 3%, red above. Needle is the 10y breakeven when loaded. Not a forecast.</p>
+    {inflation_gauge(meter_value, meter_label)}
+    <p class="meta">{esc(meter_note)}</p>
   </section>
   <section>
     <h3>Recession meter</h3>
