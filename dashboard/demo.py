@@ -179,7 +179,7 @@ def worldbank_indicator(country_codes, indicator: str):
     for name, c2, val in rows:
         if c2 in country_codes:
             out.append({"code": iso2_to3[c2], "name": name,
-                        "year": str(date.today().year - 2),
+                        "year": str(_DEMO_ANNUAL_LAST_YEAR),
                         "value": round(float(val), 2)})
     out.sort(key=lambda x: -x["value"])
     return out
@@ -208,13 +208,20 @@ _DEMO_ANNUAL = {
 }
 _DEMO_NAMES = {"US": "United States", "MY": "Malaysia"}
 
+# The synthetic annual paths above are fixed examples: the first value is
+# `_DEMO_ANNUAL_START_YEAR` and each following value is the next year. Labelling
+# them from `date.today()` drifts every January and would print, say, the 2022
+# US inflation spike under the wrong year on the chart.
+_DEMO_ANNUAL_START_YEAR = 2014
+_DEMO_ANNUAL_LAST_YEAR = _DEMO_ANNUAL_START_YEAR + max(
+    len(values) for paths in _DEMO_ANNUAL.values() for values in paths.values()) - 1
+
 
 def worldbank_history(country_codes, indicator: str, years: int = 12):
     codes = [str(c).upper() for c in country_codes or []]
     paths = _DEMO_ANNUAL.get(indicator)
     if not paths:
         raise RuntimeError(f"worldbank: no demo series for {indicator}")
-    last_year = date.today().year - 2
     out = {}
     for code in codes:
         values = paths.get(code)
@@ -222,8 +229,8 @@ def worldbank_history(country_codes, indicator: str, years: int = 12):
             out[code] = {"name": _DEMO_NAMES.get(code, code), "series": []}
             continue
         window = values[-max(2, int(years)):]
-        start = last_year - len(window) + 1
-        series = [[start + i, float(v)] for i, v in enumerate(window)]
+        first_year = _DEMO_ANNUAL_START_YEAR + len(values) - len(window)
+        series = [[first_year + i, float(v)] for i, v in enumerate(window)]
         out[code] = {"name": _DEMO_NAMES.get(code, code), "series": series}
     return out
 
